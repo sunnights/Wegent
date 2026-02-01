@@ -13,6 +13,7 @@ import { SloganDisplay } from './SloganDisplay'
 import { ChatInputCard } from '../input/ChatInputCard'
 import PipelineStageIndicator from './PipelineStageIndicator'
 import { ScrollToBottomIndicator } from './ScrollToBottomIndicator'
+import { RestoreTaskDialog } from './RestoreTaskDialog'
 import type { PipelineStageInfo } from '@/apis/tasks'
 import { useChatAreaState } from './useChatAreaState'
 import { useChatStreamHandlers } from './useChatStreamHandlers'
@@ -769,6 +770,17 @@ function ChatAreaContent({
           </div>
         )}
       </div>
+
+      {/* Restore Task Dialog - shown when trying to send message to expired task */}
+      <RestoreTaskDialog
+        open={streamHandlers.showRestoreDialog}
+        onOpenChange={open => {
+          if (!open) streamHandlers.closeRestoreDialog()
+        }}
+        restorableInfo={streamHandlers.restorableInfo}
+        pendingMessage={streamHandlers.restorePendingMessage}
+        onRestoreSuccess={streamHandlers.handleRestoreSuccess}
+      />
     </div>
   )
 }

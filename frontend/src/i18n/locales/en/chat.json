@@ -530,5 +530,17 @@
     "proceeding_to_stage": "Proceeding to stage: {{stage}}",
     "pipeline_completed": "Pipeline completed",
     "no_task_id": "No task ID available"
+  },
+  "restore": {
+    "title": "Task Expired",
+    "description": "This task has expired. Would you like to restore it to continue the conversation?",
+    "description_chat": "This chat task expired after 2 hours of inactivity.",
+    "description_code": "This code task expired after 24 hours of inactivity.",
+    "executor_rebuilding": "The execution environment has been cleaned up and will be rebuilt.",
+    "button": "Restore Task",
+    "restoring": "Restoring...",
+    "cancel": "Cancel",
+    "success": "Task restored successfully",
+    "failed": "Failed to restore task"
   }
 }

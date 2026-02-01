@@ -159,9 +159,25 @@ class TaskOperationsMixin:
             if (
                 datetime.now() - existing_task.updated_at
             ).total_seconds() > expire_hours * 3600:
+                # Check if task can be restored
+                restore_info = self._check_task_restorable(db, existing_task, task_id)
+                if restore_info:
+                    raise HTTPException(
+                        status_code=409,  # Conflict - task expired but can be restored
+                        detail={
+                            "code": "TASK_EXPIRED_RESTORABLE",
+                            "message": f"{task_type} task has expired but can be restored",
+                            "task_id": task_id,
+                            "task_type": task_type,  # "chat" or "code"
+                            "expire_hours": expire_hours,  # 2 or 24
+                            "executor_deleted": restore_info.get(
+                                "executor_deleted", False
+                            ),
+                        },
+                    )
                 raise HTTPException(
                     status_code=400,
-                    detail=f"{task_type} task has expired. You can only append tasks within {expire_hours} hours after last update.",
+                    detail=f"{task_type} task has expired and cannot be restored. You can only append tasks within {expire_hours} hours after last update.",
                 )
 
         # Get team reference
@@ -341,6 +357,178 @@ class TaskOperationsMixin:
                 db, user.id, KindType.TEAM, obj_in.team_namespace, obj_in.team_name
             )
         return None
+
+    def _check_task_restorable(
+        self, db: Session, task: TaskResource, task_id: int
+    ) -> Optional[Dict]:
+        """Check if an expired task can be restored.
+
+        A task can be restored if:
+        - Task status is not RUNNING or DELETE
+        - autoDeleteExecutor label is not set to "true"
+
+        Returns:
+            {"executor_deleted": bool} if task can be restored
+            None if task cannot be restored
+        """
+        task_crd = Task.model_validate(task.json)
+        task_status = task_crd.status.status if task_crd.status else "PENDING"
+
+        # Cannot restore running or deleted tasks
+        if task_status in ["RUNNING", "DELETE"]:
+            return None
+
+        # Cannot restore tasks with autoDeleteExecutor set
+        if (
+            task_crd.metadata.labels
+            and task_crd.metadata.labels.get("autoDeleteExecutor") == "true"
+        ):
+            return None
+
+        # Check if executor needs to be rebuilt
+        executor_deleted = self._check_executor_needs_rebuild(db, task_id)
+
+        return {"executor_deleted": executor_deleted}
+
+    def _check_executor_needs_rebuild(self, db: Session, task_id: int) -> bool:
+        """Check if executor container has been deleted and needs rebuild.
+
+        Looks at the latest subtask with executor_name to check executor_deleted_at.
+
+        Returns:
+            True if executor was deleted and needs rebuild
+            False if executor is still available
+        """
+        # Find the latest subtask with executor_name
+        latest_subtask = (
+            db.query(Subtask)
+            .filter(
+                Subtask.task_id == task_id,
+                Subtask.executor_name.isnot(None),
+            )
+            .order_by(Subtask.created_at.desc())
+            .first()
+        )
+
+        if not latest_subtask:
+            # No executor subtask found, may need rebuild
+            return True
+
+        # Check if executor was marked as deleted
+        return bool(latest_subtask.executor_deleted_at)
+
+    def restore_task(
+        self, db: Session, *, task_id: int, prompt: str, user: User
+    ) -> Dict[str, Any]:
+        """Restore an expired task to continue conversation.
+
+        This method:
+        1. Validates task ownership (owner or group member)
+        2. Checks if executor needs to be rebuilt (sets label)
+        3. Resets task status to PENDING
+        4. Creates subtasks for the new message
+        5. Dispatches task to executor_manager
+
+        Args:
+            db: Database session
+            task_id: ID of the task to restore
+            prompt: The new message from user
+            user: Current user
+
+        Returns:
+            Dict with success status, task_id, message, and needs_executor_rebuild flag
+
+        Raises:
+            HTTPException: If task not found, not authorized, or cannot be restored
+        """
+        # Find the task
+        task = (
+            db.query(TaskResource)
+            .filter(
+                TaskResource.id == task_id,
+                TaskResource.kind == "Task",
+                TaskResource.is_active.is_(True),
+            )
+            .first()
+        )
+
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # Check authorization (owner or group member)
+        from app.services.task_member_service import task_member_service
+
+        is_member = task_member_service.is_member(db, task_id, user.id)
+        if not is_member:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # Check if task can be restored
+        restore_info = self._check_task_restorable(db, task, task_id)
+        if not restore_info:
+            raise HTTPException(
+                status_code=400,
+                detail="Task cannot be restored. It may be running, deleted, or marked for executor deletion.",
+            )
+
+        needs_executor_rebuild = restore_info.get("executor_deleted", False)
+
+        # Parse task CRD
+        task_crd = Task.model_validate(task.json)
+
+        # If executor needs rebuild, set label to indicate this
+        if needs_executor_rebuild:
+            if task_crd.metadata.labels is None:
+                task_crd.metadata.labels = {}
+            task_crd.metadata.labels["executorNeedsRebuild"] = "true"
+
+        # Reset task status to PENDING
+        if task_crd.status:
+            task_crd.status.status = "PENDING"
+            task_crd.status.progress = 0
+            task_crd.status.updatedAt = datetime.now()
+
+        task.json = task_crd.model_dump(mode="json", exclude_none=True)
+        task.updated_at = datetime.now()
+        flag_modified(task, "json")
+
+        # Get team reference to create subtasks
+        team_name = task_crd.spec.teamRef.name
+        team_namespace = task_crd.spec.teamRef.namespace
+
+        # Get team for the task owner (use task.user_id for group chats)
+        team = kindReader.get_by_name_and_namespace(
+            db, task.user_id, KindType.TEAM, team_namespace, team_name
+        )
+
+        if not team:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Team '{team_name}' not found, it may be deleted or not shared",
+            )
+
+        # Create subtasks for the new message
+        create_subtasks(db, task, team, user.id, prompt)
+
+        db.commit()
+        db.refresh(task)
+
+        # Dispatch task to executor_manager
+        task_type = (
+            task_crd.metadata.labels
+            and task_crd.metadata.labels.get("taskType")
+            or "chat"
+        )
+        if task_type != "task":  # Skip dispatch for device tasks
+            from app.services.task_dispatcher import task_dispatcher
+
+            task_dispatcher.schedule_dispatch(task.id)
+
+        return {
+            "success": True,
+            "task_id": task_id,
+            "message": "Task restored successfully",
+            "needs_executor_rebuild": needs_executor_rebuild,
+        }
 
     def update_task(
         self, db: Session, *, task_id: int, obj_in: TaskUpdate, user_id: int

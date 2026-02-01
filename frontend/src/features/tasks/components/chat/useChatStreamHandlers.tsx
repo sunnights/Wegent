@@ -13,7 +13,7 @@ import { useTranslation } from '@/hooks/useTranslation'
 import { useUser } from '@/features/common/UserContext'
 import { useTraceAction } from '@/hooks/useTraceAction'
 import { parseError, getErrorDisplayMessage } from '@/utils/errorParser'
-import { taskApis } from '@/apis/tasks'
+import { taskApis, type RestorableTaskError } from '@/apis/tasks'
 import { isChatShell, teamRequiresWorkspace } from '../../service/messageService'
 import { Button } from '@/components/ui/button'
 import { DEFAULT_MODEL_NAME } from '../selector/ModelSelector'
@@ -115,6 +115,18 @@ export interface ChatStreamHandlers {
 
   // State
   isCancelling: boolean
+
+  // Restore task state
+  /** Whether the restore dialog is open */
+  showRestoreDialog: boolean
+  /** Info about the restorable task (from 409 error) */
+  restorableInfo: RestorableTaskError | null
+  /** Pending message that triggered the restore prompt */
+  restorePendingMessage: string
+  /** Close the restore dialog */
+  closeRestoreDialog: () => void
+  /** Handle successful task restoration */
+  handleRestoreSuccess: (taskId: number) => void
 }
 
 /**
@@ -182,6 +194,11 @@ export function useChatStreamHandlers({
   const [pendingTaskId, setPendingTaskId] = useState<number | null>(null)
   const [localPendingMessage, setLocalPendingMessage] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
+
+  // Restore task state
+  const [showRestoreDialog, setShowRestoreDialog] = useState(false)
+  const [restorableInfo, setRestorableInfo] = useState<RestorableTaskError | null>(null)
+  const [restorePendingMessage, setRestorePendingMessage] = useState('')
 
   // Refs
   const lastFailedMessageRef = useRef<string | null>(null)
@@ -319,6 +336,17 @@ export function useChatStreamHandlers({
   const handleSendError = useCallback(
     (error: Error, message: string) => {
       resetStreamingState()
+
+      // Check if this is a restorable task error (409 Conflict)
+      const restorable = (error as Error & { restorable?: RestorableTaskError }).restorable
+      if (restorable && restorable.code === 'TASK_EXPIRED_RESTORABLE') {
+        // Show restore dialog instead of error toast
+        setRestorableInfo(restorable)
+        setRestorePendingMessage(message)
+        setShowRestoreDialog(true)
+        return
+      }
+
       const parsedError = parseError(error)
       lastFailedMessageRef.current = message
 
@@ -983,6 +1011,30 @@ export function useChatStreamHandlers({
     }
   }, [selectedTaskDetail?.id, isCancelling, toast, refreshTasks, refreshSelectedTaskDetail])
 
+  // Restore dialog handlers
+  const closeRestoreDialog = useCallback(() => {
+    setShowRestoreDialog(false)
+    setRestorableInfo(null)
+    setRestorePendingMessage('')
+  }, [])
+
+  const handleRestoreSuccess = useCallback(
+    (taskId: number) => {
+      // Close dialog
+      closeRestoreDialog()
+
+      // Refresh task list and details
+      refreshTasks()
+      refreshSelectedTaskDetail()
+
+      // Navigate to the restored task
+      const params = new URLSearchParams(Array.from(searchParams.entries()))
+      params.set('taskId', String(taskId))
+      router.push(`?${params.toString()}`)
+    },
+    [closeRestoreDialog, refreshTasks, refreshSelectedTaskDetail, router, searchParams]
+  )
+
   return {
     // Stream state
     pendingTaskId,
@@ -1006,6 +1058,13 @@ export function useChatStreamHandlers({
 
     // State
     isCancelling,
+
+    // Restore task state
+    showRestoreDialog,
+    restorableInfo,
+    restorePendingMessage,
+    closeRestoreDialog,
+    handleRestoreSuccess,
   }
 }
 

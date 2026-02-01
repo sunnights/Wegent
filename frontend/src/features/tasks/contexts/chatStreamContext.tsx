@@ -706,6 +706,17 @@ export function ChatStreamProvider({ children }: { children: ReactNode }) {
         }
 
         if (response.error) {
+          // Check for 409 Conflict - task expired but can be restored
+          if (response.status_code === 409 && response.detail?.code === 'TASK_EXPIRED_RESTORABLE') {
+            const restorableError = new Error(response.detail.message || 'Task expired')
+            // Attach restorable info to the error for upstream handling
+            ;(restorableError as Error & { restorable: typeof response.detail }).restorable =
+              response.detail
+            machine.updateUserMessage(userMessageId, { status: 'error', error: response.error })
+            options?.onError?.(restorableError)
+            throw restorableError
+          }
+
           const error = new Error(response.error)
           machine.updateUserMessage(userMessageId, { status: 'error', error: response.error })
           options?.onError?.(error)

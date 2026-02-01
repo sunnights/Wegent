@@ -500,6 +500,17 @@ export interface ChatSendAck {
   subtask_id?: number
   message_id?: number // Message ID for the user's subtask
   error?: string
+  // HTTP status code for special error handling (e.g., 409 for restorable tasks)
+  status_code?: number
+  // Detailed error info (e.g., for 409 TASK_EXPIRED_RESTORABLE)
+  detail?: {
+    code?: string
+    message?: string
+    task_id?: number
+    task_type?: 'chat' | 'code'
+    expire_hours?: number
+    executor_deleted?: boolean
+  }
 }
 
 export interface TaskJoinAck {

@@ -508,5 +508,17 @@
     "proceeding_to_stage": "正在进入阶段: {{stage}}",
     "pipeline_completed": "流水线已完成",
     "no_task_id": "没有可用的任务 ID"
+  },
+  "restore": {
+    "title": "任务已过期",
+    "description": "该任务已过期。是否恢复任务以继续对话？",
+    "description_chat": "该聊天任务因超过 2 小时未活动已过期。",
+    "description_code": "该代码任务因超过 24 小时未活动已过期。",
+    "executor_rebuilding": "执行环境已被清理，将为您重新创建。",
+    "button": "恢复任务",
+    "restoring": "恢复中...",
+    "cancel": "取消",
+    "success": "任务恢复成功",
+    "failed": "恢复任务失败"
   }
 }

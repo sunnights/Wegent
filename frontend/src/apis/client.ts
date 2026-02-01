@@ -12,11 +12,13 @@ import { getToken, removeToken } from './user'
 // Custom error class for API errors with status code
 export class ApiError extends Error {
   status: number
+  detail?: unknown // Structured error detail (for 409 TASK_EXPIRED_RESTORABLE, etc.)
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, detail?: unknown) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -95,17 +97,22 @@ class APIClient {
       if (!response.ok) {
         const errorText = await response.text()
         let errorMsg = errorText
+        let errorDetail: unknown = undefined
         try {
           // Try to parse as JSON and extract detail field
           const json = JSON.parse(errorText)
           if (json && typeof json.detail === 'string') {
             errorMsg = json.detail
+          } else if (json && typeof json.detail === 'object') {
+            // Structured detail (e.g., 409 TASK_EXPIRED_RESTORABLE)
+            errorDetail = json.detail
+            errorMsg = json.detail.message || errorText
           }
         } catch {
           // Not JSON, use original text directly
         }
         // Throw ApiError with status code for better error handling
-        throw new ApiError(errorMsg, response.status)
+        throw new ApiError(errorMsg, response.status, errorDetail)
       }
 
       // Handle 204 No Content responses

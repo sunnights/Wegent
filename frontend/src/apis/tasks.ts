@@ -213,6 +213,28 @@ export interface PipelineStageInfo {
   }>
 }
 
+// Restore task types
+export interface RestoreTaskRequest {
+  prompt: string // The message to send after restoration
+}
+
+export interface RestoreTaskResponse {
+  success: boolean
+  task_id: number
+  message: string
+  needs_executor_rebuild: boolean // Whether executor needs to be rebuilt
+}
+
+// Restore task error detail (HTTP 409 response)
+export interface RestorableTaskError {
+  code: 'TASK_EXPIRED_RESTORABLE'
+  message: string
+  task_id: number
+  task_type: 'chat' | 'code'
+  expire_hours: number
+  executor_deleted: boolean
+}
+
 // Task Services
 
 export const taskApis = {
@@ -433,5 +455,17 @@ export const taskApis = {
    */
   getPipelineStageInfo: async (taskId: number): Promise<PipelineStageInfo> => {
     return apiClient.get(`/tasks/${taskId}/pipeline-stage-info`)
+  },
+
+  /**
+   * Restore an expired task to continue conversation
+   * @param taskId - Task ID
+   * @param request - Request with the prompt to send after restoration
+   */
+  restoreTask: async (
+    taskId: number,
+    request: RestoreTaskRequest
+  ): Promise<RestoreTaskResponse> => {
+    return apiClient.post(`/tasks/${taskId}/restore`, request)
   },
 }

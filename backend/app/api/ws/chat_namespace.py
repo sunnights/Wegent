@@ -809,6 +809,23 @@ class ChatNamespace(socketio.AsyncNamespace):
                 "message_id": user_subtask.message_id if user_subtask else None,
             }
 
+        except HTTPException as http_exc:
+            # Handle HTTPException specially to preserve status code and detail
+            logger.exception(f"[WS] chat:send HTTPException: {http_exc}")
+            error_response = {"error": str(http_exc.detail)}
+
+            # For 409 Conflict (task expired but revivable), include full detail
+            if http_exc.status_code == 409 and isinstance(http_exc.detail, dict):
+                error_response = {
+                    "error": http_exc.detail.get("message", "Task expired"),
+                    "status_code": 409,
+                    "detail": http_exc.detail,
+                }
+
+            logger.info(
+                f"[WS] chat:send returning HTTPException error response: {error_response}"
+            )
+            return error_response
         except Exception as e:
             logger.exception(f"[WS] chat:send exception: {e}")
             error_response = {"error": str(e)}

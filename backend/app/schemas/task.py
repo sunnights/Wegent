@@ -232,3 +232,18 @@ class TaskSkillsResponse(BaseModel):
     team_namespace: str = "default"
     skills: List[str] = []  # All bot skills (deduplicated)
     preload_skills: List[str] = []  # Skills to preload
+
+
+class RestoreTaskRequest(BaseModel):
+    """Request to restore an expired task"""
+
+    prompt: str  # The message the user wants to send
+
+
+class RestoreTaskResponse(BaseModel):
+    """Response for restore task operation"""
+
+    success: bool
+    task_id: int
+    message: str
+    needs_executor_rebuild: bool  # Whether executor needs to be rebuilt

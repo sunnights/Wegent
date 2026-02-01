@@ -32,6 +32,8 @@ from app.schemas.task import (
     ConfirmStageRequest,
     ConfirmStageResponse,
     PipelineStageInfo,
+    RestoreTaskRequest,
+    RestoreTaskResponse,
     TaskCreate,
     TaskDetail,
     TaskInDB,
@@ -270,6 +272,34 @@ async def cancel_task(
         task_id=task_id,
         user_id=current_user.id,
         background_task_runner=background_tasks.add_task,
+    )
+
+
+@router.post("/{task_id}/restore", response_model=RestoreTaskResponse)
+def restore_task(
+    request: RestoreTaskRequest,
+    task_id: int = Depends(with_task_telemetry),
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restore an expired task to continue conversation.
+
+    When a task expires (Chat: 2h, Code: 24h), the executor container is cleaned up.
+    This endpoint allows users to restore the task and continue the conversation.
+
+    If the executor was already deleted, a new one will be created automatically.
+
+    Args:
+        request: Contains the prompt (message) to send after restoration
+        task_id: Task ID
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        RestoreTaskResponse with success status and executor rebuild info
+    """
+    return task_kinds_service.restore_task(
+        db=db, task_id=task_id, prompt=request.prompt, user=current_user
     )
 
 
