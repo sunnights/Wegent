@@ -2,330 +2,227 @@
 
 ## 概述
 
-本文档描述了任务恢复功能，该功能允许用户在任务过期或执行器容器被清理后继续对话。
+任务恢复功能允许用户在任务过期或执行器容器被清理后继续对话，同时保留完整的会话上下文。
 
-## 问题描述
+## 问题背景
 
-在 Wegent 中，任务使用 Docker 容器（执行器）来处理 AI 对话。这些容器有生命周期：
+在 Wegent 中，任务使用 Docker 容器（执行器）来处理 AI 对话。这些容器有生命周期限制：
 
-1. **过期**：Chat 任务在 2 小时不活动后过期，Code 任务在 24 小时后过期
-2. **容器清理**：过期任务的容器会被自动删除以释放资源
-3. **问题**：当用户尝试向过期/已清理的任务发送消息时，会遇到"容器未找到"错误
+| 任务类型 | 过期时间 | 场景 |
+|---------|---------|------|
+| Chat | 2 小时 | 日常对话 |
+| Code | 24 小时 | 代码开发 |
 
-## 解决方案
+当容器过期被清理后，用户尝试继续对话会遇到两个问题：
 
-任务恢复功能提供了一个优雅的恢复机制：
+1. **容器不存在** - 原执行器容器已被删除
+2. **会话上下文丢失** - Claude SDK 的 session ID 保存在容器内，随容器一起丢失
 
-1. 当用户向过期或容器已删除的任务发送消息时，后端返回 HTTP 409 和 `TASK_EXPIRED_RESTORABLE` 代码
-2. 前端显示恢复对话框，给用户两个选项：
-   - **继续对话**：恢复任务并重新发送消息
-   - **新建对话**：创建新任务
-3. 如果用户选择继续，恢复 API 会重置任务状态并允许创建新容器
+## 解决方案概览
 
-## 技术实现
+```mermaid
+flowchart TB
+    subgraph 问题["❌ 原有问题"]
+        A[容器过期] --> B[容器被清理]
+        B --> C[Session ID 丢失]
+        C --> D[AI 失去对话记忆]
+    end
 
-### 后端更改
+    subgraph 方案["✅ 解决方案"]
+        E[检测过期/已删除] --> F[提示用户恢复]
+        F --> G[重置容器状态]
+        G --> H[从数据库读取 Session ID]
+        H --> I[新容器恢复会话]
+    end
 
-#### 1. 执行器删除检测 (`executor_kinds.py`)
-
-当 executor_manager 报告"容器未找到"错误时，subtask 被标记为 `executor_deleted_at=True`：
-
-```python
-# 当报告容器未找到错误时标记执行器已删除
-if subtask_update.status == SubtaskStatus.FAILED and subtask_update.error_message:
-    error_msg = subtask_update.error_message.lower()
-    if "container" in error_msg and "not found" in error_msg:
-        subtask.executor_deleted_at = True
+    问题 -.->|任务恢复功能| 方案
 ```
 
-#### 2. 追加前检查 (`operations.py`)
+## 用户操作流程
 
-在允许消息追加到现有任务之前，检查：
-- 最后一个 assistant subtask 的 `executor_deleted_at` 标志
-- 任务过期时间
+```mermaid
+sequenceDiagram
+    actor 用户
+    participant 前端
+    participant 后端
+    participant 新容器
 
-如果满足任一条件，返回 HTTP 409：
+    用户->>前端: 向过期任务发送消息
+    前端->>后端: POST /tasks/{id}/append
+    后端-->>前端: HTTP 409 TASK_EXPIRED_RESTORABLE
+    前端->>用户: 显示恢复对话框
 
-```python
-if last_assistant_subtask and last_assistant_subtask.executor_deleted_at:
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": "TASK_EXPIRED_RESTORABLE",
-            "task_id": existing_task.id,
-            "task_type": task_type,
-            ...
-        },
-    )
+    alt 选择继续对话
+        用户->>前端: 点击"继续对话"
+        前端->>后端: POST /tasks/{id}/restore
+        后端->>后端: 重置任务状态
+        后端-->>前端: 恢复成功
+        前端->>后端: 重发消息
+        后端->>新容器: 创建容器 + 传递 Session ID
+        新容器->>新容器: 使用 Session ID 恢复会话
+        新容器-->>用户: AI 继续对话（保留上下文）
+    else 选择新建对话
+        用户->>前端: 点击"新建对话"
+        前端->>后端: 创建新任务
+    end
 ```
 
-#### 3. 恢复 API (`task_restore.py`)
+## 核心机制
 
-新端点 `POST /tasks/{task_id}/restore`：
-1. 验证任务存在且用户有访问权限
-2. 重置 `updated_at` 时间戳
-3. 清除 `executor_deleted_at` 标志
-4. 清除所有 assistant subtask 的 `executor_name`（强制创建新容器）
+### 1. 过期检测
 
-```python
-# 重置已标记 subtask 的 executor_deleted_at
-db.query(Subtask).filter(
-    Subtask.task_id == task_id,
-    Subtask.executor_deleted_at.is_(True),
-).update({Subtask.executor_deleted_at: False})
+后端在处理消息追加请求时，检查以下条件：
 
-# 清除所有 assistant subtask 的 executor_name
-# 这防止了旧容器名的继承
-db.query(Subtask).filter(
-    Subtask.task_id == task_id,
-    Subtask.role == SubtaskRole.ASSISTANT,
-    Subtask.executor_name.isnot(None),
-    Subtask.executor_name != "",
-).update({Subtask.executor_name: ""})
+| 检查项 | 条件 | 结果 |
+|-------|------|------|
+| executor_deleted_at | 最后一个 ASSISTANT subtask 标记为 true | 返回 409 |
+| 过期时间 | 超过配置的过期小时数 | 返回 409 |
+
+### 2. 任务恢复 API
+
+**端点**: `POST /api/v1/tasks/{task_id}/restore`
+
+恢复操作执行以下步骤：
+
+```mermaid
+flowchart LR
+    A[验证任务] --> B[重置 updated_at]
+    B --> C[清除 executor_deleted_at]
+    C --> D[清除 executor_name]
+    D --> E[返回成功]
 ```
 
-#### 4. Executor Name 继承修复 (`helpers.py`)
-
-修复了 `_create_standard_subtask` 中的一个 bug，该 bug 会盲目从第一个现有 subtask 继承 `executor_name`，而不检查：
-- subtask 是否是 ASSISTANT 角色（USER subtask 的 executor_name 为空）
-- executor_name 是否非空
-
-修复前（有 bug）：
-```python
-if existing_subtasks:
-    executor_name = existing_subtasks[0].executor_name
-```
-
-修复后：
-```python
-for s in existing_subtasks:
-    if s.role == SubtaskRole.ASSISTANT and s.executor_name:
-        executor_name = s.executor_name
-        break
-```
-
-### 前端更改
-
-#### 1. 错误解析器 (`errorParser.ts`)
-
-添加了对 HTTP 409 响应中 `TASK_EXPIRED_RESTORABLE` 错误代码的解析。
-
-#### 2. 恢复对话框 (`TaskRestoreDialog.tsx`)
-
-新对话框组件显示：
-- 过期信息（任务类型、过期时长）
-- 继续对话选项（调用恢复 API 然后重发消息）
-- 新建对话选项
-
-#### 3. 流处理器 (`useChatStreamHandlers.tsx`)
-
-- 添加恢复对话框可见性状态
-- 添加 `handleConfirmRestore` 处理器：
-  1. 调用恢复 API
-  2. 刷新任务详情
-  3. 重发待发送的消息
-
-### API 更改
-
-#### 新端点
-
-```
-POST /api/v1/tasks/{task_id}/restore
-```
-
-**请求体：**
-```json
-{
-  "message": "恢复后可选发送的消息"
-}
-```
-
-**响应：**
-```json
-{
-  "success": true,
-  "task_id": 123,
-  "task_type": "chat",
-  "executor_rebuilt": true,
-  "message": "Task restored successfully"
-}
-```
-
-## 流程图
-
-```
-用户向过期任务发送消息
-         │
-         ▼
-后端检查过期/executor_deleted_at
-         │
-         ▼
-    ┌────┴────┐
-    │ 过期或  │ ──是──► 返回 HTTP 409
-    │ 已删除  │         TASK_EXPIRED_RESTORABLE
-    └────┬────┘
-         │否
-         ▼
-    正常继续
-
-前端收到 HTTP 409
-         │
-         ▼
-   显示恢复对话框
-         │
-    ┌────┴────┐
-    │  继续   │ ──是──► 调用 POST /tasks/{id}/restore
-    │  对话？ │                    │
-    └────┬────┘                    ▼
-         │否              清除执行器数据
-         ▼                重置时间戳
-   创建新任务                    │
-                                 ▼
-                          重发消息
-                                 │
-                                 ▼
-                          创建新容器
-```
-
-## 更改的文件
-
-| 文件 | 更改 |
+| 步骤 | 说明 |
 |------|------|
-| `backend/app/api/api.py` | 注册 task_restore 路由 |
-| `backend/app/api/endpoints/adapter/task_restore.py` | 新的恢复 API 端点 |
-| `backend/app/services/adapters/task_restore.py` | 新的恢复服务 |
-| `backend/app/services/adapters/executor_kinds.py` | 错误时标记 executor_deleted_at，继承 executor_name |
-| `backend/app/services/adapters/task_kinds/operations.py` | 追加前检查 executor_deleted_at |
-| `backend/app/services/adapters/task_kinds/helpers.py` | 修复 executor_name 继承 bug |
-| `frontend/src/apis/tasks.ts` | 添加 restoreTask API |
-| `frontend/src/utils/errorParser.ts` | 解析 TASK_EXPIRED_RESTORABLE 错误 |
-| `frontend/src/features/tasks/components/chat/TaskRestoreDialog.tsx` | 新的恢复对话框 |
-| `frontend/src/features/tasks/components/chat/useChatStreamHandlers.tsx` | 处理恢复流程 |
-| `frontend/src/i18n/locales/*/chat.json` | 添加国际化翻译 |
+| 清除 executor_deleted_at | 允许任务接收新消息 |
+| 清除 executor_name | 强制创建新容器（不复用旧容器名） |
+
+### 3. Claude Session ID 持久化
+
+为了让新容器能恢复之前的会话上下文，Session ID 被持久化到数据库：
+
+```mermaid
+flowchart TB
+    subgraph 保存流程["保存 Session ID"]
+        direction LR
+        A1[Claude SDK 返回 session_id] --> A2[写入 result 字典]
+        A2 --> A3[Backend 提取保存到 DB]
+        A2 --> A4[本地文件备份]
+    end
+
+    subgraph 读取流程["读取 Session ID"]
+        direction LR
+        B1[任务下发] --> B2{数据库有值?}
+        B2 -->|是| B3[使用数据库值]
+        B2 -->|否| B4{本地文件有值?}
+        B4 -->|是| B5[使用本地文件值]
+        B4 -->|否| B6[创建新会话]
+    end
+
+    保存流程 --> 读取流程
+```
+
+**存储策略**：
+
+| 存储位置 | 用途 | 优先级 |
+|---------|------|-------|
+| 数据库 `subtasks.claude_session_id` | 主存储，支持跨容器恢复 | 高 |
+| 本地文件 `.claude_session_id` | 备份，同容器内快速读取 | 低 |
+
+## 数据流详解
+
+### 任务下发时（Backend → Executor）
+
+```mermaid
+flowchart LR
+    A[dispatch_tasks] --> B[查询 related_subtasks]
+    B --> C{找到 ASSISTANT<br/>且有 session_id?}
+    C -->|是| D[取最新的 session_id]
+    C -->|否| E[session_id = null]
+    D --> F{new_session?}
+    E --> G[返回任务数据]
+    F -->|是| H[清空 session_id]
+    F -->|否| G
+    H --> G
+```
+
+### 任务完成时（Executor → Backend）
+
+```mermaid
+flowchart LR
+    A[Claude SDK<br/>返回 ResultMessage] --> B[提取 session_id]
+    B --> C[添加到 result 字典]
+    C --> D[report_progress]
+    D --> E[Backend update_subtask]
+    E --> F[保存到数据库]
+```
+
+## Pipeline 模式处理
+
+在 Pipeline 模式下，当用户确认进入下一阶段时：
+
+```mermaid
+flowchart LR
+    A[Stage 1 完成] --> B[用户确认]
+    B --> C[new_session = true]
+    C --> D[不传递旧 session_id]
+    D --> E[Stage 2 创建新会话]
+```
+
+**原因**：每个 Pipeline 阶段可能使用不同的 Bot，需要独立的会话上下文。
+
+## Session 过期处理
+
+当 Claude SDK 返回 session 相关错误时，自动降级：
+
+```mermaid
+flowchart TB
+    A[尝试恢复会话] --> B{连接成功?}
+    B -->|是| C[继续使用恢复的会话]
+    B -->|否| D{是 session 错误?}
+    D -->|是| E[移除 resume 参数]
+    E --> F[创建新会话]
+    D -->|否| G[抛出异常]
+```
+
+**检测关键词**：`session`, `expired`, `invalid`, `resume`
 
 ## 配置
 
-过期时间由环境变量控制：
+| 环境变量 | 说明 | 默认值 |
+|---------|------|-------|
+| `APPEND_CHAT_TASK_EXPIRE_HOURS` | Chat 任务过期小时数 | 2 |
+| `APPEND_CODE_TASK_EXPIRE_HOURS` | Code 任务过期小时数 | 24 |
 
-- `APPEND_CHAT_TASK_EXPIRE_HOURS`：Chat 任务过期小时数（默认：2）
-- `APPEND_CODE_TASK_EXPIRE_HOURS`：Code 任务过期小时数（默认：24）
+## 相关文件
 
-## Claude Session ID 持久化
+### 后端
 
-### 背景
-
-当任务恢复后创建新容器时，之前的 Claude SDK 会话上下文会丢失，因为 session ID 之前只保存在容器内的本地文件中。这导致 AI 无法记住恢复前的对话内容。
-
-### 解决方案
-
-通过将 Claude Session ID 持久化到数据库，新容器可以恢复之前的会话状态：
-
-1. **数据库存储**：在 `subtasks` 表中添加 `claude_session_id` 字段
-2. **双写策略**：同时保存到数据库（主存储）和本地文件（备份）
-3. **读取优先级**：优先从任务数据（数据库）读取，降级使用本地文件
-
-### 数据流
-
-```
-任务下发 (Backend → Executor):
-  dispatch_tasks() → _format_subtasks_response()
-    → 从最近的 ASSISTANT subtask 查找 claude_session_id
-    → 返回 {"claude_session_id": "xxx", ...}
-
-结果回传 (Executor → Backend):
-  _process_result_message() → result_dict["claude_session_id"] = session_id
-    → report_progress(extra_result=result_dict)
-    → update_subtask() 提取并保存到数据库
-```
-
-### 技术实现
-
-#### 1. 数据库 Schema
-
-```sql
-ALTER TABLE subtasks
-ADD COLUMN claude_session_id VARCHAR(255) DEFAULT NULL
-COMMENT 'Claude SDK session ID for conversation resume';
-```
-
-#### 2. 任务下发时读取 Session ID (`executor_kinds.py`)
-
-```python
-# 从 related_subtasks 中查找最新的 claude_session_id
-# related_subtasks 是升序排列（旧→新），所以用 reversed() 倒序遍历
-latest_claude_session_id = None
-for related in reversed(related_subtasks):
-    if (
-        related.role == SubtaskRole.ASSISTANT
-        and related.claude_session_id
-    ):
-        latest_claude_session_id = related.claude_session_id
-        break
-
-# Pipeline 新阶段不传递旧的 session_id
-if new_session:
-    latest_claude_session_id = None
-```
-
-#### 3. 任务完成时保存 Session ID (`executor_kinds.py`)
-
-```python
-# 从 result 中提取 claude_session_id 并保存到数据库
-if subtask_update.result and isinstance(subtask_update.result, dict):
-    claude_session_id = subtask_update.result.get("claude_session_id")
-    if claude_session_id:
-        subtask.claude_session_id = claude_session_id
-```
-
-#### 4. Executor 读取 Session ID (`claude_code_agent.py`)
-
-```python
-# 优先级：任务数据（数据库）> 本地文件（备份）
-saved_session_id = None
-
-# 1. 从任务数据获取（来自数据库）
-if self.task_data:
-    saved_session_id = self.task_data.get("claude_session_id")
-
-# 2. 降级：从本地文件读取
-if not saved_session_id:
-    saved_session_id = self._load_saved_session_id(self.task_id)
-
-if saved_session_id:
-    self.options["resume"] = saved_session_id
-```
-
-#### 5. Session 过期处理
-
-当 Claude SDK 返回 session 相关错误时，自动回退到创建新会话：
-
-```python
-try:
-    await self.client.connect()
-except Exception as e:
-    error_msg = str(e).lower()
-    session_error_keywords = ["session", "expired", "invalid", "resume"]
-    if any(keyword in error_msg for keyword in session_error_keywords):
-        # 移除 resume 参数，创建新会话
-        self.options.pop("resume", None)
-        self.client = ClaudeSDKClient(options=ClaudeAgentOptions(**self.options))
-        await self.client.connect()
-    else:
-        raise
-```
-
-### Pipeline 模式处理
-
-当 `new_session=True`（Pipeline 阶段切换）时：
-- 不传递旧的 `claude_session_id`
-- 确保新阶段创建独立的会话
-
-### 相关文件
-
-| 文件 | 更改 |
+| 文件 | 职责 |
 |------|------|
-| `backend/alembic/versions/x4y5z6a7b8c9_add_claude_session_id_to_subtasks.py` | 数据库迁移 |
-| `shared/models/db/subtask.py` | 添加 `claude_session_id` 字段 |
-| `backend/app/services/adapters/executor_kinds.py` | 读取和保存 session ID |
-| `executor/agents/claude_code/claude_code_agent.py` | 从任务数据读取 session ID，添加过期处理 |
-| `executor/agents/claude_code/response_processor.py` | 将 session ID 添加到结果中 |
+| `backend/app/api/endpoints/adapter/task_restore.py` | 恢复 API 端点 |
+| `backend/app/services/adapters/task_restore.py` | 恢复服务逻辑 |
+| `backend/app/services/adapters/executor_kinds.py` | Session ID 读取/保存，executor_deleted_at 标记 |
+| `backend/app/services/adapters/task_kinds/operations.py` | 追加前过期检查 |
+| `backend/alembic/versions/x4y5z6a7b8c9_*.py` | 数据库迁移 |
+
+### Executor
+
+| 文件 | 职责 |
+|------|------|
+| `executor/agents/claude_code/claude_code_agent.py` | Session ID 读取，过期处理 |
+| `executor/agents/claude_code/response_processor.py` | Session ID 添加到结果 |
+
+### 前端
+
+| 文件 | 职责 |
+|------|------|
+| `frontend/src/features/tasks/components/chat/TaskRestoreDialog.tsx` | 恢复对话框 |
+| `frontend/src/features/tasks/components/chat/useChatStreamHandlers.tsx` | 恢复流程处理 |
+| `frontend/src/utils/errorParser.ts` | 解析 TASK_EXPIRED_RESTORABLE 错误 |
+
+### Shared
+
+| 文件 | 职责 |
+|------|------|
+| `shared/models/db/subtask.py` | Subtask 模型（含 claude_session_id 字段） |
