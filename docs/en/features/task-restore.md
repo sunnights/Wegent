@@ -210,3 +210,123 @@ The expiration times are controlled by environment variables:
 
 - `APPEND_CHAT_TASK_EXPIRE_HOURS`: Hours before chat task expires (default: 2)
 - `APPEND_CODE_TASK_EXPIRE_HOURS`: Hours before code task expires (default: 24)
+
+## Claude Session ID Persistence
+
+### Background
+
+When a task is restored and a new container is created, the previous Claude SDK session context would be lost because session IDs were only stored in local files within the container. This caused the AI to lose memory of conversations before the restore.
+
+### Solution
+
+By persisting Claude Session IDs to the database, new containers can restore previous session state:
+
+1. **Database Storage**: Add `claude_session_id` field to `subtasks` table
+2. **Dual-Write Strategy**: Save to both database (primary) and local file (backup)
+3. **Read Priority**: Prefer task_data (database) over local file
+
+### Data Flow
+
+```
+Task Dispatch (Backend → Executor):
+  dispatch_tasks() → _format_subtasks_response()
+    → Find claude_session_id from latest ASSISTANT subtask
+    → Return {"claude_session_id": "xxx", ...}
+
+Result Report (Executor → Backend):
+  _process_result_message() → result_dict["claude_session_id"] = session_id
+    → report_progress(extra_result=result_dict)
+    → update_subtask() extracts and saves to database
+```
+
+### Technical Implementation
+
+#### 1. Database Schema
+
+```sql
+ALTER TABLE subtasks
+ADD COLUMN claude_session_id VARCHAR(255) DEFAULT NULL
+COMMENT 'Claude SDK session ID for conversation resume';
+```
+
+#### 2. Read Session ID on Task Dispatch (`executor_kinds.py`)
+
+```python
+# Find latest claude_session_id from related_subtasks
+# related_subtasks is sorted ascending (old→new), so iterate in reverse
+latest_claude_session_id = None
+for related in reversed(related_subtasks):
+    if (
+        related.role == SubtaskRole.ASSISTANT
+        and related.claude_session_id
+    ):
+        latest_claude_session_id = related.claude_session_id
+        break
+
+# Pipeline new stage should not inherit old session_id
+if new_session:
+    latest_claude_session_id = None
+```
+
+#### 3. Save Session ID on Task Completion (`executor_kinds.py`)
+
+```python
+# Extract claude_session_id from result and save to database
+if subtask_update.result and isinstance(subtask_update.result, dict):
+    claude_session_id = subtask_update.result.get("claude_session_id")
+    if claude_session_id:
+        subtask.claude_session_id = claude_session_id
+```
+
+#### 4. Executor Reading Session ID (`claude_code_agent.py`)
+
+```python
+# Priority: task_data (database) > local file (backup)
+saved_session_id = None
+
+# 1. Get from task_data (comes from database)
+if self.task_data:
+    saved_session_id = self.task_data.get("claude_session_id")
+
+# 2. Fallback to local file
+if not saved_session_id:
+    saved_session_id = self._load_saved_session_id(self.task_id)
+
+if saved_session_id:
+    self.options["resume"] = saved_session_id
+```
+
+#### 5. Session Expiry Handling
+
+When Claude SDK returns session-related errors, automatically fallback to creating a new session:
+
+```python
+try:
+    await self.client.connect()
+except Exception as e:
+    error_msg = str(e).lower()
+    session_error_keywords = ["session", "expired", "invalid", "resume"]
+    if any(keyword in error_msg for keyword in session_error_keywords):
+        # Remove resume parameter, create new session
+        self.options.pop("resume", None)
+        self.client = ClaudeSDKClient(options=ClaudeAgentOptions(**self.options))
+        await self.client.connect()
+    else:
+        raise
+```
+
+### Pipeline Mode Handling
+
+When `new_session=True` (pipeline stage transition):
+- Do not pass old `claude_session_id`
+- Ensures new stage creates an independent session
+
+### Related Files
+
+| File | Changes |
+|------|---------|
+| `backend/alembic/versions/x4y5z6a7b8c9_add_claude_session_id_to_subtasks.py` | Database migration |
+| `shared/models/db/subtask.py` | Add `claude_session_id` field |
+| `backend/app/services/adapters/executor_kinds.py` | Read and save session ID |
+| `executor/agents/claude_code/claude_code_agent.py` | Read session ID from task data, add expiry handling |
+| `executor/agents/claude_code/response_processor.py` | Add session ID to result |

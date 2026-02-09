@@ -209,3 +209,123 @@ POST /api/v1/tasks/{task_id}/restore
 
 - `APPEND_CHAT_TASK_EXPIRE_HOURS`：Chat 任务过期小时数（默认：2）
 - `APPEND_CODE_TASK_EXPIRE_HOURS`：Code 任务过期小时数（默认：24）
+
+## Claude Session ID 持久化
+
+### 背景
+
+当任务恢复后创建新容器时，之前的 Claude SDK 会话上下文会丢失，因为 session ID 之前只保存在容器内的本地文件中。这导致 AI 无法记住恢复前的对话内容。
+
+### 解决方案
+
+通过将 Claude Session ID 持久化到数据库，新容器可以恢复之前的会话状态：
+
+1. **数据库存储**：在 `subtasks` 表中添加 `claude_session_id` 字段
+2. **双写策略**：同时保存到数据库（主存储）和本地文件（备份）
+3. **读取优先级**：优先从任务数据（数据库）读取，降级使用本地文件
+
+### 数据流
+
+```
+任务下发 (Backend → Executor):
+  dispatch_tasks() → _format_subtasks_response()
+    → 从最近的 ASSISTANT subtask 查找 claude_session_id
+    → 返回 {"claude_session_id": "xxx", ...}
+
+结果回传 (Executor → Backend):
+  _process_result_message() → result_dict["claude_session_id"] = session_id
+    → report_progress(extra_result=result_dict)
+    → update_subtask() 提取并保存到数据库
+```
+
+### 技术实现
+
+#### 1. 数据库 Schema
+
+```sql
+ALTER TABLE subtasks
+ADD COLUMN claude_session_id VARCHAR(255) DEFAULT NULL
+COMMENT 'Claude SDK session ID for conversation resume';
+```
+
+#### 2. 任务下发时读取 Session ID (`executor_kinds.py`)
+
+```python
+# 从 related_subtasks 中查找最新的 claude_session_id
+# related_subtasks 是升序排列（旧→新），所以用 reversed() 倒序遍历
+latest_claude_session_id = None
+for related in reversed(related_subtasks):
+    if (
+        related.role == SubtaskRole.ASSISTANT
+        and related.claude_session_id
+    ):
+        latest_claude_session_id = related.claude_session_id
+        break
+
+# Pipeline 新阶段不传递旧的 session_id
+if new_session:
+    latest_claude_session_id = None
+```
+
+#### 3. 任务完成时保存 Session ID (`executor_kinds.py`)
+
+```python
+# 从 result 中提取 claude_session_id 并保存到数据库
+if subtask_update.result and isinstance(subtask_update.result, dict):
+    claude_session_id = subtask_update.result.get("claude_session_id")
+    if claude_session_id:
+        subtask.claude_session_id = claude_session_id
+```
+
+#### 4. Executor 读取 Session ID (`claude_code_agent.py`)
+
+```python
+# 优先级：任务数据（数据库）> 本地文件（备份）
+saved_session_id = None
+
+# 1. 从任务数据获取（来自数据库）
+if self.task_data:
+    saved_session_id = self.task_data.get("claude_session_id")
+
+# 2. 降级：从本地文件读取
+if not saved_session_id:
+    saved_session_id = self._load_saved_session_id(self.task_id)
+
+if saved_session_id:
+    self.options["resume"] = saved_session_id
+```
+
+#### 5. Session 过期处理
+
+当 Claude SDK 返回 session 相关错误时，自动回退到创建新会话：
+
+```python
+try:
+    await self.client.connect()
+except Exception as e:
+    error_msg = str(e).lower()
+    session_error_keywords = ["session", "expired", "invalid", "resume"]
+    if any(keyword in error_msg for keyword in session_error_keywords):
+        # 移除 resume 参数，创建新会话
+        self.options.pop("resume", None)
+        self.client = ClaudeSDKClient(options=ClaudeAgentOptions(**self.options))
+        await self.client.connect()
+    else:
+        raise
+```
+
+### Pipeline 模式处理
+
+当 `new_session=True`（Pipeline 阶段切换）时：
+- 不传递旧的 `claude_session_id`
+- 确保新阶段创建独立的会话
+
+### 相关文件
+
+| 文件 | 更改 |
+|------|------|
+| `backend/alembic/versions/x4y5z6a7b8c9_add_claude_session_id_to_subtasks.py` | 数据库迁移 |
+| `shared/models/db/subtask.py` | 添加 `claude_session_id` 字段 |
+| `backend/app/services/adapters/executor_kinds.py` | 读取和保存 session ID |
+| `executor/agents/claude_code/claude_code_agent.py` | 从任务数据读取 session ID，添加过期处理 |
+| `executor/agents/claude_code/response_processor.py` | 将 session ID 添加到结果中 |
