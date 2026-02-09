@@ -6,7 +6,8 @@
 
 import React, { memo, useMemo, useState, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import remarkGfmSafe from '@/lib/remark-gfm-safe'
+import { autolinkUrls } from '@/lib/autolink-urls'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
@@ -372,8 +373,10 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
   theme,
   components,
 }: EnhancedMarkdownProps) {
-  // Pre-process source to convert \[...\] and \(...\) to dollar syntax
-  const processedSource = useMemo(() => preprocessLatexSyntax(source), [source])
+  // Pre-process source:
+  // 1. Convert \[...\] and \(...\) to dollar syntax for LaTeX
+  // 2. Convert bare URLs to markdown link format (iOS 16 Safari compatibility)
+  const processedSource = useMemo(() => autolinkUrls(preprocessLatexSyntax(source)), [source])
 
   // Check if source contains math formulas
   const hasMath = useMemo(() => containsMathFormulas(processedSource), [processedSource])
@@ -453,8 +456,12 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
       code: ({ className, children, ...props }) => {
         // Check if this is an inline code or a code block
         // Code blocks are wrapped in <pre> and have a className with language
+        const codeString = String(children)
         const match = /language-(\w+)/.exec(className || '')
-        const isInline = !match && !className?.includes('language-')
+        // Code blocks contain newlines, inline code does not
+        // Also check for language- prefix to handle ``` (no language) code blocks
+        const hasNewlines = codeString.includes('\n')
+        const isInline = !hasNewlines && !match && !className?.includes('language-')
 
         // For inline code, render as simple <code> element
         if (isInline) {
@@ -470,9 +477,9 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
 
         // For code blocks, extract language and code content
         const language = match ? match[1] : ''
-        const codeString = String(children).replace(/\n$/, '')
+        const codeBlockContent = codeString.replace(/\n$/, '')
 
-        return <CodeBlock language={language} code={codeString} theme={theme} />
+        return <CodeBlock language={language} code={codeBlockContent} theme={theme} />
       },
       // Override pre to avoid double wrapping
       pre: ({ children }) => <>{children}</>,
@@ -484,7 +491,7 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
   // Configure remark/rehype plugins based on content
   const remarkPlugins = useMemo(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugins: any[] = [remarkGfm]
+    const plugins: any[] = [remarkGfmSafe]
     if (hasMath) {
       // Enable singleDollarTextMath to support $...$ inline math
       plugins.push([remarkMath, { singleDollarTextMath: true }])
@@ -510,8 +517,8 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
     return plugins
   }, [hasMath])
 
-  // URL transform to allow wegent:// scheme URLs
-  const urlTransform = useMemo(() => createSchemeAwareUrlTransform(['wegent:']), [])
+  // URL transform to allow wegent:// and attachment:// scheme URLs
+  const urlTransform = useMemo(() => createSchemeAwareUrlTransform(['wegent:', 'attachment:']), [])
 
   // Render markdown content
   const renderMarkdown = (content: string) => (

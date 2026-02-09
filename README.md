@@ -14,13 +14,10 @@ English | [简体中文](README_zh.md)
 
 <div align="center">
 
-<img src="https://github.com/user-attachments/assets/677abce3-bd3f-4064-bdab-e247b142c22f" width="100%" alt="Chat Mode Demo"/>
 
-<img src="https://github.com/user-attachments/assets/2b210d33-2569-4bc9-acac-e163de4e12a5" width="100%" alt="Knowledge Demo"/>
 
-<img src="https://github.com/user-attachments/assets/cc25c415-d3f1-4e9f-a64c-1d2614d69c7d" width="100%" alt="Code Mode Demo"/>
 
-[Quick Start](#-quick-start) · [Documentation](docs/en/README.md) · [Development Guide](docs/en/guides/developer/setup.md)
+[Quick Start](#-quick-start) · [Documentation](https://wecode-ai.github.io/wegent-docs/) · [Development Guide](https://wecode-ai.github.io/wegent-docs/docs/category/developer-guide)
 
 </div>
 
@@ -28,8 +25,8 @@ English | [简体中文](README_zh.md)
 
 ## ✨ Core Features
 
-### 💬 Chat Mode
-
+### 💬 Cha Agent
+<img src="https://github.com/user-attachments/assets/677abce3-bd3f-4064-bdab-e247b142c22f" width="100%" alt="Chat Mode Demo"/>
 A fully open-source chat agent with powerful capabilities:
 
 - **Multi-Model Support**: Compatible with Claude, OpenAI, Gemini, DeepSeek, GLM and other mainstream models
@@ -42,7 +39,8 @@ A fully open-source chat agent with powerful capabilities:
 - **Sandbox Execution**: Execute commands or modify files via sandbox, E2B protocol compatible
 - **Extensions**: Customize prompts, MCP tools and Skills (includes chart drawing skill)
 
-### 💻 Code Mode
+### 💻 Code Agent
+<img src="https://github.com/user-attachments/assets/cc25c415-d3f1-4e9f-a64c-1d2614d69c7d" width="100%" alt="Code Mode Demo"/>
 
 A cloud-based Claude Code execution engine:
 
@@ -53,7 +51,8 @@ A cloud-based Claude Code execution engine:
 - **MCP/Skill Support**: Configure MCP tools and Skills for agents
 - **Multi-turn Conversations**: Continue conversations with follow-up questions
 
-### 📡 Feed Mode
+### 📡 AI Feed
+<img src="https://github.com/user-attachments/assets/6680c33a-f4ba-4ef2-aa8c-e7a53bd003dc" width="100%" alt="Feed Demo"/>
 
 A cloud-based AI task trigger system:
 
@@ -62,7 +61,8 @@ A cloud-based AI task trigger system:
 - **Information Feed**: Display AI-generated content as an information stream
 - **Event Filtering**: Filter conditions like "only notify me if it will rain tomorrow"
 
-### 📚 Knowledge Mode
+### 📚 AI Knowledge
+<img src="https://github.com/user-attachments/assets/2b210d33-2569-4bc9-acac-e163de4e12a5" width="100%" alt="Knowledge Demo"/>
 
 A cloud-based AI document repository:
 
@@ -71,6 +71,16 @@ A cloud-based AI document repository:
 - **NotebookLM Mode**: Select documents directly in notebooks for Q&A
 - **Online Editing**: Edit text files directly in notebook mode
 - **Chat Integration**: Reference knowledge bases in single/group chats for AI responses
+
+### 🖥️ AI Device
+<img src="https://github.com/user-attachments/assets/ead0cc30-b3a4-4eb6-a6dd-77ffcbd72238" width="100%" alt="AI Device Demo"/>
+
+Run AI tasks on your local machine with full control:
+
+- **Local Executor**: Install and run the Wegent executor on your own device
+- **Multi-Device Management**: Register and manage multiple local devices
+- **Default Device**: Set a preferred device for quick task execution
+- **Secure Connection**: Connect to Wegent backend via authenticated WebSocket
 
 ### 🔧 Customization
 
@@ -126,7 +136,7 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
 - **Ghost** (prompt) + **Shell** (environment) + **Model** = **Bot**
 - Multiple **Bots** + **Collaboration Mode** = **Team**
 
-> See [Core Concepts](docs/en/concepts/core-concepts.md) | [YAML Spec](docs/en/reference/yaml-specification.md)
+> See [Core Concepts](https://wecode-ai.github.io/wegent-docs/en/concepts/core-concepts) | [YAML Spec](https://wecode-ai.github.io/wegent-docs/en/reference/yaml-specification)
 
 ---
 
@@ -182,12 +192,27 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/FicoHu">
+            <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
+            <br />
+            <sub><b>FicoHu</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/kissghosts">
             <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
             <br />
             <sub><b>Yanhe</b></sub>
         </a>
     </td>
+    <td align="center">
+        <a href="https://github.com/yixiangxx">
+            <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
+            <br />
+            <sub><b>Yi Xiang</b></sub>
+        </a>
+    </td></tr>
+<tr>
     <td align="center">
         <a href="https://github.com/joyway1978">
             <img src="https://avatars.githubusercontent.com/u/184585080?v=4" width="80;" alt="joyway1978"/>
@@ -201,27 +226,12 @@ Thanks to the following developers for their contributions and efforts to make t
             <br />
             <sub><b>Moqimoqidea</b></sub>
         </a>
-    </td></tr>
-<tr>
+    </td>
     <td align="center">
         <a href="https://github.com/2561056571">
             <img src="https://avatars.githubusercontent.com/u/112464849?v=4" width="80;" alt="2561056571"/>
             <br />
             <sub><b>Xuemin</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/yixiangxx">
-            <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
-            <br />
-            <sub><b>Yi Xiang</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/junbaor">
-            <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
-            <br />
-            <sub><b>Junbaor</b></sub>
         </a>
     </td>
     <td align="center">
@@ -232,10 +242,10 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/FicoHu">
-            <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
+        <a href="https://github.com/parabala">
+            <img src="https://avatars.githubusercontent.com/u/115564000?v=4" width="80;" alt="parabala"/>
             <br />
-            <sub><b>FicoHu</b></sub>
+            <sub><b>Parabala</b></sub>
         </a>
     </td>
     <td align="center">
@@ -246,17 +256,17 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/junbaor">
+            <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
+            <br />
+            <sub><b>Junbaor</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/fingki">
             <img src="https://avatars.githubusercontent.com/u/11422037?v=4" width="80;" alt="fingki"/>
             <br />
             <sub><b>Fingki</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/parabala">
-            <img src="https://avatars.githubusercontent.com/u/115564000?v=4" width="80;" alt="parabala"/>
-            <br />
-            <sub><b>Parabala</b></sub>
         </a>
     </td></tr>
 <tr>

@@ -14,13 +14,10 @@
 
 <div align="center">
 
-<img src="https://github.com/user-attachments/assets/677abce3-bd3f-4064-bdab-e247b142c22f" width="100%" alt="Chat Mode Demo"/>
 
-<img src="https://github.com/user-attachments/assets/2b210d33-2569-4bc9-acac-e163de4e12a5" width="100%" alt="Knowledge Demo"/>
 
-<img src="https://github.com/user-attachments/assets/cc25c415-d3f1-4e9f-a64c-1d2614d69c7d" width="100%" alt="Code Mode Demo"/>
 
-[快速开始](#-快速开始) · [文档](docs/zh/README.md) · [开发指南](docs/zh/guides/developer/setup.md)
+[快速开始](#-快速开始) · [文档](https://wecode-ai.github.io/wegent-docs/zh/) · [开发指南](https://wecode-ai.github.io/wegent-docs/zh/docs/category/developer-guide)
 
 </div>
 
@@ -30,6 +27,7 @@
 
 ### 💬 对话模式
 
+<img src="https://github.com/user-attachments/assets/677abce3-bd3f-4064-bdab-e247b142c22f" width="100%" alt="Chat Mode Demo"/>
 一个完全开源的聊天 Agent，具备以下能力：
 
 - **多模型支持**：兼容 Claude、OpenAI、Gemini、DeepSeek、GLM 等主流模型
@@ -44,6 +42,7 @@
 
 ### 💻 编码模式
 
+<img src="https://github.com/user-attachments/assets/cc25c415-d3f1-4e9f-a64c-1d2614d69c7d" width="100%" alt="Code Mode Demo"/>
 一个云端的 Claude Code 编码执行引擎：
 
 - **多模型配置**：配置各种兼容 Claude 协议的模型
@@ -54,6 +53,7 @@
 - **多轮对话**：支持多轮对话追问
 
 ### 📡 关注模式
+<img src="https://github.com/user-attachments/assets/6680c33a-f4ba-4ef2-aa8c-e7a53bd003dc" width="100%" alt="Feed Demo"/>
 
 一个云端的 AI 任务触发器：
 
@@ -64,6 +64,7 @@
 
 ### 📚 知识模式
 
+<img src="https://github.com/user-attachments/assets/2b210d33-2569-4bc9-acac-e163de4e12a5" width="100%" alt="Knowledge Demo"/>
 一个云端 AI 文档仓库：
 
 - **文档管理**：上传、管理 txt/doc/ppt/xls 等等格式的文档到知识库
@@ -71,6 +72,16 @@
 - **NotebookLM 模式**：支持在笔记本里直接选择文档进行提问
 - **在线编辑**：笔记本模式支持在线编辑文本文件
 - **对话集成**：支持在单聊、群聊中让 AI 引用知识库进行回答
+
+### 🖥️ 设备模式
+
+<img src="https://github.com/user-attachments/assets/ead0cc30-b3a4-4eb6-a6dd-77ffcbd72238" width="100%" alt="AI Device Demo"/>>
+在本地设备上运行 AI 任务，完全掌控：
+
+- **本地执行器**：在自己的设备上安装并运行 Wegent 执行器
+- **多设备管理**：注册和管理多个本地设备
+- **槽位调度**：为每个设备配置并发任务槽位数
+- **安全连接**：通过认证的 WebSocket 连接到 Wegent 后端
 
 ### 🔧 定制化
 
@@ -126,7 +137,7 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
 - **Ghost** (提示词) + **Shell** (执行环境) + **Model** = **Bot**
 - 多个 **Bot** + **协作模式** = **Team**
 
-> 详见 [核心概念](docs/zh/concepts/core-concepts.md) | [YAML 规范](docs/zh/reference/yaml-specification.md)
+> 详见 [核心概念](https://wecode-ai.github.io/wegent-docs/zh/concepts/core-concepts) | [YAML 规范](https://wecode-ai.github.io/wegent-docs/zh/reference/yaml-specification)
 
 ---
 
@@ -182,12 +193,27 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/FicoHu">
+            <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
+            <br />
+            <sub><b>FicoHu</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/kissghosts">
             <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
             <br />
             <sub><b>Yanhe</b></sub>
         </a>
     </td>
+    <td align="center">
+        <a href="https://github.com/yixiangxx">
+            <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
+            <br />
+            <sub><b>Yi Xiang</b></sub>
+        </a>
+    </td></tr>
+<tr>
     <td align="center">
         <a href="https://github.com/joyway1978">
             <img src="https://avatars.githubusercontent.com/u/184585080?v=4" width="80;" alt="joyway1978"/>
@@ -201,27 +227,12 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
             <br />
             <sub><b>Moqimoqidea</b></sub>
         </a>
-    </td></tr>
-<tr>
+    </td>
     <td align="center">
         <a href="https://github.com/2561056571">
             <img src="https://avatars.githubusercontent.com/u/112464849?v=4" width="80;" alt="2561056571"/>
             <br />
             <sub><b>Xuemin</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/yixiangxx">
-            <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
-            <br />
-            <sub><b>Yi Xiang</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/junbaor">
-            <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
-            <br />
-            <sub><b>Junbaor</b></sub>
         </a>
     </td>
     <td align="center">
@@ -232,10 +243,10 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/FicoHu">
-            <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
+        <a href="https://github.com/parabala">
+            <img src="https://avatars.githubusercontent.com/u/115564000?v=4" width="80;" alt="parabala"/>
             <br />
-            <sub><b>FicoHu</b></sub>
+            <sub><b>Parabala</b></sub>
         </a>
     </td>
     <td align="center">
@@ -246,17 +257,17 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/junbaor">
+            <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
+            <br />
+            <sub><b>Junbaor</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/fingki">
             <img src="https://avatars.githubusercontent.com/u/11422037?v=4" width="80;" alt="fingki"/>
             <br />
             <sub><b>Fingki</b></sub>
-        </a>
-    </td>
-    <td align="center">
-        <a href="https://github.com/parabala">
-            <img src="https://avatars.githubusercontent.com/u/115564000?v=4" width="80;" alt="parabala"/>
-            <br />
-            <sub><b>Parabala</b></sub>
         </a>
     </td></tr>
 <tr>

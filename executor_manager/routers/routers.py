@@ -635,6 +635,43 @@ class DeleteExecutorRequest(BaseModel):
     executor_name: str
 
 
+class GetExecutorAddressRequest(BaseModel):
+    executor_name: str
+
+
+@api_router.post("/executor/address")
+async def get_executor_address(
+    request: GetExecutorAddressRequest, http_request: Request
+):
+    """
+    Get the base URL for an executor container.
+
+    This endpoint is used by backend to get the container's accessible address
+    for calling APIs like workspace archiving.
+
+    Args:
+        request: Request containing executor_name
+
+    Returns:
+        dict: Container address with status and base_url
+    """
+    try:
+        client_ip = http_request.client.host if http_request.client else "unknown"
+        logger.info(
+            f"Received request to get executor address: {request.executor_name} from {client_ip}"
+        )
+
+        executor = ExecutorDispatcher.get_executor(EXECUTOR_DISPATCHER_MODE)
+        result = executor.get_container_address(request.executor_name)
+
+        return result
+    except Exception as e:
+        logger.error(
+            f"Error getting executor address for '{request.executor_name}': {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.post("/executor/delete")
 async def delete_executor(request: DeleteExecutorRequest, http_request: Request):
     try:
@@ -665,7 +702,7 @@ async def delete_executor(request: DeleteExecutorRequest, http_request: Request)
                 tracker = get_running_task_tracker()
                 heartbeat_mgr = get_heartbeat_manager()
 
-                heartbeat_mgr.delete_heartbeat(task_id_str, HeartbeatType.TASK)
+                await heartbeat_mgr.delete_heartbeat(task_id_str, HeartbeatType.TASK)
                 logger.info(
                     f"[DeleteExecutor] Removing task {task_id} from RunningTaskTracker "
                     f"(source: delete_executor, executor_name={request.executor_name})"
@@ -869,7 +906,7 @@ async def cancel_task(request: CancelTaskRequest, http_request: Request):
                 tracker = get_running_task_tracker()
 
                 # Delete heartbeat key
-                heartbeat_mgr.delete_heartbeat(task_id_str, HeartbeatType.TASK)
+                await heartbeat_mgr.delete_heartbeat(task_id_str, HeartbeatType.TASK)
                 # Remove from running tasks tracker
                 logger.info(
                     f"[CancelTask] Removing task {request.task_id} from RunningTaskTracker "
@@ -917,7 +954,7 @@ async def task_heartbeat(task_id: str, http_request: Request):
     )
 
     heartbeat_mgr = get_heartbeat_manager()
-    success = heartbeat_mgr.update_heartbeat(task_id, HeartbeatType.TASK)
+    success = await heartbeat_mgr.update_heartbeat(task_id, HeartbeatType.TASK)
 
     if not success:
         logger.warning(f"[TaskAPI] Failed to update heartbeat for task {task_id}")

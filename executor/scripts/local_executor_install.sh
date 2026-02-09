@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Wegent Executor Installation Script
-# This script downloads and installs the wegent-executor binary for macOS.
+# This script downloads and installs the wegent-executor binary for macOS and Linux.
 #
 # Usage:
 #   curl -fsSL https://github.com/wecode-ai/Wegent/releases/latest/download/local_executor_install.sh | bash
@@ -23,9 +23,19 @@ NC='\033[0m' # No Color
 
 # Configuration
 GITHUB_REPO="wecode-ai/Wegent"
-INSTALL_DIR="${HOME}/.wegent-executor/bin"
+EXECUTOR_HOME_DIR="${HOME}/.wegent-executor"
+INSTALL_DIR="${EXECUTOR_HOME_DIR}/bin"
 BINARY_NAME="wegent-executor"
 VERSION=""
+
+# Claude Code minimum version requirement
+# Based on Docker image version: @anthropic-ai/claude-code@2.1.27
+MIN_CLAUDE_CODE_VERSION="2.1.0"
+MIN_NODE_VERSION="18"
+
+# Browser plugin configuration
+BROWSER_PLUGIN_PACKAGE="@wegent/cdp-relay-server"
+BROWSER_PLUGIN_CHROME_EXT_PATH="${EXECUTOR_HOME_DIR}/node_modules/@wegent/cdp-relay-server/chrome-extension"
 
 # Print colored message
 print_info() {
@@ -44,6 +54,326 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Compare semantic versions
+# Returns 0 if version1 >= version2, 1 otherwise
+version_compare() {
+    local version1="$1"
+    local version2="$2"
+
+    # Remove 'v' prefix if present
+    version1="${version1#v}"
+    version2="${version2#v}"
+
+    # Split versions into arrays
+    IFS='.' read -ra v1_parts <<< "$version1"
+    IFS='.' read -ra v2_parts <<< "$version2"
+
+    # Compare each part
+    for i in 0 1 2; do
+        local v1_part="${v1_parts[$i]:-0}"
+        local v2_part="${v2_parts[$i]:-0}"
+
+        # Extract numeric part only (handles versions like "2.1.27-beta")
+        v1_part="${v1_part%%[^0-9]*}"
+        v2_part="${v2_part%%[^0-9]*}"
+
+        if (( v1_part > v2_part )); then
+            return 0
+        elif (( v1_part < v2_part )); then
+            return 1
+        fi
+    done
+
+    return 0  # Versions are equal
+}
+
+# Check if Node.js is installed
+check_nodejs() {
+    print_info "Checking Node.js installation..."
+
+    if ! command -v node &> /dev/null; then
+        print_error "Node.js is not installed."
+        print_error "Claude Code requires Node.js ${MIN_NODE_VERSION}+ to run."
+        echo ""
+        print_info "Please install Node.js first:"
+        echo "  - Visit: https://nodejs.org/"
+        if [[ "$OS" == "macos" ]]; then
+            echo "  - Or use Homebrew: brew install node"
+        elif [[ "$OS" == "linux" ]]; then
+            echo "  - Or use your package manager: apt install nodejs / dnf install nodejs"
+        fi
+        echo "  - Or use nvm: nvm install ${MIN_NODE_VERSION}"
+        echo ""
+        exit 1
+    fi
+
+    local node_version
+    node_version="$(node --version 2>/dev/null)"
+    # Remove 'v' prefix
+    local node_version_num="${node_version#v}"
+    local node_major="${node_version_num%%.*}"
+
+    if (( node_major < MIN_NODE_VERSION )); then
+        print_error "Node.js version ${node_version} is too old."
+        print_error "Claude Code requires Node.js ${MIN_NODE_VERSION}+ to run."
+        echo ""
+        print_info "Please upgrade Node.js:"
+        echo "  - Visit: https://nodejs.org/"
+        if [[ "$OS" == "macos" ]]; then
+            echo "  - Or use Homebrew: brew upgrade node"
+        elif [[ "$OS" == "linux" ]]; then
+            echo "  - Or use your package manager to upgrade nodejs"
+        fi
+        echo "  - Or use nvm: nvm install ${MIN_NODE_VERSION}"
+        echo ""
+        exit 1
+    fi
+
+    print_success "Node.js found: ${node_version}"
+}
+
+# Check if npm is available
+check_npm() {
+    if ! command -v npm &> /dev/null; then
+        print_error "npm is not installed."
+        print_error "npm is required to install Claude Code."
+        echo ""
+        print_info "npm usually comes with Node.js. Please reinstall Node.js."
+        echo ""
+        exit 1
+    fi
+}
+
+# Install or upgrade Claude Code
+install_claude_code() {
+    print_info "Checking Claude Code installation..."
+
+    local claude_installed=false
+    local current_version=""
+
+    # Check if Claude Code is installed
+    if command -v claude &> /dev/null; then
+        claude_installed=true
+        # Get current version - claude --version outputs something like "claude 2.1.27"
+        current_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+    fi
+
+    if [[ "$claude_installed" == "false" ]]; then
+        print_info "Claude Code not found, installing via npm..."
+        check_npm
+
+        if ! npm install -g @anthropic-ai/claude-code; then
+            print_error "Failed to install Claude Code via npm."
+            echo ""
+            print_info "You can try installing manually:"
+            echo "  npm install -g @anthropic-ai/claude-code"
+            echo ""
+            print_info "If you encounter permission issues, try:"
+            echo "  sudo npm install -g @anthropic-ai/claude-code"
+            echo ""
+            exit 1
+        fi
+
+        # Verify installation
+        if ! command -v claude &> /dev/null; then
+            print_error "Claude Code installation failed - 'claude' command not found."
+            exit 1
+        fi
+
+        current_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+        if [[ -z "$current_version" ]] || ! version_compare "$current_version" "$MIN_CLAUDE_CODE_VERSION"; then
+            print_error "Claude Code version ${current_version:-unknown} is below required ${MIN_CLAUDE_CODE_VERSION}"
+            exit 1
+        fi
+        print_success "Claude Code installed: v${current_version}"
+
+    elif [[ -n "$current_version" ]]; then
+        # Check version compatibility
+        if ! version_compare "$current_version" "$MIN_CLAUDE_CODE_VERSION"; then
+            print_warning "Claude Code version ${current_version} is below minimum required version ${MIN_CLAUDE_CODE_VERSION}"
+            print_info "Upgrading Claude Code..."
+            check_npm
+
+            if ! npm update -g @anthropic-ai/claude-code; then
+                print_warning "npm update command failed, checking current version..."
+                # Re-read and validate version even after failed update attempt
+                current_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+                if [[ -z "$current_version" ]]; then
+                    print_error "Failed to upgrade Claude Code and cannot determine current version."
+                    print_info "Please upgrade manually and re-run this installer:"
+                    echo "  npm update -g @anthropic-ai/claude-code"
+                    exit 1
+                fi
+                if ! version_compare "$current_version" "$MIN_CLAUDE_CODE_VERSION"; then
+                    print_error "Failed to upgrade Claude Code. Current version ${current_version} is below required ${MIN_CLAUDE_CODE_VERSION}"
+                    print_info "Please upgrade manually and re-run this installer:"
+                    echo "  npm update -g @anthropic-ai/claude-code"
+                    exit 1
+                fi
+                # Update succeeded despite npm reporting failure, or version was already sufficient
+                print_warning "npm reported failure but Claude Code version ${current_version} meets requirements."
+            fi
+
+            # Re-read and validate version after successful update
+            current_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+            if [[ -z "$current_version" ]]; then
+                print_error "Claude Code upgrade completed but version cannot be determined."
+                print_info "Please verify installation manually: claude --version"
+                exit 1
+            fi
+            if ! version_compare "$current_version" "$MIN_CLAUDE_CODE_VERSION"; then
+                print_error "Claude Code version ${current_version} is still below required ${MIN_CLAUDE_CODE_VERSION}"
+                print_info "Please upgrade manually and re-run this installer:"
+                echo "  npm update -g @anthropic-ai/claude-code"
+                exit 1
+            fi
+            print_success "Claude Code upgraded to: v${current_version}"
+        else
+            print_success "Claude Code found: v${current_version}"
+        fi
+    else
+        # Version unknown branch - attempt to re-parse and validate
+        print_warning "Claude Code found but version could not be determined initially. Retrying..."
+        current_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+        if [[ -z "$current_version" ]]; then
+            print_error "Claude Code is installed but version cannot be parsed."
+            print_info "Please reinstall Claude Code:"
+            echo "  npm uninstall -g @anthropic-ai/claude-code"
+            echo "  npm install -g @anthropic-ai/claude-code"
+            exit 1
+        fi
+        if ! version_compare "$current_version" "$MIN_CLAUDE_CODE_VERSION"; then
+            print_error "Claude Code version ${current_version} is below required ${MIN_CLAUDE_CODE_VERSION}"
+            print_info "Please upgrade Claude Code:"
+            echo "  npm update -g @anthropic-ai/claude-code"
+            exit 1
+        fi
+        print_success "Claude Code found: v${current_version}"
+    fi
+}
+
+# Print Chrome extension installation instructions
+print_chrome_extension_instructions() {
+    local ext_path="${BROWSER_PLUGIN_CHROME_EXT_PATH/${HOME}/\~}"
+    echo ""
+    echo -e "${BLUE}📋 Manual step required - Install Chrome extension:${NC}"
+    echo ""
+    echo "   1. Open Chrome and navigate to: chrome://extensions"
+    echo "   2. Enable \"Developer mode\" (toggle in top-right corner)"
+    echo "   3. Click \"Load unpacked\""
+    echo "   4. Select folder: ${ext_path}"
+    echo "   5. Open any webpage and wait for the extension icon to show \"ON\""
+    echo ""
+}
+
+# Install browser plugin
+install_browser_plugin() {
+    print_info "Installing browser plugin (${BROWSER_PLUGIN_PACKAGE})..."
+    echo ""
+
+    # Step 1: Ensure directories exist
+    print_info "Creating directories..."
+    mkdir -p "${EXECUTOR_HOME_DIR}"
+    mkdir -p "${INSTALL_DIR}"
+
+    # Step 2: Install package using npm (use official registry)
+    print_info "Installing npm package..."
+    if ! npm install "${BROWSER_PLUGIN_PACKAGE}" --prefix "${EXECUTOR_HOME_DIR}" --registry https://registry.npmjs.org; then
+        print_error "Failed to install ${BROWSER_PLUGIN_PACKAGE}"
+        return 1
+    fi
+
+    # Step 3: Create symbolic links
+    print_info "Creating symbolic links..."
+    local node_modules_base="../node_modules/@wegent/cdp-relay-server/dist"
+
+    # Remove existing links if they exist
+    rm -f "${INSTALL_DIR}/browser-tool" 2>/dev/null || true
+    rm -f "${INSTALL_DIR}/cdp-relay-server" 2>/dev/null || true
+
+    # Create new symlinks
+    ln -s "${node_modules_base}/tool-cli.js" "${INSTALL_DIR}/browser-tool"
+    print_info "   Created: browser-tool -> tool-cli.js"
+
+    ln -s "${node_modules_base}/cli.js" "${INSTALL_DIR}/cdp-relay-server"
+    print_info "   Created: cdp-relay-server -> cli.js"
+
+    # Step 4: Make files executable
+    local tool_cli_path="${EXECUTOR_HOME_DIR}/node_modules/@wegent/cdp-relay-server/dist/tool-cli.js"
+    local cli_path="${EXECUTOR_HOME_DIR}/node_modules/@wegent/cdp-relay-server/dist/cli.js"
+
+    if [[ -f "$tool_cli_path" ]]; then
+        chmod +x "$tool_cli_path"
+    fi
+    if [[ -f "$cli_path" ]]; then
+        chmod +x "$cli_path"
+    fi
+
+    # Step 5: Start/restart cdp-relay-server
+    print_info "Starting cdp-relay-server..."
+    local cdp_relay_server_path="${INSTALL_DIR}/cdp-relay-server"
+
+    if ! node "${cdp_relay_server_path}" --restart 2>/dev/null; then
+        print_warning "cdp-relay-server may not have started correctly."
+        print_warning "You can manually run: cdp-relay-server --restart"
+    fi
+
+    print_success "Browser plugin installed successfully!"
+    print_chrome_extension_instructions
+
+    # Step 6: Try to open Chrome extensions page using browser-tool
+    print_info "Opening Chrome extensions page..."
+    local browser_tool_path="${INSTALL_DIR}/browser-tool"
+
+    # Use browser-tool to navigate to chrome://extensions
+    if [[ -f "${EXECUTOR_HOME_DIR}/node_modules/@wegent/cdp-relay-server/dist/tool-cli.js" ]]; then
+        node "${browser_tool_path}" '{"action":"navigate","url":"chrome://extensions"}' 2>/dev/null &
+        sleep 1
+    else
+        print_warning "browser-tool not found, please manually open chrome://extensions"
+    fi
+
+    echo ""
+    print_warning "重要提醒: 请务必在弹出的浏览器窗口中安装插件!"
+    print_warning "Important: Please install the extension in the browser window!"
+    echo ""
+}
+
+# Ask user if they want to install browser plugin
+prompt_browser_plugin_install() {
+    echo ""
+    echo "======================================"
+    echo -e "${BLUE}Browser Plugin Installation${NC}"
+    echo "======================================"
+    echo ""
+    echo "The browser plugin enables AI agents to interact with web browsers."
+    echo "It includes a Chrome extension and a CDP relay server for browser automation."
+    echo ""
+
+    # Check if running in non-interactive mode
+    if [[ ! -t 0 ]]; then
+        print_info "Non-interactive mode detected. Skipping browser plugin installation."
+        print_info "To install the browser plugin later, run:"
+        echo ""
+        echo "  npm install ${BROWSER_PLUGIN_PACKAGE} --prefix ${EXECUTOR_HOME_DIR} --registry https://registry.npmjs.org"
+        echo ""
+        return
+    fi
+
+    read -p "Would you like to install the browser plugin? [y/N] " -n 1 -r
+    echo ""
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        install_browser_plugin
+    else
+        print_info "Skipping browser plugin installation."
+        print_info "To install it later, run:"
+        echo ""
+        echo "  npm install ${BROWSER_PLUGIN_PACKAGE} --prefix ${EXECUTOR_HOME_DIR} --registry https://registry.npmjs.org"
+        echo ""
+    fi
+}
+
 # Detect OS and architecture
 detect_platform() {
     local os
@@ -57,7 +387,17 @@ detect_platform() {
             OS="macos"
             ;;
         Linux)
-            print_error "Linux is not yet supported. Please use Docker deployment."
+            OS="linux"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            print_error "This script does not support Windows directly."
+            print_info "Please use PowerShell to install on Windows:"
+            echo ""
+            echo "  irm https://github.com/${GITHUB_REPO}/releases/latest/download/local_executor_install.ps1 | iex"
+            echo ""
+            print_info "Or with a specific version:"
+            echo '  $env:WEGENT_VERSION="v1.0.0"; irm https://github.com/wecode-ai/Wegent/releases/latest/download/local_executor_install.ps1 | iex'
+            echo ""
             exit 1
             ;;
         *)
@@ -195,9 +535,12 @@ print_usage_instructions() {
     echo ""
     echo "Add this line to your ~/.zshrc or ~/.bashrc to make it permanent."
     echo ""
-    print_warning "First run may require allowing the binary in:"
-    print_warning "System Settings > Privacy & Security"
-    echo ""
+    # Platform-specific notes
+    if [[ "$OS" == "macos" ]]; then
+        print_warning "First run may require allowing the binary in:"
+        print_warning "System Settings > Privacy & Security"
+        echo ""
+    fi
 }
 
 # Main function
@@ -210,10 +553,13 @@ main() {
 
     parse_args "$@"
     detect_platform
+    check_nodejs
+    install_claude_code
     get_download_url
     create_install_dir
     download_binary
     verify_installation
+    prompt_browser_plugin_install
     print_usage_instructions
 }
 
