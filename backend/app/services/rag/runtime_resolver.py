@@ -11,7 +11,7 @@ from app.services.knowledge.index_runtime import (
     get_kb_index_info,
     get_kb_index_info_by_record,
 )
-from app.services.rag.embedding.factory import _process_custom_headers_placeholders
+from shared.utils.placeholder import process_custom_headers_placeholders
 from app.services.rag.runtime_specs import (
     ConnectionTestRuntimeSpec,
     DeleteRuntimeSpec,
@@ -81,6 +81,7 @@ class RagRuntimeResolver:
             ),
             splitter_config=splitter_config_dict,
             user_name=user_name,
+            user_id=user_id,
         )
 
     def build_query_runtime_spec(
@@ -655,7 +656,7 @@ class RagRuntimeResolver:
         protocol = spec.get("protocol") or env.get("model")
         custom_headers = env.get("custom_headers", {})
         if custom_headers and isinstance(custom_headers, dict):
-            custom_headers = _process_custom_headers_placeholders(
+            custom_headers = process_custom_headers_placeholders(
                 custom_headers,
                 user_name,
             )

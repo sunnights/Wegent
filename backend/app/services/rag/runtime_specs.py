@@ -55,6 +55,7 @@ class IndexRuntimeSpec(RuntimeSpecModel):
         default_factory=build_runtime_default_splitter_config
     )
     user_name: Optional[str] = None
+    user_id: Optional[int] = None
 
     @field_validator("splitter_config", mode="before")
     @classmethod

@@ -63,13 +63,7 @@ from .knowledge_runtime_protocol import (
     RemoteQueryRequest,
     RemoteQueryResponse,
     RemoteRagError,
-    RemoteTestConnectionRequest,
-    RuntimeEmbeddingModelConfig,
-    RuntimeRetrievalConfig,
-    RuntimeRetrieverConfig,
 )
-
-# OpenAI Request Converter
 from .openai_converter import (
     OpenAIEventConverter,
     OpenAIRequestConverter,
@@ -101,6 +95,14 @@ from .responses_api_factory import (
     TransportFactory,
     TransportType,
 )
+
+# Runtime configuration models (migrated from knowledge_runtime_protocol.py)
+from .runtime_config import (
+    RetrievalMode,
+    RuntimeEmbeddingModelConfig,
+    RuntimeRetrievalConfig,
+    RuntimeRetrieverConfig,
+)
 from .splitter_config import (
     FlatChunkConfig,
     HierarchicalChunkConfig,
@@ -129,9 +131,12 @@ __all__ = [
     "PresignedUrlContentRef",
     "KnowledgeRuntimeAuth",
     "RemoteRagError",
+    # Runtime config models (from runtime_config.py)
     "RuntimeRetrieverConfig",
     "RuntimeEmbeddingModelConfig",
     "RuntimeRetrievalConfig",
+    "RetrievalMode",
+    # Protocol models
     "RemoteKnowledgeBaseQueryConfig",
     "RemoteIndexRequest",
     "RemoteDeleteDocumentIndexRequest",
@@ -140,7 +145,6 @@ __all__ = [
     "RemoteListChunksRequest",
     "RemoteListChunkRecord",
     "RemoteListChunksResponse",
-    "RemoteTestConnectionRequest",
     "RemoteQueryRequest",
     "RemoteQueryRecord",
     "RemoteQueryResponse",

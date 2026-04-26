@@ -14,9 +14,7 @@ from app.core.config import settings
 from app.models.user import User
 from app.schemas.kind import Retriever
 from app.services.adapters.retriever_kinds import retriever_kinds_service
-from app.services.rag.gateway_factory import get_query_gateway
 from app.services.rag.local_gateway import LocalRagGateway
-from app.services.rag.remote_gateway import RemoteRagGatewayError
 from app.services.rag.runtime_specs import ConnectionTestRuntimeSpec
 from knowledge_engine.storage.factory import (
     create_storage_backend_from_config,
@@ -283,11 +281,8 @@ async def test_retriever_connection(
                 },
             )
         )
-        gateway = get_query_gateway()
-        try:
-            return await gateway.test_connection(runtime_spec)
-        except RemoteRagGatewayError:
-            return await LocalRagGateway().test_connection(runtime_spec)
+        # test-connection always uses local gateway
+        return await LocalRagGateway().test_connection(runtime_spec)
 
     except ValueError as e:
         return {"success": False, "message": str(e)}
