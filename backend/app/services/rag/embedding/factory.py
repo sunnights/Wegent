@@ -13,12 +13,12 @@ from llama_index.core.base.embeddings.base import BaseEmbedding
 from sqlalchemy.orm import Session
 
 from app.models.kind import Kind
-from shared.utils.placeholder import process_custom_headers_placeholders
 from knowledge_engine.embedding.factory import (
     create_embedding_model_from_runtime_config as engine_create_embedding_model_from_runtime_config,
 )
 from shared.models import RuntimeEmbeddingModelConfig
 from shared.utils.crypto import decrypt_api_key
+from shared.utils.placeholder import process_custom_headers_placeholders
 
 logger = logging.getLogger(__name__)
 

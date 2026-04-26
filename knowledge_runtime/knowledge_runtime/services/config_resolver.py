@@ -198,7 +198,9 @@ class KnowledgeRuntimeConfigResolver:
                     else None
                 ),
                 keyword_weight=(
-                    retrieval_config_spec.get("hybrid_weights", {}).get("keyword_weight")
+                    retrieval_config_spec.get("hybrid_weights", {}).get(
+                        "keyword_weight"
+                    )
                     if retrieval_config_spec.get("retrieval_mode") == "hybrid"
                     else None
                 ),
@@ -371,7 +373,9 @@ class KnowledgeRuntimeConfigResolver:
                 "api_key": self._decrypt_optional(env.get("api_key")),
                 "base_url": env.get("base_url"),
                 "model_id": env.get("model_id"),
-                "custom_headers": custom_headers if isinstance(custom_headers, dict) else {},
+                "custom_headers": (
+                    custom_headers if isinstance(custom_headers, dict) else {}
+                ),
                 "dimensions": dimensions,
             },
         )
@@ -453,7 +457,11 @@ class KnowledgeRuntimeConfigResolver:
         """Get splitter_config from knowledge_documents table."""
         if document_id is None:
             return {}
-        doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document_id).first()
+        doc = (
+            db.query(KnowledgeDocument)
+            .filter(KnowledgeDocument.id == document_id)
+            .first()
+        )
         if doc is None:
             return {}
         return doc.splitter_config or {}
