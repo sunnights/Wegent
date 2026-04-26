@@ -18,18 +18,13 @@ from app.services.rag.gateway_factory import (
 from app.services.rag.local_gateway import LocalRagGateway
 from app.services.rag.remote_gateway import RemoteRagGateway, RemoteRagGatewayError
 from app.services.rag.runtime_specs import (
-    ConnectionTestRuntimeSpec,
     DeleteRuntimeSpec,
     DropKnowledgeIndexRuntimeSpec,
     IndexRuntimeSpec,
     IndexSource,
     ListChunksRuntimeSpec,
     PurgeKnowledgeRuntimeSpec,
-    QueryKnowledgeBaseRuntimeConfig,
     QueryRuntimeSpec,
-    RuntimeEmbeddingModelConfig,
-    RuntimeRetrievalConfig,
-    RuntimeRetrieverConfig,
 )
 from shared.models import PresignedUrlContentRef
 
@@ -79,27 +74,7 @@ async def test_remote_gateway_index_document_posts_runtime_request(mocker) -> No
         embedding_model_name="embedding-a",
         embedding_model_namespace="default",
         source=IndexSource(source_type="attachment", attachment_id=9),
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={
-                "type": "qdrant",
-                "url": "http://qdrant:6333",
-                "indexStrategy": {"mode": "per_dataset"},
-            },
-        ),
-        embedding_model_config=RuntimeEmbeddingModelConfig(
-            model_name="embedding-a",
-            model_namespace="default",
-            resolved_config={
-                "protocol": "openai",
-                "model_id": "text-embedding-3-small",
-                "base_url": "https://api.openai.com/v1",
-            },
-        ),
-        splitter_config={"type": "sentence"},
-        index_families=["chunk_vector", "summary_vector_index"],
-        user_name="alice",
+        user_id=42,
     )
 
     result = await gateway.index_document(spec, db=db)
@@ -108,47 +83,17 @@ async def test_remote_gateway_index_document_posts_runtime_request(mocker) -> No
     post_mock.assert_awaited_once()
     args, kwargs = post_mock.await_args
     assert args[0] == "http://knowledge-runtime/internal/rag/index"
+    # Reference-mode: only knowledge_base_id, document_id, user_id, and content metadata
     assert kwargs["json"] == {
         "knowledge_base_id": 1,
         "document_id": 2,
-        "index_owner_user_id": 3,
-        "retriever_config": {
-            "name": "retriever-a",
-            "namespace": "default",
-            "storage_config": {
-                "type": "qdrant",
-                "url": "http://qdrant:6333",
-                "indexStrategy": {"mode": "per_dataset"},
-            },
-        },
-        "embedding_model_config": {
-            "model_name": "embedding-a",
-            "model_namespace": "default",
-            "resolved_config": {
-                "protocol": "openai",
-                "model_id": "text-embedding-3-small",
-                "base_url": "https://api.openai.com/v1",
-            },
-        },
-        "splitter_config": {
-            "chunk_strategy": "flat",
-            "format_enhancement": "none",
-            "flat_config": {
-                "chunk_size": 1024,
-                "chunk_overlap": 200,
-                "separator": "\n\n",
-            },
-            "markdown_enhancement": {"enabled": False},
-            "legacy_type": "sentence",
-        },
-        "index_families": ["chunk_vector", "summary_vector_index"],
+        "user_id": 42,
         "content_ref": {
             "kind": "presigned_url",
             "url": "https://storage.example.com/release-notes.md",
         },
         "source_file": "release-notes.md",
         "file_extension": ".md",
-        "user_name": "alice",
     }
 
 
@@ -182,34 +127,6 @@ async def test_remote_gateway_query_omits_backend_only_route_fields(mocker) -> N
         route_mode="direct_injection",
         restricted_mode=True,
         user_id=8,
-        knowledge_base_configs=[
-            QueryKnowledgeBaseRuntimeConfig(
-                knowledge_base_id=1,
-                index_owner_user_id=8,
-                retriever_config=RuntimeRetrieverConfig(
-                    name="retriever-a",
-                    namespace="default",
-                    storage_config={
-                        "type": "qdrant",
-                        "url": "http://qdrant:6333",
-                    },
-                ),
-                embedding_model_config=RuntimeEmbeddingModelConfig(
-                    model_name="embedding-a",
-                    model_namespace="default",
-                    resolved_config={
-                        "protocol": "openai",
-                        "model_id": "text-embedding-3-small",
-                    },
-                ),
-                retrieval_config=RuntimeRetrievalConfig(
-                    top_k=20,
-                    score_threshold=0.7,
-                    retrieval_mode="vector",
-                ),
-            )
-        ],
-        enabled_index_families=["chunk_vector", "summary_vector_index"],
         retrieval_policy="summary_then_chunk_expand",
     )
 
@@ -233,38 +150,14 @@ async def test_remote_gateway_query_omits_backend_only_route_fields(mocker) -> N
     }
     args, kwargs = post_mock.await_args
     assert args[0] == "http://knowledge-runtime/internal/rag/query"
+    # Reference-mode: only knowledge_base_ids, query, max_results, user_id, and
+    # retrieval_policy; backend-only fields (knowledge_base_configs,
+    # enabled_index_families, etc.) are NOT forwarded
     assert kwargs["json"] == {
         "knowledge_base_ids": [1],
         "query": "release checklist",
         "max_results": 5,
-        "knowledge_base_configs": [
-            {
-                "knowledge_base_id": 1,
-                "index_owner_user_id": 8,
-                "retriever_config": {
-                    "name": "retriever-a",
-                    "namespace": "default",
-                    "storage_config": {
-                        "type": "qdrant",
-                        "url": "http://qdrant:6333",
-                    },
-                },
-                "embedding_model_config": {
-                    "model_name": "embedding-a",
-                    "model_namespace": "default",
-                    "resolved_config": {
-                        "protocol": "openai",
-                        "model_id": "text-embedding-3-small",
-                    },
-                },
-                "retrieval_config": {
-                    "top_k": 20,
-                    "score_threshold": 0.7,
-                    "retrieval_mode": "vector",
-                },
-            }
-        ],
-        "enabled_index_families": ["chunk_vector", "summary_vector_index"],
+        "user_id": 8,
         "retrieval_policy": "summary_then_chunk_expand",
     }
 
@@ -294,33 +187,6 @@ async def test_remote_gateway_translates_structured_remote_errors(mocker) -> Non
             QueryRuntimeSpec(
                 knowledge_base_ids=[1],
                 query="release",
-                knowledge_base_configs=[
-                    QueryKnowledgeBaseRuntimeConfig(
-                        knowledge_base_id=1,
-                        index_owner_user_id=8,
-                        retriever_config=RuntimeRetrieverConfig(
-                            name="retriever-a",
-                            namespace="default",
-                            storage_config={
-                                "type": "qdrant",
-                                "url": "http://qdrant:6333",
-                            },
-                        ),
-                        embedding_model_config=RuntimeEmbeddingModelConfig(
-                            model_name="embedding-a",
-                            model_namespace="default",
-                            resolved_config={
-                                "protocol": "openai",
-                                "model_id": "text-embedding-3-small",
-                            },
-                        ),
-                        retrieval_config=RuntimeRetrievalConfig(
-                            top_k=20,
-                            score_threshold=0.7,
-                            retrieval_mode="vector",
-                        ),
-                    )
-                ],
             )
         )
 
@@ -349,33 +215,6 @@ async def test_remote_gateway_wraps_transport_errors(mocker) -> None:
             QueryRuntimeSpec(
                 knowledge_base_ids=[1],
                 query="release",
-                knowledge_base_configs=[
-                    QueryKnowledgeBaseRuntimeConfig(
-                        knowledge_base_id=1,
-                        index_owner_user_id=8,
-                        retriever_config=RuntimeRetrieverConfig(
-                            name="retriever-a",
-                            namespace="default",
-                            storage_config={
-                                "type": "qdrant",
-                                "url": "http://qdrant:6333",
-                            },
-                        ),
-                        embedding_model_config=RuntimeEmbeddingModelConfig(
-                            model_name="embedding-a",
-                            model_namespace="default",
-                            resolved_config={
-                                "protocol": "openai",
-                                "model_id": "text-embedding-3-small",
-                            },
-                        ),
-                        retrieval_config=RuntimeRetrievalConfig(
-                            top_k=20,
-                            score_threshold=0.7,
-                            retrieval_mode="vector",
-                        ),
-                    )
-                ],
             )
         )
 
@@ -401,27 +240,7 @@ async def test_remote_gateway_delete_posts_resolved_retriever_config(mocker) -> 
         knowledge_base_id=1,
         document_ref="9",
         index_owner_user_id=7,
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={
-                "type": "elasticsearch",
-                "url": "http://es:9200",
-                "indexStrategy": {"mode": "per_user"},
-            },
-        ),
-    )
-
-    result = await gateway.delete_document_index(spec, db=MagicMock())
-
-    assert result == {"status": "accepted", "knowledge_id": "1"}
-    args, kwargs = post_mock.await_args
-    assert args[0] == "http://knowledge-runtime/internal/rag/delete-document-index"
-    assert kwargs["json"] == {
-        "knowledge_base_id": 1,
-        "document_ref": "9",
-        "index_owner_user_id": 7,
-        "retriever_config": {
+        retriever_config={
             "name": "retriever-a",
             "namespace": "default",
             "storage_config": {
@@ -430,7 +249,17 @@ async def test_remote_gateway_delete_posts_resolved_retriever_config(mocker) -> 
                 "indexStrategy": {"mode": "per_user"},
             },
         },
-        "enabled_index_families": ["chunk_vector"],
+    )
+
+    result = await gateway.delete_document_index(spec, db=MagicMock())
+
+    assert result == {"status": "accepted", "knowledge_id": "1"}
+    args, kwargs = post_mock.await_args
+    assert args[0] == "http://knowledge-runtime/internal/rag/delete-document-index"
+    # Reference-mode: only knowledge_base_id, document_ref; KR resolves the rest
+    assert kwargs["json"] == {
+        "knowledge_base_id": 1,
+        "document_ref": "9",
     }
 
 
@@ -450,26 +279,7 @@ async def test_remote_gateway_purge_index_posts_runtime_request(mocker) -> None:
     spec = PurgeKnowledgeRuntimeSpec(
         knowledge_base_id=1,
         index_owner_user_id=7,
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={
-                "type": "elasticsearch",
-                "url": "http://es:9200",
-                "indexStrategy": {"mode": "per_user"},
-            },
-        ),
-    )
-
-    result = await gateway.purge_knowledge_index(spec, db=MagicMock())
-
-    assert result == {"status": "deleted", "knowledge_id": "1", "deleted_chunks": 8}
-    args, kwargs = post_mock.await_args
-    assert args[0] == "http://knowledge-runtime/internal/rag/purge-knowledge-index"
-    assert kwargs["json"] == {
-        "knowledge_base_id": 1,
-        "index_owner_user_id": 7,
-        "retriever_config": {
+        retriever_config={
             "name": "retriever-a",
             "namespace": "default",
             "storage_config": {
@@ -478,6 +288,16 @@ async def test_remote_gateway_purge_index_posts_runtime_request(mocker) -> None:
                 "indexStrategy": {"mode": "per_user"},
             },
         },
+    )
+
+    result = await gateway.purge_knowledge_index(spec, db=MagicMock())
+
+    assert result == {"status": "deleted", "knowledge_id": "1", "deleted_chunks": 8}
+    args, kwargs = post_mock.await_args
+    assert args[0] == "http://knowledge-runtime/internal/rag/purge-knowledge-index"
+    # Reference-mode: only knowledge_base_id; KR resolves the rest from DB
+    assert kwargs["json"] == {
+        "knowledge_base_id": 1,
     }
 
 
@@ -497,26 +317,7 @@ async def test_remote_gateway_drop_index_posts_runtime_request(mocker) -> None:
     spec = DropKnowledgeIndexRuntimeSpec(
         knowledge_base_id=1,
         index_owner_user_id=7,
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={
-                "type": "elasticsearch",
-                "url": "http://es:9200",
-                "indexStrategy": {"mode": "per_dataset"},
-            },
-        ),
-    )
-
-    result = await gateway.drop_knowledge_index(spec, db=MagicMock())
-
-    assert result == {"status": "dropped", "knowledge_id": "1", "index_name": "kb_1"}
-    args, kwargs = post_mock.await_args
-    assert args[0] == "http://knowledge-runtime/internal/rag/drop-knowledge-index"
-    assert kwargs["json"] == {
-        "knowledge_base_id": 1,
-        "index_owner_user_id": 7,
-        "retriever_config": {
+        retriever_config={
             "name": "retriever-a",
             "namespace": "default",
             "storage_config": {
@@ -525,46 +326,16 @@ async def test_remote_gateway_drop_index_posts_runtime_request(mocker) -> None:
                 "indexStrategy": {"mode": "per_dataset"},
             },
         },
-    }
-
-
-@pytest.mark.asyncio
-async def test_remote_gateway_test_connection_posts_resolved_retriever_config(
-    mocker,
-) -> None:
-    post_mock = mocker.patch(
-        "httpx.AsyncClient.post",
-        return_value=_build_response(
-            url="http://knowledge-runtime/internal/rag/test-connection",
-            status_code=200,
-            json_body={"success": True, "message": "Connection successful"},
-        ),
-    )
-    gateway = RemoteRagGateway(
-        base_url="http://knowledge-runtime",
-    )
-    spec = ConnectionTestRuntimeSpec(
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={"type": "elasticsearch", "url": "http://es:9200"},
-        )
     )
 
-    result = await gateway.test_connection(spec, db=MagicMock())
+    result = await gateway.drop_knowledge_index(spec, db=MagicMock())
 
-    assert result == {"success": True, "message": "Connection successful"}
+    assert result == {"status": "dropped", "knowledge_id": "1", "index_name": "kb_1"}
     args, kwargs = post_mock.await_args
-    assert args[0] == "http://knowledge-runtime/internal/rag/test-connection"
+    assert args[0] == "http://knowledge-runtime/internal/rag/drop-knowledge-index"
+    # Reference-mode: only knowledge_base_id; KR resolves the rest from DB
     assert kwargs["json"] == {
-        "retriever_config": {
-            "name": "retriever-a",
-            "namespace": "default",
-            "storage_config": {
-                "type": "elasticsearch",
-                "url": "http://es:9200",
-            },
-        }
+        "knowledge_base_id": 1,
     }
 
 
@@ -595,14 +366,14 @@ async def test_remote_gateway_list_chunks_posts_runtime_request(mocker) -> None:
     spec = ListChunksRuntimeSpec(
         knowledge_base_id=1,
         index_owner_user_id=8,
-        retriever_config=RuntimeRetrieverConfig(
-            name="retriever-a",
-            namespace="default",
-            storage_config={
+        retriever_config={
+            "name": "retriever-a",
+            "namespace": "default",
+            "storage_config": {
                 "type": "qdrant",
                 "url": "http://qdrant:6333",
             },
-        ),
+        },
         max_chunks=1000,
         query="list_index_chunks",
         metadata_condition={
@@ -629,17 +400,10 @@ async def test_remote_gateway_list_chunks_posts_runtime_request(mocker) -> None:
     }
     args, kwargs = post_mock.await_args
     assert args[0] == "http://knowledge-runtime/internal/rag/all-chunks"
+    # Reference-mode: only knowledge_base_id, max_chunks, query, metadata_condition;
+    # KR resolves retriever_config from DB
     assert kwargs["json"] == {
         "knowledge_base_id": 1,
-        "index_owner_user_id": 8,
-        "retriever_config": {
-            "name": "retriever-a",
-            "namespace": "default",
-            "storage_config": {
-                "type": "qdrant",
-                "url": "http://qdrant:6333",
-            },
-        },
         "max_chunks": 1000,
         "query": "list_index_chunks",
         "metadata_condition": {
@@ -702,23 +466,6 @@ async def test_gateway_adds_auth_header_when_token_configured(mocker) -> None:
     spec = QueryRuntimeSpec(
         knowledge_base_ids=[1],
         query="test",
-        knowledge_base_configs=[
-            QueryKnowledgeBaseRuntimeConfig(
-                knowledge_base_id=1,
-                index_owner_user_id=1,
-                retriever_config=RuntimeRetrieverConfig(
-                    name="test",
-                    namespace="default",
-                    storage_config={"type": "elasticsearch", "url": "http://es:9200"},
-                ),
-                embedding_model_config=RuntimeEmbeddingModelConfig(
-                    model_name="test",
-                    model_namespace="default",
-                    resolved_config={"protocol": "openai", "model_id": "test-model"},
-                ),
-                retrieval_config=RuntimeRetrievalConfig(),
-            )
-        ],
     )
 
     await gateway.query(spec)
@@ -749,23 +496,6 @@ async def test_gateway_no_auth_header_when_token_empty(mocker, monkeypatch) -> N
     spec = QueryRuntimeSpec(
         knowledge_base_ids=[1],
         query="test",
-        knowledge_base_configs=[
-            QueryKnowledgeBaseRuntimeConfig(
-                knowledge_base_id=1,
-                index_owner_user_id=1,
-                retriever_config=RuntimeRetrieverConfig(
-                    name="test",
-                    namespace="default",
-                    storage_config={"type": "elasticsearch", "url": "http://es:9200"},
-                ),
-                embedding_model_config=RuntimeEmbeddingModelConfig(
-                    model_name="test",
-                    model_namespace="default",
-                    resolved_config={"protocol": "openai", "model_id": "test-model"},
-                ),
-                retrieval_config=RuntimeRetrievalConfig(),
-            )
-        ],
     )
 
     await gateway.query(spec)
@@ -797,23 +527,6 @@ async def test_gateway_uses_settings_token_when_not_provided(
     spec = QueryRuntimeSpec(
         knowledge_base_ids=[1],
         query="test",
-        knowledge_base_configs=[
-            QueryKnowledgeBaseRuntimeConfig(
-                knowledge_base_id=1,
-                index_owner_user_id=1,
-                retriever_config=RuntimeRetrieverConfig(
-                    name="test",
-                    namespace="default",
-                    storage_config={"type": "elasticsearch", "url": "http://es:9200"},
-                ),
-                embedding_model_config=RuntimeEmbeddingModelConfig(
-                    model_name="test",
-                    model_namespace="default",
-                    resolved_config={"protocol": "openai", "model_id": "test-model"},
-                ),
-                retrieval_config=RuntimeRetrievalConfig(),
-            )
-        ],
     )
 
     await gateway.query(spec)
