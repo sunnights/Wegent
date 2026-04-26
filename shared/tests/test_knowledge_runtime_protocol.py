@@ -33,35 +33,22 @@ def test_shared_models_exports_knowledge_runtime_protocol_types() -> None:
         "RemoteQueryRequest",
         "RemoteQueryRecord",
         "RemoteQueryResponse",
-        "RemoteTestConnectionRequest",
+        # RemoteTestConnectionRequest removed (KR test-connection endpoint deleted)
     ]
 
     for name in exported_names:
         assert getattr(shared_models, name, None) is not None
 
 
-def test_remote_index_request_accepts_backend_attachment_stream_content_ref() -> None:
+def test_remote_index_request_reference_mode() -> None:
+    """Test RemoteIndexRequest with reference-mode (knowledge_base_id only)."""
     remote_index_request = _require_model("RemoteIndexRequest")
 
     request = remote_index_request.model_validate(
         {
             "knowledge_base_id": 11,
             "document_id": 22,
-            "index_owner_user_id": 33,
-            "retriever_config": {
-                "name": "retriever-a",
-                "namespace": "default",
-                "storage_config": {
-                    "type": "milvus",
-                    "url": "http://milvus:19530",
-                },
-            },
-            "embedding_model_config": {
-                "model_name": "text-embedding-3-large",
-                "model_namespace": "default",
-                "resolved_config": {"protocol": "openai"},
-            },
-            "index_families": ["chunk_vector"],
+            "user_id": 42,
             "content_ref": {
                 "kind": "backend_attachment_stream",
                 "url": "http://backend:8000/api/internal/rag/content/22",
@@ -70,6 +57,9 @@ def test_remote_index_request_accepts_backend_attachment_stream_content_ref() ->
         }
     )
 
+    assert request.knowledge_base_id == 11
+    assert request.document_id == 22
+    assert request.user_id == 42
     assert request.content_ref.kind == "backend_attachment_stream"
     assert request.content_ref.auth_token == "test-token"
 
@@ -81,25 +71,31 @@ def test_remote_index_request_rejects_unknown_content_ref_kind() -> None:
         remote_index_request.model_validate(
             {
                 "knowledge_base_id": 11,
-                "document_id": 22,
-                "index_owner_user_id": 33,
-                "retriever_config": {
-                    "name": "retriever-a",
-                    "namespace": "default",
-                    "storage_config": {
-                        "type": "milvus",
-                        "url": "http://milvus:19530",
-                    },
-                },
-                "embedding_model_config": {
-                    "model_name": "text-embedding-3-large",
-                    "model_namespace": "default",
-                    "resolved_config": {"protocol": "openai"},
-                },
-                "index_families": ["chunk_vector"],
                 "content_ref": {
                     "kind": "unsupported_kind",
                     "url": "http://backend:8000/api/internal/rag/content/22",
+                },
+            }
+        )
+
+
+def test_remote_index_request_rejects_old_value_mode_fields() -> None:
+    """Verify that old value-mode fields (retriever_config, etc.) are rejected."""
+    remote_index_request = _require_model("RemoteIndexRequest")
+
+    with pytest.raises(ValidationError):
+        remote_index_request.model_validate(
+            {
+                "knowledge_base_id": 11,
+                "content_ref": {
+                    "kind": "presigned_url",
+                    "url": "http://example.com/file.pdf",
+                },
+                # These fields are no longer accepted
+                "retriever_config": {
+                    "name": "retriever-a",
+                    "namespace": "default",
+                    "storage_config": {"type": "milvus", "url": "http://milvus:19530"},
                 },
             }
         )
@@ -136,21 +132,13 @@ def test_remote_query_response_preserves_index_family_per_record() -> None:
     ]
 
 
-def test_remote_list_chunks_request_accepts_resolved_retriever_config() -> None:
+def test_remote_list_chunks_request_reference_mode() -> None:
+    """Test RemoteListChunksRequest with reference-mode (knowledge_base_id only)."""
     remote_list_chunks_request = _require_model("RemoteListChunksRequest")
 
     request = remote_list_chunks_request.model_validate(
         {
             "knowledge_base_id": 1001,
-            "index_owner_user_id": 42,
-            "retriever_config": {
-                "name": "retriever-a",
-                "namespace": "default",
-                "storage_config": {
-                    "type": "qdrant",
-                    "url": "http://qdrant:6333",
-                },
-            },
             "max_chunks": 1000,
             "query": "list_index_chunks",
             "metadata_condition": {
@@ -159,11 +147,12 @@ def test_remote_list_chunks_request_accepts_resolved_retriever_config() -> None:
                     {"key": "lang", "operator": "==", "value": "zh"},
                 ],
             },
+            "user_id": 42,
         }
     )
 
     assert request.knowledge_base_id == 1001
-    assert request.retriever_config.storage_config["type"] == "qdrant"
+    assert request.max_chunks == 1000
     assert request.metadata_condition == {
         "operator": "and",
         "conditions": [
@@ -172,7 +161,8 @@ def test_remote_list_chunks_request_accepts_resolved_retriever_config() -> None:
     }
 
 
-def test_remote_query_request_accepts_explicit_execution_configs() -> None:
+def test_remote_query_request_reference_mode() -> None:
+    """Test RemoteQueryRequest with reference-mode (knowledge_base_ids only)."""
     remote_query_request = _require_model("RemoteQueryRequest")
 
     request = remote_query_request.model_validate(
@@ -180,6 +170,7 @@ def test_remote_query_request_accepts_explicit_execution_configs() -> None:
             "knowledge_base_ids": [1001],
             "query": "release checklist",
             "max_results": 6,
+            "user_id": 42,
             "metadata_condition": {
                 "operator": "or",
                 "conditions": [
@@ -187,61 +178,18 @@ def test_remote_query_request_accepts_explicit_execution_configs() -> None:
                     {"key": "lang", "operator": "==", "value": "zh"},
                 ],
             },
-            "knowledge_base_configs": [
-                {
-                    "knowledge_base_id": 1001,
-                    "index_owner_user_id": 42,
-                    "retriever_config": {
-                        "name": "retriever-a",
-                        "namespace": "default",
-                        "storage_config": {
-                            "type": "qdrant",
-                            "url": "http://qdrant:6333",
-                            "indexStrategy": {"mode": "per_dataset"},
-                        },
-                    },
-                    "embedding_model_config": {
-                        "model_name": "embed-a",
-                        "model_namespace": "default",
-                        "resolved_config": {
-                            "protocol": "openai",
-                            "model_id": "text-embedding-3-small",
-                            "base_url": "https://api.openai.com/v1",
-                        },
-                    },
-                    "retrieval_config": {
-                        "top_k": 8,
-                        "score_threshold": 0.55,
-                        "retrieval_mode": "hybrid",
-                        "vector_weight": 0.8,
-                        "keyword_weight": 0.2,
-                    },
-                }
-            ],
-            "enabled_index_families": ["chunk_vector", "summary_vector_index"],
             "retrieval_policy": "summary_then_chunk_expand",
         }
     )
 
-    assert (
-        request.knowledge_base_configs[0].retriever_config.storage_config["type"]
-        == "qdrant"
-    )
-    assert request.metadata_condition == {
-        "operator": "or",
-        "conditions": [
-            {"key": "source", "operator": "==", "value": "kb"},
-            {"key": "lang", "operator": "==", "value": "zh"},
-        ],
-    }
-    assert request.knowledge_base_configs[0].retrieval_config.top_k == 8
-    assert request.enabled_index_families == [
-        "chunk_vector",
-        "summary_vector_index",
-    ]
+    assert request.knowledge_base_ids == [1001]
+    assert request.query == "release checklist"
+    assert request.retrieval_policy == "summary_then_chunk_expand"
+    assert request.user_id == 42
 
 
-def test_remote_query_request_rejects_empty_knowledge_base_configs() -> None:
+def test_remote_query_request_rejects_old_value_mode_fields() -> None:
+    """Verify that old value-mode fields (knowledge_base_configs, etc.) are rejected."""
     remote_query_request = _require_model("RemoteQueryRequest")
 
     with pytest.raises(ValidationError):
@@ -249,19 +197,7 @@ def test_remote_query_request_rejects_empty_knowledge_base_configs() -> None:
             {
                 "knowledge_base_ids": [1001],
                 "query": "release checklist",
-                "knowledge_base_configs": [],
-            }
-        )
-
-
-def test_remote_query_request_rejects_misaligned_knowledge_base_configs() -> None:
-    remote_query_request = _require_model("RemoteQueryRequest")
-
-    with pytest.raises(ValidationError):
-        remote_query_request.model_validate(
-            {
-                "knowledge_base_ids": [1001, 1002],
-                "query": "release checklist",
+                # These fields are no longer accepted
                 "knowledge_base_configs": [
                     {
                         "knowledge_base_id": 1001,
@@ -269,23 +205,16 @@ def test_remote_query_request_rejects_misaligned_knowledge_base_configs() -> Non
                         "retriever_config": {
                             "name": "retriever-a",
                             "namespace": "default",
-                            "storage_config": {
-                                "type": "qdrant",
-                                "url": "http://qdrant:6333",
-                            },
+                            "storage_config": {"type": "qdrant", "url": "http://qdrant:6333"},
                         },
                         "embedding_model_config": {
                             "model_name": "embed-a",
                             "model_namespace": "default",
-                            "resolved_config": {
-                                "protocol": "openai",
-                                "model_id": "text-embedding-3-small",
-                            },
+                            "resolved_config": {"protocol": "openai"},
                         },
                         "retrieval_config": {
                             "top_k": 8,
                             "score_threshold": 0.55,
-                            "retrieval_mode": "hybrid",
                         },
                     }
                 ],
@@ -293,87 +222,49 @@ def test_remote_query_request_rejects_misaligned_knowledge_base_configs() -> Non
         )
 
 
-def test_remote_query_request_rejects_duplicate_alignment_mismatch() -> None:
-    remote_query_request = _require_model("RemoteQueryRequest")
-
-    with pytest.raises(ValidationError):
-        remote_query_request.model_validate(
-            {
-                "knowledge_base_ids": [1001, 1001],
-                "query": "release checklist",
-                "knowledge_base_configs": [
-                    {
-                        "knowledge_base_id": 1001,
-                        "index_owner_user_id": 42,
-                        "retriever_config": {
-                            "name": "retriever-a",
-                            "namespace": "default",
-                            "storage_config": {
-                                "type": "qdrant",
-                                "url": "http://qdrant:6333",
-                            },
-                        },
-                        "embedding_model_config": {
-                            "model_name": "embed-a",
-                            "model_namespace": "default",
-                            "resolved_config": {
-                                "protocol": "openai",
-                                "model_id": "text-embedding-3-small",
-                            },
-                        },
-                        "retrieval_config": {
-                            "top_k": 8,
-                            "score_threshold": 0.55,
-                            "retrieval_mode": "vector",
-                        },
-                    }
-                ],
-            }
-        )
-
-
-def test_remote_delete_request_requires_resolved_retriever_config() -> None:
+def test_remote_delete_request_reference_mode() -> None:
+    """Test RemoteDeleteDocumentIndexRequest with reference-mode."""
     remote_delete_request = _require_model("RemoteDeleteDocumentIndexRequest")
 
     request = remote_delete_request.model_validate(
         {
             "knowledge_base_id": 101,
             "document_ref": "202",
-            "index_owner_user_id": 303,
-            "retriever_config": {
-                "name": "retriever-a",
-                "namespace": "default",
-                "storage_config": {
-                    "type": "elasticsearch",
-                    "url": "http://es:9200",
-                    "indexStrategy": {"mode": "per_user", "prefix": "wegent"},
-                },
-            },
-            "enabled_index_families": ["chunk_vector"],
+            "user_id": 303,
         }
     )
 
-    assert request.retriever_config.name == "retriever-a"
-    assert request.retriever_config.storage_config["type"] == "elasticsearch"
+    assert request.knowledge_base_id == 101
+    assert request.document_ref == "202"
+    assert request.user_id == 303
 
 
-def test_remote_test_connection_request_requires_retriever_config() -> None:
-    remote_test_connection_request = _require_model("RemoteTestConnectionRequest")
+def test_remote_purge_request_reference_mode() -> None:
+    """Test RemotePurgeKnowledgeIndexRequest with reference-mode."""
+    remote_purge_request = _require_model("RemotePurgeKnowledgeIndexRequest")
 
-    request = remote_test_connection_request.model_validate(
+    request = remote_purge_request.model_validate(
         {
-            "retriever_config": {
-                "name": "retriever-a",
-                "namespace": "default",
-                "storage_config": {
-                    "type": "qdrant",
-                    "url": "http://qdrant:6333",
-                },
-            }
+            "knowledge_base_id": 101,
+            "user_id": 42,
         }
     )
 
-    assert request.retriever_config.storage_config["type"] == "qdrant"
+    assert request.knowledge_base_id == 101
+
+
+def test_remote_drop_request_reference_mode() -> None:
+    """Test RemoteDropKnowledgeIndexRequest with reference-mode."""
+    remote_drop_request = _require_model("RemoteDropKnowledgeIndexRequest")
+
+    request = remote_drop_request.model_validate(
+        {
+            "knowledge_base_id": 101,
+            "user_id": 42,
+        }
+    )
+
+    assert request.knowledge_base_id == 101
 
 
 @pytest.mark.parametrize(
@@ -401,42 +292,12 @@ def test_remote_test_connection_request_requires_retriever_config() -> None:
                 "knowledge_base_ids": [1],
                 "query": "release",
                 "max_results": 0,
-                "knowledge_base_configs": [
-                    {
-                        "knowledge_base_id": 1,
-                        "index_owner_user_id": 42,
-                        "retriever_config": {
-                            "name": "retriever-a",
-                            "namespace": "default",
-                            "storage_config": {
-                                "type": "qdrant",
-                                "url": "http://qdrant:6333",
-                            },
-                        },
-                        "embedding_model_config": {
-                            "model_name": "embed-a",
-                            "model_namespace": "default",
-                            "resolved_config": {"protocol": "openai"},
-                        },
-                        "retrieval_config": {
-                            "top_k": 8,
-                            "score_threshold": 0.55,
-                            "retrieval_mode": "vector",
-                        },
-                    }
-                ],
             },
         ),
         (
             "RemoteListChunksRequest",
             {
                 "knowledge_base_id": 1001,
-                "index_owner_user_id": 42,
-                "retriever_config": {
-                    "name": "retriever-a",
-                    "namespace": "default",
-                    "storage_config": {"type": "qdrant", "url": "http://qdrant:6333"},
-                },
                 "max_chunks": 10001,
             },
         ),

@@ -11,20 +11,23 @@ def _auth_header(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_retriever_test_connection_uses_gateway_runtime_spec(
+def test_retriever_test_connection_uses_local_gateway(
     test_client,
     test_token: str,
 ):
-    gateway = AsyncMock()
-    gateway.test_connection.return_value = {
+    """Test that test-connection always uses LocalRagGateway (no remote fallback)."""
+    mock_result = {
         "success": True,
         "message": "Connection successful",
     }
 
     with patch(
-        "app.api.endpoints.adapter.retrievers.get_query_gateway",
-        return_value=gateway,
-    ) as mock_get_gateway:
+        "app.api.endpoints.adapter.retrievers.LocalRagGateway",
+    ) as mock_gateway_cls:
+        mock_instance = AsyncMock()
+        mock_instance.test_connection.return_value = mock_result
+        mock_gateway_cls.return_value = mock_instance
+
         response = test_client.post(
             "/api/retrievers/test-connection",
             headers=_auth_header(test_token),
@@ -42,10 +45,10 @@ def test_retriever_test_connection_uses_gateway_runtime_spec(
         "success": True,
         "message": "Connection successful",
     }
-    mock_get_gateway.assert_called_once()
-    gateway.test_connection.assert_awaited_once()
+    mock_gateway_cls.assert_called_once()
+    mock_instance.test_connection.assert_awaited_once()
 
-    runtime_spec = gateway.test_connection.await_args.args[0]
+    runtime_spec = mock_instance.test_connection.await_args.args[0]
     assert isinstance(runtime_spec, ConnectionTestRuntimeSpec)
     assert runtime_spec.retriever_config.storage_config == {
         "type": "qdrant",

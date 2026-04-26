@@ -14,12 +14,13 @@ from knowledge_engine.embedding.factory import (
 )
 from knowledge_engine.query.executor import QueryExecutor as KnowledgeQueryExecutor
 from knowledge_engine.storage.factory import create_storage_backend_from_runtime_config
+from knowledge_runtime.services.config_resolver import KnowledgeRuntimeConfigResolver
 from shared.models import (
-    RemoteKnowledgeBaseQueryConfig,
     RemoteQueryRecord,
     RemoteQueryRequest,
     RemoteQueryResponse,
 )
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -28,27 +29,39 @@ class QueryExecutor:
     """Executes RAG query operations.
 
     This executor:
-    1. Creates storage backends and embedding models for each knowledge base
-    2. Executes queries against each KB
-    3. Aggregates and sorts results by score
+    1. Resolves all configuration from DB using knowledge_base_ids reference
+    2. Creates storage backends and embedding models for each knowledge base
+    3. Executes queries against each KB
+    4. Aggregates and sorts results by score
     """
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+        self._config_resolver = KnowledgeRuntimeConfigResolver()
 
     async def execute(self, request: RemoteQueryRequest) -> RemoteQueryResponse:
         """Execute the query operation.
 
         Args:
-            request: The query request containing query text and KB configs.
+            request: The query request containing query text and knowledge_base_ids.
 
         Returns:
             Query response with ranked records.
         """
+        # Resolve all KB configs from DB
+        resolved_configs = self._config_resolver.resolve_query_configs(
+            self._db,
+            knowledge_base_ids=request.knowledge_base_ids,
+            user_id=request.user_id,
+        )
+
         all_records: list[RemoteQueryRecord] = []
 
         # Query each knowledge base
-        for kb_config in request.knowledge_base_configs:
+        for resolved in resolved_configs:
             records = await self._query_knowledge_base(
                 request=request,
-                kb_config=kb_config,
+                resolved=resolved,
             )
             all_records.extend(records)
 
@@ -62,8 +75,10 @@ class QueryExecutor:
         )
 
         logger.info(
-            f"Query complete: query='{request.query[:50]}...', "
-            f"total_results={len(all_records)}, returned={len(limited_records)}"
+            "Query complete: query='%s...', total_results=%d, returned=%d",
+            request.query[:50],
+            len(all_records),
+            len(limited_records),
         )
 
         return RemoteQueryResponse(
@@ -75,25 +90,25 @@ class QueryExecutor:
     async def _query_knowledge_base(
         self,
         request: RemoteQueryRequest,
-        kb_config: RemoteKnowledgeBaseQueryConfig,
+        resolved: Any,
     ) -> list[RemoteQueryRecord]:
         """Query a single knowledge base.
 
         Args:
             request: The original query request.
-            kb_config: Configuration for this specific knowledge base.
+            resolved: Resolved configuration for this specific knowledge base.
 
         Returns:
             List of records from this knowledge base.
         """
         # Create storage backend
         storage_backend = create_storage_backend_from_runtime_config(
-            kb_config.retriever_config
+            resolved.retriever_config
         )
 
         # Create embedding model
         embed_model = create_embedding_model_from_runtime_config(
-            kb_config.embedding_model_config
+            resolved.embedding_model_config
         )
 
         # Create query executor
@@ -103,15 +118,15 @@ class QueryExecutor:
         )
 
         # Build knowledge_id
-        knowledge_id = str(kb_config.knowledge_base_id)
+        knowledge_id = str(resolved.knowledge_base_id)
 
         # Execute query
         result = await executor.execute(
             knowledge_id=knowledge_id,
             query=request.query,
-            retrieval_config=kb_config.retrieval_config,
+            retrieval_config=resolved.retrieval_config,
             metadata_condition=request.metadata_condition,
-            user_id=kb_config.index_owner_user_id,
+            user_id=resolved.index_owner_user_id,
         )
 
         # Convert to RemoteQueryRecord format
@@ -123,14 +138,15 @@ class QueryExecutor:
                     title=record.get("title", ""),
                     score=record.get("score"),
                     metadata=record.get("metadata"),
-                    knowledge_base_id=kb_config.knowledge_base_id,
+                    knowledge_base_id=resolved.knowledge_base_id,
                     document_id=self._extract_document_id(record),
                 )
             )
 
         logger.info(
-            f"Queried KB: knowledge_base_id={kb_config.knowledge_base_id}, "
-            f"records={len(records)}"
+            "Queried KB: knowledge_base_id=%d, records=%d",
+            resolved.knowledge_base_id,
+            len(records),
         )
 
         return records

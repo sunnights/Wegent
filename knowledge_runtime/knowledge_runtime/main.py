@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from knowledge_runtime.api.router import router
 from knowledge_runtime.config import get_settings
 from knowledge_runtime.core.logging import setup_logging
+from shared.db.sync_session import init_db
 from shared.models import RemoteRagError
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,10 @@ async def lifespan(app: FastAPI):
         log_dir=settings.log_dir,
         log_level=settings.log_level,
     )
+
+    # Initialize database connection for config resolution
+    init_db(settings.database_url)
+    logger.info("Database connection initialized for config resolution")
 
     logger.info(
         f"knowledge_runtime starting on {settings.host}:{settings.port}",
