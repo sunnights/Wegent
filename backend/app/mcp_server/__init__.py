@@ -30,7 +30,9 @@ from .context import (
 )
 from .server import (
     create_mcp_router,
+    ensure_data_analysis_tools_registered,
     ensure_knowledge_tools_registered,
+    get_mcp_data_analysis_config,
     get_mcp_system_config,
     register_mcp_apps,
 )
@@ -44,8 +46,10 @@ __all__ = [
     # Server functions
     "create_mcp_router",
     "get_mcp_system_config",
+    "get_mcp_data_analysis_config",
     "register_mcp_apps",
     "ensure_knowledge_tools_registered",
+    "ensure_data_analysis_tools_registered",
     # Auth functions
     "verify_task_token",
     "get_user_from_task_token",

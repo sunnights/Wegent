@@ -57,6 +57,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("KNOWLEDGE_RUNTIME_DATABASE_URL", "DATABASE_URL"),
     )
 
+    # DuckDB data analysis configuration
+    duckdb_cache_dir: str = Field(
+        default="/tmp/wegent_duckdb_cache",
+        validation_alias=AliasChoices("DUCKDB_CACHE_DIR"),
+    )
+    duckdb_cache_max_size_gb: int = Field(
+        default=5,
+        validation_alias=AliasChoices("DUCKDB_CACHE_MAX_SIZE_GB"),
+    )
+    duckdb_cache_ttl_hours: int = Field(
+        default=24,
+        validation_alias=AliasChoices("DUCKDB_CACHE_TTL_HOURS"),
+    )
+    duckdb_max_query_rows: int = Field(
+        default=5000,
+        validation_alias=AliasChoices("DUCKDB_MAX_QUERY_ROWS"),
+    )
+    duckdb_query_timeout: int = Field(
+        default=30,
+        validation_alias=AliasChoices("DUCKDB_QUERY_TIMEOUT"),
+    )
+    duckdb_max_file_size_mb: int = Field(
+        default=500,
+        validation_alias=AliasChoices("DUCKDB_MAX_FILE_SIZE_MB"),
+    )
+    duckdb_summary_sample_rows: int = Field(
+        default=50,
+        validation_alias=AliasChoices("DUCKDB_SUMMARY_SAMPLE_ROWS"),
+    )
+    duckdb_memory_limit: str = Field(
+        default="4GB",
+        validation_alias=AliasChoices("DUCKDB_MEMORY_LIMIT"),
+    )
+    duckdb_min_free_memory_mb: int = Field(
+        default=1024,
+        validation_alias=AliasChoices("DUCKDB_MIN_FREE_MEMORY_MB"),
+    )
+
 
 # Global settings instance
 _settings: Settings | None = None

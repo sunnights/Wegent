@@ -8,6 +8,7 @@ Contains tools for:
 - System MCP (silent_exit)
 - Knowledge MCP (list_knowledge_bases, list_documents, create_knowledge_base,
   create_document, update_document_content)
+- Data Analysis MCP (wegent_data_schema, wegent_data_query)
 
 Knowledge MCP tools are implemented independently using the KnowledgeOrchestrator
 service layer, with Celery-based async task scheduling for indexing and summary.
@@ -19,7 +20,7 @@ Tools are declared using @mcp_tool decorator which provides:
 - Parameter filtering (token_info is hidden from MCP schema)
 """
 
-from . import prompt_optimization, subscription
+from . import data_analysis, prompt_optimization, subscription
 from .decorator import (
     build_mcp_tools_dict,
     clear_tools_registry,
@@ -33,6 +34,7 @@ from .subscription import create_subscription, preview_subscription
 __all__ = [
     "silent_exit",
     "KNOWLEDGE_MCP_TOOLS",
+    "DATA_ANALYSIS_MCP_TOOLS",
     "mcp_tool",
     "get_registered_mcp_tools",
     "build_mcp_tools_dict",

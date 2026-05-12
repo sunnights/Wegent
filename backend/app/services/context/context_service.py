@@ -392,6 +392,22 @@ class ContextService:
         db.commit()
         db.refresh(context)
 
+        # Try DuckDB generation for Excel/CSV files (best-effort, non-blocking)
+        try:
+            self._try_duckdb_generation(
+                db=db,
+                context=context,
+                binary_data=binary_data,
+                filename=filename,
+                extension=extension,
+                user_id=user_id,
+            )
+        except Exception as e:
+            # DuckDB generation failure should not affect upload success
+            logger.warning(
+                f"DuckDB generation skipped for context {context.id}: {e}"
+            )
+
         logger.info(
             f"Attachment uploaded successfully: id={context.id}, "
             f"filename={filename}, text_length={context.text_length}, "
@@ -484,6 +500,87 @@ class ContextService:
         )
 
         return context, truncation_info
+
+    def _try_duckdb_generation(
+        self,
+        db: Session,
+        context: SubtaskContext,
+        binary_data: bytes,
+        filename: str,
+        extension: str,
+        user_id: int,
+    ) -> None:
+        """Try to generate DuckDB for Excel/CSV attachments.
+
+        Best-effort: if generation succeeds, replaces extracted_text with
+        DuckDB summary. If it fails, the original extracted_text is preserved
+        (fallback to ExcelTruncationStrategy output).
+
+        Args:
+            db: Database session.
+            context: The attachment context.
+            binary_data: Raw binary data of the source file.
+            filename: Original filename.
+            extension: File extension.
+            user_id: User ID.
+        """
+        from app.services.data_analysis.duckdb_service import duckdb_data_service
+
+        # Only process supported extensions
+        if not duckdb_data_service.is_supported_extension(extension):
+            return
+
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context, use run_until_complete workaround
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(
+                        asyncio.run,
+                        duckdb_data_service.generate_duckdb(
+                            db=db,
+                            attachment_id=context.id,
+                            binary_data=binary_data,
+                            filename=filename,
+                            file_extension=extension,
+                            user_id=user_id,
+                        ),
+                    )
+                    cache = future.result(timeout=120)
+            else:
+                cache = loop.run_until_complete(
+                    duckdb_data_service.generate_duckdb(
+                        db=db,
+                        attachment_id=context.id,
+                        binary_data=binary_data,
+                        filename=filename,
+                        file_extension=extension,
+                        user_id=user_id,
+                    )
+                )
+
+            # If generation succeeded, replace extracted_text with summary
+            if cache and cache.status == "ready" and cache.summary:
+                new_text = duckdb_data_service.build_extracted_text_from_summary(
+                    summary=cache.summary,
+                    filename=filename,
+                )
+                context.extracted_text = new_text
+                context.text_length = len(new_text)
+                db.commit()
+                logger.info(
+                    f"Replaced extracted_text with DuckDB summary for context {context.id}"
+                )
+
+        except Exception as e:
+            logger.warning(
+                f"DuckDB generation failed for context {context.id}, "
+                f"keeping original extracted_text: {e}"
+            )
 
     def get_attachment_binary_data(
         self,

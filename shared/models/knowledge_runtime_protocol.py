@@ -178,3 +178,56 @@ class RemoteListChunksResponse(KnowledgeRuntimeProtocolModel):
 
     chunks: list[RemoteListChunkRecord]
     total: int
+
+
+# ============== Data Analysis Protocol Models ==============
+
+
+class RemoteDataGenerateRequest(KnowledgeRuntimeProtocolModel):
+    """Request to generate a .duckdb file from an Excel/CSV attachment."""
+
+    attachment_id: int
+    content_ref: ContentRef
+    extensions: dict[str, Any] | None = None
+
+
+class RemoteDataGenerateResponse(KnowledgeRuntimeProtocolModel):
+    """Response from DuckDB generation for an Excel/CSV attachment."""
+
+    success: bool
+    attachment_id: int
+    duckdb_attachment_id: int | None = None
+    summary: dict[str, Any] | None = None
+    tables: list[dict[str, Any]] = []
+    generation_time_ms: float = 0.0
+    error: str | None = None
+
+
+class RemoteDataQueryRequest(KnowledgeRuntimeProtocolModel):
+    """Request to execute a SQL query against an attachment's DuckDB."""
+
+    task_id: int
+    attachment_id: int
+    sql: str
+    extensions: dict[str, Any] | None = None
+
+
+class RemoteDataQueryResponse(KnowledgeRuntimeProtocolModel):
+    """Response from executing a SQL query against an attachment's DuckDB."""
+
+    success: bool
+    columns: list[str] = []
+    rows: list[list[Any]] = []
+    row_count: int = 0
+    total_count: int | None = None
+    execution_time_ms: float = 0.0
+    truncated: bool = False
+    error: str | None = None
+
+
+class RemoteDataSchemaResponse(KnowledgeRuntimeProtocolModel):
+    """Response with table schema information for an attachment's DuckDB."""
+
+    attachment_id: int
+    tables: list[dict[str, Any]] = []
+    error: str | None = None
