@@ -34,6 +34,8 @@ dependencies = [
     "opentelemetry-instrumentation-system-metrics>=0.48b0",
     "opentelemetry-instrumentation-redis>=0.48b0",
     "pydantic>=2.12.5",
+    # DuckDB used by shared.services.duckdb_query (Executor + Chat Shell data analysis)
+    "duckdb>=1.1.0",
 ]
 
 [dependency-groups]
@@ -49,7 +51,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["shared", "shared.models", "shared.models.db", "shared.db", "shared.telemetry", "shared.telemetry.context", "shared.telemetry.metrics", "shared.utils"]
+packages = ["shared", "shared.models", "shared.models.db", "shared.db", "shared.services", "shared.telemetry", "shared.telemetry.context", "shared.telemetry.metrics", "shared.utils"]
 
 [tool.setuptools.package-dir]
 shared = "."

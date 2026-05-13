@@ -68,6 +68,8 @@ dependencies = [
     # E2B sandbox
     "e2b==2.9.1",
     "e2b-code-interpreter==2.4.1",
+    # DuckDB (data analysis: Excel/CSV SQL query via knowledge-base generated .duckdb files)
+    "duckdb>=1.1.0",
     # RAG
     "llama-index-core>=0.12.0",
     "llama-index-vector-stores-elasticsearch>=0.4.0",

@@ -23,7 +23,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from langchain_core.tools.base import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -37,6 +37,12 @@ from shared.models.execution import ExecutionRequest
 from shared.telemetry.decorators import add_span_event, trace_async
 from shared.utils.mcp_utils import replace_mcp_server_variables
 from shared.utils.sensitive_data_masker import mask_sensitive_data
+
+from .post_processors import (
+    MCPPostProcessorRegistry,
+    PostProcessorContext,
+    default_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +154,73 @@ def wrap_tool_with_protection(
     return tool
 
 
+def wrap_tool_with_post_processor(
+    tool: BaseTool,
+    *,
+    registry: MCPPostProcessorRegistry,
+    context_factory: Callable[[str], PostProcessorContext],
+) -> BaseTool:
+    """Attach a post-processor hook to an MCP tool's execution path.
+
+    If the tool has a registered post-processor (keyed by
+    :attr:`BaseTool.name`), its async/sync implementations are wrapped so
+    that the processor runs after a successful tool call. Tools without a
+    registered processor are returned unchanged.
+
+    ``context_factory`` is invoked per call with the tool name, letting the
+    caller inject request-scoped info (task_id, user_id, etc.) without
+    coupling this module to a particular ExecutionRequest layout.
+    """
+    tool_name = getattr(tool, "name", None)
+    processor = registry.get(tool_name) if tool_name else None
+    if processor is None:
+        return tool
+
+    original_run = tool._run if hasattr(tool, "_run") else None
+    original_arun = tool._arun if hasattr(tool, "_arun") else None
+
+    async def _apply(result: Any) -> Any:
+        try:
+            context = context_factory(tool_name or "")
+            transformed = await processor(result=result, context=context)
+            if transformed is not None:
+                return transformed
+        except Exception as exc:
+            logger.exception(
+                "[MCP][post_processor] Processor for tool '%s' raised: %s",
+                tool_name,
+                exc,
+            )
+        return result
+
+    if original_arun is not None:
+
+        async def wrapped_arun(*args, **kwargs):
+            result = await original_arun(*args, **kwargs)
+            return await _apply(result)
+
+        tool._arun = wrapped_arun
+
+    if original_run is not None:
+
+        def wrapped_run(*args, **kwargs):
+            result = original_run(*args, **kwargs)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Within an event loop we can't block, so skip the
+                    # post-processor on the sync path. The async path
+                    # (always preferred in Chat Shell) will still apply it.
+                    return result
+                return loop.run_until_complete(_apply(result))
+            except RuntimeError:
+                return asyncio.run(_apply(result))
+
+        tool._run = wrapped_run
+
+    return tool
+
+
 def build_connections(
     config: dict[str, dict[str, Any]], task_data: Optional[ExecutionRequest] = None
 ) -> dict[str, Connection]:
@@ -237,18 +310,24 @@ class MCPClient:
         self,
         config: dict[str, dict[str, Any]],
         task_data: Optional[ExecutionRequest] = None,
+        *,
+        post_processor_registry: Optional[MCPPostProcessorRegistry] = None,
     ):
         """Initialize MCP client.
 
         Args:
             config: MCP servers configuration dict. Supports ${{path}} placeholders.
             task_data: Optional ExecutionRequest for variable substitution.
+            post_processor_registry: Optional registry of tool-result
+                post-processors. Defaults to the process-wide
+                :data:`default_registry`.
         """
         self.config = config
         self.task_data = task_data
         self.connections = build_connections(config, task_data) if config else {}
         self._client: MultiServerMCPClient | None = None
         self._tools: dict[str, list[BaseTool]] = {}
+        self._post_processor_registry = post_processor_registry or default_registry
 
     async def __aenter__(self) -> "MCPClient":
         """Async context manager entry - connect to servers."""
@@ -333,13 +412,23 @@ class MCPClient:
                 )
             else:
                 successful_servers.append(server_name)
-                # Wrap tools with protection and store by server name
+                # Wrap tools with protection + post-processors, and store by server name
                 protected_tools = [wrap_tool_with_protection(tool) for tool in tools]
-                for tool in protected_tools:
+                post_processed_tools = [
+                    wrap_tool_with_post_processor(
+                        tool,
+                        registry=self._post_processor_registry,
+                        context_factory=lambda name, _srv=server_name: self._build_post_processor_context(
+                            name, _srv
+                        ),
+                    )
+                    for tool in protected_tools
+                ]
+                for tool in post_processed_tools:
                     setattr(tool, "_wegent_tool_protocol", "mcp_call")
                     setattr(tool, "_wegent_mcp_server_label", server_name)
-                self._tools[server_name] = protected_tools
-                total_tools += len(protected_tools)
+                self._tools[server_name] = post_processed_tools
+                total_tools += len(post_processed_tools)
 
         add_span_event(
             "loading_tools_completed",
@@ -433,3 +522,29 @@ class MCPClient:
     def is_connected(self) -> bool:
         """Check if client has loaded tools from any server."""
         return len(self._tools) > 0
+
+    def _build_post_processor_context(
+        self, tool_name: str, server_name: str
+    ) -> PostProcessorContext:
+        """Build the per-call :class:`PostProcessorContext` for a tool.
+
+        The context surfaces task/user IDs extracted from the optional
+        :class:`ExecutionRequest` passed at construction time. Extracting them
+        here (instead of inside every processor) keeps post-processors loose
+        from the ExecutionRequest schema.
+        """
+        task_id: Optional[int] = None
+        user_id: Optional[int] = None
+        task_data = self.task_data
+        if task_data is not None:
+            task_id = getattr(task_data, "task_id", None)
+            user_data = getattr(task_data, "user", None)
+            if user_data is not None:
+                user_id = getattr(user_data, "id", None)
+
+        return PostProcessorContext(
+            tool_name=tool_name,
+            server_name=server_name,
+            task_id=task_id,
+            user_id=user_id,
+        )

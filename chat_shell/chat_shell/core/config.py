@@ -146,6 +146,36 @@ class Settings(BaseSettings):
         description="Maximum retry attempts when tool calls are truncated",
     )
 
+    # ========== DuckDB Data Analysis Configuration ==========
+    # Enables automatic execution of wegent_data_query / wegent_data_schema
+    # MCP tool results against cached .duckdb files. When disabled, the raw
+    # ContentRef + instruction is returned to the LLM unchanged (legacy
+    # download-and-execute-elsewhere behaviour).
+    DUCKDB_ANALYSIS_ENABLED: bool = True
+
+    # Per-query execution timeout in seconds. Applied around the
+    # DuckDB execute+fetch path inside Chat Shell.
+    DUCKDB_QUERY_TIMEOUT: float = Field(
+        default=60.0,
+        gt=0.0,
+        description="DuckDB query execution timeout in seconds",
+    )
+
+    # Maximum number of rows returned per query. Matches the Executor
+    # (ClaudeCode) default so Chat Shell and Executor produce identical
+    # results for the same (attachment, SQL) pair.
+    DUCKDB_MAX_ROWS: int = Field(
+        default=5000,
+        gt=0,
+        le=100000,
+        description="Maximum rows returned per DuckDB query",
+    )
+
+    # Base directory for caching downloaded .duckdb files. Per-task
+    # subdirectories are created under this path and cleaned up when the
+    # task ends. Mirrors the sandbox-internal path used by Executor.
+    DUCKDB_CACHE_DIR: str = "/tmp/wegent_duckdb_cache"
+
     @classmethod
     def settings_customise_sources(
         cls,
