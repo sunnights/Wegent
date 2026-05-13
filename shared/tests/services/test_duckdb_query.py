@@ -2,18 +2,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for DuckDB query execution service in Executor."""
+"""Tests for the shared DuckDB query execution service."""
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
 import pytest
 
-from executor.services.duckdb_query import DuckDBQueryExecutor
+from shared.services.duckdb_query import DuckDBQueryExecutor
 
 
 @pytest.fixture
@@ -48,7 +47,7 @@ class TestDuckDBQueryExecutorInit:
     def test_creates_cache_dir(self, tmp_path) -> None:
         """Should create cache directory on init."""
         cache_dir = tmp_path / "new_cache"
-        executor = DuckDBQueryExecutor(cache_dir=str(cache_dir))
+        DuckDBQueryExecutor(cache_dir=str(cache_dir))
         assert Path(cache_dir).exists()
 
     def test_default_cache_dir(self) -> None:
@@ -56,26 +55,26 @@ class TestDuckDBQueryExecutorInit:
         executor = DuckDBQueryExecutor()
         assert executor.cache_dir == Path("/tmp/wegent_duckdb_cache")
 
+    def test_cache_dir_accepts_path_object(self, tmp_path) -> None:
+        """Should accept a Path object for cache_dir."""
+        executor = DuckDBQueryExecutor(cache_dir=tmp_path / "pathobj_cache")
+        assert executor.cache_dir.exists()
+
 
 class TestGetCachePath:
     """Tests for cache path generation."""
 
     def test_returns_consistent_path(self, executor) -> None:
         """Should return consistent path for same attachment_id."""
-        path1 = executor.get_cache_path(42)
-        path2 = executor.get_cache_path(42)
-        assert path1 == path2
+        assert executor.get_cache_path(42) == executor.get_cache_path(42)
 
     def test_returns_different_paths_for_different_ids(self, executor) -> None:
         """Should return different paths for different attachment IDs."""
-        path1 = executor.get_cache_path(42)
-        path2 = executor.get_cache_path(99)
-        assert path1 != path2
+        assert executor.get_cache_path(42) != executor.get_cache_path(99)
 
     def test_path_has_duckdb_extension(self, executor) -> None:
         """Should return path with .duckdb extension."""
-        path = executor.get_cache_path(42)
-        assert path.suffix == ".duckdb"
+        assert executor.get_cache_path(42).suffix == ".duckdb"
 
 
 class TestEnsureCached:
@@ -86,7 +85,6 @@ class TestEnsureCached:
         self, executor, sample_duckdb_path
     ) -> None:
         """Should return existing cached file without downloading."""
-        # Pre-populate cache
         cache_path = executor.get_cache_path(42)
         cache_path.write_bytes(sample_duckdb_path.read_bytes())
 
@@ -158,6 +156,41 @@ class TestEnsureCached:
         call_kwargs = mock_client.get.call_args
         assert call_kwargs[1]["headers"]["Authorization"] == "Bearer my-token"
 
+    @pytest.mark.asyncio
+    async def test_custom_downloader_is_used(
+        self, temp_cache_dir, sample_duckdb_path
+    ) -> None:
+        """Should call the injected downloader instead of httpx."""
+        duckdb_bytes = sample_duckdb_path.read_bytes()
+        downloader = AsyncMock(return_value=duckdb_bytes)
+
+        executor = DuckDBQueryExecutor(cache_dir=temp_cache_dir, downloader=downloader)
+
+        result = await executor.ensure_cached(
+            attachment_id=7,
+            content_ref={
+                "url": "http://example.com/file",
+                "auth_token": "custom-token",
+            },
+        )
+
+        downloader.assert_awaited_once()
+        _url, headers = downloader.await_args.args
+        assert headers["Authorization"] == "Bearer custom-token"
+        assert result.exists()
+
+    @pytest.mark.asyncio
+    async def test_invalid_data_raises_runtime_error(self, executor) -> None:
+        """Should reject obviously-invalid duckdb bytes."""
+        downloader = AsyncMock(return_value=b"not a duckdb file")
+        executor._downloader = downloader
+
+        with pytest.raises(RuntimeError):
+            await executor.ensure_cached(
+                attachment_id=99,
+                content_ref={"url": "http://example.com/bad", "auth_token": ""},
+            )
+
 
 class TestExecuteQuery:
     """Tests for execute_query method."""
@@ -198,8 +231,18 @@ class TestExecuteQuery:
         )
 
         assert result["success"] is False
-        # READ_ONLY connection prevents write operations
         assert "error" in result
+
+    def test_insert_operation_rejected_by_readonly(
+        self, executor, sample_duckdb_path
+    ) -> None:
+        """Should reject INSERT as READ_ONLY."""
+        result = executor.execute_query(
+            duckdb_path=sample_duckdb_path,
+            sql="INSERT INTO data_db.sales VALUES (3, 'Carol', 300)",
+        )
+
+        assert result["success"] is False
 
     def test_invalid_sql(self, executor, sample_duckdb_path) -> None:
         """Should return error for invalid SQL."""
@@ -226,7 +269,6 @@ class TestExecuteQuery:
         )
 
         assert result["success"] is True
-        # BLOB values should be converted to string
         assert len(result["rows"]) == 1
 
 

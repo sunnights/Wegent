@@ -75,6 +75,20 @@ async def lifespan(app: FastAPI):
         os.environ["DATA_TABLE_CONFIG"] = settings.DATA_TABLE_CONFIG
         logger.info("DATA_TABLE_CONFIG loaded from settings and set to environment")
 
+    # Register MCP tool-result post-processors (e.g. DuckDB data analysis).
+    # Registration is idempotent; we do it here so the Chat Shell process
+    # has the hooks available for every incoming request.
+    if settings.DUCKDB_ANALYSIS_ENABLED:
+        try:
+            from chat_shell.tools.mcp.post_processors.duckdb_post_processor import (
+                register_duckdb_post_processors,
+            )
+
+            register_duckdb_post_processors()
+            logger.info("DuckDB MCP post-processors registered")
+        except Exception as exc:
+            logger.warning("Failed to register DuckDB MCP post-processors: %s", exc)
+
     # Initialize storage provider
     storage_type = StorageType(settings.STORAGE_TYPE)
     storage_kwargs = {}
