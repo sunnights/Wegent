@@ -5,7 +5,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { CircleStop, Hand, Plus } from 'lucide-react'
+import { CircleStop, Cloud, Hand, Plus } from 'lucide-react'
 import MobileModelSelector from '../selector/MobileModelSelector'
 import type { Model } from '../selector/ModelSelector'
 import MobileTeamSelector from '../selector/MobileTeamSelector'
@@ -25,6 +25,7 @@ import type {
   GitBranch as GitBranchType,
   TaskDetail,
   TaskType,
+  Attachment,
 } from '@/types/api'
 import type { ContextItem } from '@/types/context'
 import type { UnifiedSkill } from '@/apis/skills'
@@ -38,6 +39,7 @@ import { supportsAttachments } from '../../service/attachmentService'
 import SkillSelectorPopover from '../selector/SkillSelectorPopover'
 import { getChatSendState } from './chatSendState'
 import { useTranslation } from '@/hooks/useTranslation'
+import { CloudDrivePicker } from '@/features/cloud-drive/CloudDrivePicker'
 
 export interface MobileChatInputControlsProps {
   taskType?: TaskType
@@ -82,6 +84,7 @@ export interface MobileChatInputControlsProps {
 
   // Attachment
   onFileSelect: (files: File | File[]) => void
+  onCloudAttachmentAdd?: (attachment: Attachment) => void
 
   // State flags
   isStreaming: boolean
@@ -149,6 +152,7 @@ export function MobileChatInputControls({
   selectedContexts,
   setSelectedContexts,
   onFileSelect,
+  onCloudAttachmentAdd,
   isStreaming,
   isStopping,
   hasMessages,
@@ -173,7 +177,9 @@ export function MobileChatInputControls({
   hideSelectors,
 }: MobileChatInputControlsProps) {
   const { t } = useTranslation('chat')
+  const { t: tCloudDrive } = useTranslation('cloud-drive')
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+  const [cloudPickerOpen, setCloudPickerOpen] = useState(false)
   const showChatContexts = canUseChatContexts(taskType, selectedTeam)
   const showAttachmentAction = supportsAttachments(selectedTeam)
   const showSkillAction = availableSkills.length > 0 && Boolean(onToggleSkill)
@@ -335,6 +341,22 @@ export function MobileChatInputControls({
                     triggerVariant="menu-item"
                   />
                 )}
+                {showAttachmentAction && onCloudAttachmentAdd && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    data-testid="mobile-cloud-drive-picker-button"
+                    onClick={() => {
+                      setMoreMenuOpen(false)
+                      setCloudPickerOpen(true)
+                    }}
+                    disabled={isStreaming}
+                    className="flex h-11 w-full items-center justify-start gap-3 px-3 text-sm"
+                  >
+                    <Cloud className="h-4 w-4 text-primary" />
+                    <span>{tCloudDrive('picker_title')}</span>
+                  </Button>
+                )}
                 {showChatContexts && (
                   <ChatContextInput
                     selectedContexts={selectedContexts}
@@ -452,6 +474,14 @@ export function MobileChatInputControls({
         )}
         <div className="flex-shrink-0">{renderSendButton()}</div>
       </div>
+
+      {onCloudAttachmentAdd && (
+        <CloudDrivePicker
+          open={cloudPickerOpen}
+          onOpenChange={setCloudPickerOpen}
+          onAttachmentSelected={onCloudAttachmentAdd}
+        />
+      )}
     </div>
   )
 }

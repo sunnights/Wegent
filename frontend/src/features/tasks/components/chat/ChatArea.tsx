@@ -1522,6 +1522,7 @@ function ChatAreaContent({
     attachmentState: chatState.attachmentState,
     onFileSelect: handleUserFileSelect,
     onAttachmentRemove: handleInputAttachmentRemove,
+    onCloudAttachmentAdd: chatState.addExistingAttachment,
     isStreaming: streamHandlers.isStreaming,
     isStopping: streamHandlers.isStopping,
     hasMessages,

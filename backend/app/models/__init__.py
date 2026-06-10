@@ -12,6 +12,7 @@ The legacy SharedTask, SharedTeam, and TaskMember models have been removed.
 Use ResourceMember for all resource sharing functionality.
 """
 from app.models.api_key import APIKey
+from app.models.cloud_file import CloudFile
 from app.models.dingtalk_doc import DingtalkSyncedNode
 from app.models.kind import Kind
 from app.models.knowledge import KnowledgeDocument
@@ -48,6 +49,7 @@ from app.schemas.namespace import GroupRole
 
 __all__ = [
     "DingtalkSyncedNode",
+    "CloudFile",
     "User",
     "Kind",
     "TaskResource",

@@ -7,6 +7,7 @@ from app.api.endpoints import (
     api_keys,
     attachments_open,
     auth,
+    cloud_drive,
     deep_research,
     devices,
     dingtalk_docs,
@@ -132,6 +133,9 @@ api_router.include_router(
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(
     attachments.router, prefix="/attachments", tags=["attachments"]
+)
+api_router.include_router(
+    cloud_drive.router, prefix="/cloud-drive", tags=["cloud-drive"]
 )
 api_router.include_router(repository.router, prefix="/git", tags=["repository"])
 api_router.include_router(quota.router, prefix="/quota", tags=["quota"])

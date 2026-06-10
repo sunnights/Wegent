@@ -9,6 +9,7 @@ import {
   ChatBubbleLeftIcon,
   CodeBracketIcon,
   BookOpenIcon,
+  CloudIcon,
   Cog6ToothIcon,
 } from '@heroicons/react/24/outline'
 import { paths } from '@/config/paths'
@@ -16,7 +17,7 @@ import { useTranslation } from '@/hooks/useTranslation'
 import { getRuntimeConfigSync } from '@/lib/runtime-config'
 
 interface MobileNavTabsProps {
-  activePage: 'chat' | 'code' | 'wiki' | 'dashboard'
+  activePage: 'chat' | 'code' | 'wiki' | 'cloudDrive' | 'dashboard'
 }
 
 export function MobileNavTabs({ activePage }: MobileNavTabsProps) {
@@ -49,6 +50,12 @@ export function MobileNavTabs({ activePage }: MobileNavTabsProps) {
           },
         ]
       : []),
+    {
+      key: 'cloudDrive' as const,
+      label: t('common:navigation.cloud_drive'),
+      icon: CloudIcon,
+      path: paths.cloudDrive.getHref(),
+    },
     {
       key: 'dashboard' as const,
       label: t('common:navigation.settings'),

@@ -1,0 +1,64 @@
+{
+  "title": "Drive",
+  "search_placeholder": "Search filenames",
+  "upload": "Upload file",
+  "refresh": "Refresh",
+  "total_files": "{{count}} files",
+  "total_size": "Total {{size}}",
+  "filters": {
+    "all": "All types",
+    "image": "Images",
+    "document": "Documents",
+    "spreadsheet": "Spreadsheets",
+    "presentation": "Presentations",
+    "pdf": "PDF",
+    "text": "Text",
+    "video": "Video",
+    "audio": "Audio",
+    "other": "Other"
+  },
+  "sort": {
+    "created_desc": "Newest",
+    "created_asc": "Oldest",
+    "name_asc": "Name A-Z",
+    "name_desc": "Name Z-A",
+    "size_asc": "Size ascending",
+    "size_desc": "Size descending"
+  },
+  "columns": {
+    "name": "Name",
+    "type": "Type",
+    "size": "Size",
+    "source": "Source",
+    "created": "Uploaded",
+    "actions": "Actions"
+  },
+  "actions": {
+    "preview": "Preview",
+    "download": "Download",
+    "copy_to_chat": "Copy to chat",
+    "delete": "Delete",
+    "choose": "Choose"
+  },
+  "source": {
+    "chat": "Chat",
+    "knowledge": "Knowledge",
+    "cloud_drive": "Drive",
+    "open_api": "Open API",
+    "executor": "Executor",
+    "inbox": "Inbox",
+    "channel": "Channel",
+    "unknown": "Unknown"
+  },
+  "empty": "No files",
+  "empty_hint": "Files uploaded or generated in chat and knowledge will appear here.",
+  "delete_confirm": "This only removes the file from Drive. Chat history and knowledge documents are not affected.",
+  "deleted": "Removed from Drive",
+  "uploaded": "File uploaded",
+  "copied": "Added to chat input",
+  "copy_failed": "Copy failed",
+  "load_failed": "Failed to load Drive files",
+  "picker_title": "Choose from Drive",
+  "picker_description": "Chosen files are copied into new chat attachments.",
+  "no_ready_file": "No selectable files"
+}

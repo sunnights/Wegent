@@ -31,6 +31,9 @@ export const paths = {
   wiki: {
     getHref: () => '/knowledge',
   },
+  cloudDrive: {
+    getHref: () => '/cloud-drive',
+  },
   devices: {
     getHref: () => '/devices',
   },

@@ -5,7 +5,7 @@
 'use client'
 
 import React from 'react'
-import { CircleStop } from 'lucide-react'
+import { CircleStop, Cloud } from 'lucide-react'
 import ModelSelector, { Model } from '../selector/ModelSelector'
 import UnifiedRepositorySelector from '../selector/UnifiedRepositorySelector'
 import ChatContextInput from '../chat/ChatContextInput'
@@ -21,6 +21,7 @@ import type {
   TaskDetail,
   MultiAttachmentUploadState,
   TaskType,
+  Attachment,
 } from '@/types/api'
 import type { ContextItem } from '@/types/context'
 import type { UnifiedSkill } from '@/apis/skills'
@@ -44,6 +45,8 @@ import { ProjectSelectorTab } from '@/features/projects/components/ProjectSelect
 import { getChatSendState } from './chatSendState'
 import AgentSkillSelectorMenu from './AgentSkillSelectorMenu'
 import InputMoreActionsMenu from './InputMoreActionsMenu'
+import { CloudDrivePicker } from '@/features/cloud-drive/CloudDrivePicker'
+import { useTranslation } from '@/hooks/useTranslation'
 
 export interface ChatInputControlsProps {
   /** Task type to determine which controls to show */
@@ -99,6 +102,7 @@ export interface ChatInputControlsProps {
   attachmentState: MultiAttachmentUploadState
   onFileSelect: (files: File | File[]) => void
   onAttachmentRemove: (attachmentId: number) => void
+  onCloudAttachmentAdd?: (attachment: Attachment) => void
 
   // State flags
   isStreaming: boolean
@@ -214,6 +218,7 @@ export function ChatInputControls({
   attachmentState,
   onFileSelect,
   onAttachmentRemove: _onAttachmentRemove,
+  onCloudAttachmentAdd,
   isStreaming,
   isStopping,
   hasMessages,
@@ -272,6 +277,8 @@ export function ChatInputControls({
   // Always use compact mode (icon only) to save space
   const shouldUseCompactQuota = true
   const isMobile = useIsMobile()
+  const { t } = useTranslation('cloud-drive')
+  const [cloudPickerOpen, setCloudPickerOpen] = React.useState(false)
   const showChatContexts = canUseChatContexts(taskType, selectedTeam)
 
   // Determine the send button state
@@ -397,6 +404,7 @@ export function ChatInputControls({
         selectedContexts={selectedContexts}
         setSelectedContexts={setSelectedContexts}
         onFileSelect={onFileSelect}
+        onCloudAttachmentAdd={onCloudAttachmentAdd}
         isStreaming={isStreaming}
         isStopping={isStopping}
         hasMessages={hasMessages}
@@ -523,7 +531,18 @@ export function ChatInputControls({
           >
             {/* File Upload Button - show for shells that support attachments (Chat, ClaudeCode) */}
             {supportsAttachments(selectedTeam) && (
-              <AttachmentButton onFileSelect={onFileSelect} disabled={isStreaming} />
+              <>
+                <AttachmentButton onFileSelect={onFileSelect} disabled={isStreaming} />
+                {onCloudAttachmentAdd && (
+                  <ActionButton
+                    onClick={() => setCloudPickerOpen(true)}
+                    title={t('picker_title')}
+                    icon={<Cloud className="h-4 w-4" />}
+                    disabled={isStreaming}
+                    data-testid="cloud-drive-picker-button"
+                  />
+                )}
+              </>
             )}
 
             {/* Divider between attachment and other controls */}
@@ -633,6 +652,14 @@ export function ChatInputControls({
         {/* Send/Stop Button */}
         {renderSendButton()}
       </div>
+
+      {onCloudAttachmentAdd && (
+        <CloudDrivePicker
+          open={cloudPickerOpen}
+          onOpenChange={setCloudPickerOpen}
+          onAttachmentSelected={onCloudAttachmentAdd}
+        />
+      )}
     </div>
   )
 }

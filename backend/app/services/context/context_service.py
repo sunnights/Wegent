@@ -401,6 +401,17 @@ class ContextService:
         db.commit()
         db.refresh(context)
 
+        try:
+            from app.services.cloud_file_service import cloud_file_service
+
+            cloud_file_service.record_attachment_created(db=db, context=context)
+        except Exception as exc:
+            logger.warning(
+                "Failed to record uploaded attachment %s in cloud drive: %s",
+                context.id,
+                exc,
+            )
+
         logger.info(
             f"Attachment uploaded successfully: id={context.id}, "
             f"filename={filename}, text_length={context.text_length}, "
@@ -665,6 +676,26 @@ class ContextService:
 
         db.commit()
         db.refresh(copied_context)
+
+        try:
+            from app.models.cloud_file import CloudFileSourceType
+            from app.services.cloud_file_service import cloud_file_service
+
+            cloud_file_service.record_attachment_created(
+                db=db,
+                context=copied_context,
+                source_type=CloudFileSourceType.CLOUD_DRIVE,
+                source_ref={
+                    "source_attachment_id": source_context.id,
+                    **(source_metadata or {}),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to record copied attachment %s in cloud drive: %s",
+                copied_context.id,
+                exc,
+            )
 
         logger.info(
             f"Copied attachment {source_context.id} for user {target_user_id}: "

@@ -39,6 +39,7 @@ from app.schemas.subtask_context import (
 )
 from app.services.attachment.parser import DocumentParseError, DocumentParser
 from app.services.auth.task_token import extract_token_from_header, verify_task_token
+from app.services.cloud_file_service import cloud_file_service
 from app.services.context import context_service
 from app.services.context.context_service import NotFoundException
 from app.services.shared_task import shared_task_service
@@ -407,6 +408,7 @@ async def upload_attachment(
                 binary_data=binary_data,
                 subtask_id=subtask_id,
             )
+            cloud_file_service.record_attachment_created(db=db, context=context)
 
         return _build_attachment_response(context, truncation_info)
 

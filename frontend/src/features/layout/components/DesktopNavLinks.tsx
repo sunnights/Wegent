@@ -11,7 +11,7 @@ import { useTranslation } from '@/hooks/useTranslation'
 import { getRuntimeConfigSync } from '@/lib/runtime-config'
 
 interface DesktopNavLinksProps {
-  activePage: 'chat' | 'code' | 'wiki' | 'flow' | 'dashboard'
+  activePage: 'chat' | 'code' | 'wiki' | 'cloudDrive' | 'flow' | 'dashboard'
 }
 
 export function DesktopNavLinks({ activePage }: DesktopNavLinksProps) {
@@ -78,8 +78,17 @@ export function DesktopNavLinks({ activePage }: DesktopNavLinksProps) {
             },
           ]
         : []),
+      {
+        key: 'cloudDrive' as const,
+        label: t('common:navigation.cloud_drive'),
+        onClick: () => {
+          startTransition(() => {
+            router.push(paths.cloudDrive.getHref())
+          })
+        },
+      },
     ],
-    [t, router, startTransition]
+    [t, router, startTransition, isWikiEnabled]
   )
 
   useEffect(() => {
