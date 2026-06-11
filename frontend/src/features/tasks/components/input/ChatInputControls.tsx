@@ -12,7 +12,7 @@ import ChatContextInput from '../chat/ChatContextInput'
 import AttachmentButton from '../AttachmentButton'
 import SendButton from './SendButton'
 import LoadingDots from '../message/LoadingDots'
-import QuotaUsage from '../params/QuotaUsage'
+import ChatToolbarStatus from './ChatToolbarStatus'
 import { ActionButton } from '@/components/ui/action-button'
 import type {
   Team,
@@ -109,7 +109,7 @@ export interface ChatInputControlsProps {
   isStopping: boolean
   hasMessages: boolean
   shouldCollapseSelectors: boolean
-  shouldHideQuotaUsage: boolean
+  shouldHideToolbarStatus: boolean
   shouldHideChatInput: boolean
   isModelSelectionRequired: boolean
   isAttachmentReadyToSend: boolean
@@ -163,7 +163,7 @@ export interface ChatInputControlsProps {
   /** Callback when user switches between video and image mode */
   onGenerateModeChange?: (mode: GenerateMode) => void
 
-  /** When true, hide all selectors - only show send button + quota */
+  /** When true, hide all selectors - only show send button and toolbar status */
   hideSelectors?: boolean
 
   /** Project ID for project selector (workspace projects) */
@@ -179,7 +179,7 @@ export interface ChatInputControlsProps {
  * - Model selector
  * - Repository selector (for code tasks)
  * - Branch selector (for code tasks)
- * - Quota usage display
+ * - Toolbar status display
  * - Deep thinking toggle
  * - Send/Stop button
  *
@@ -223,7 +223,7 @@ export function ChatInputControls({
   isStopping,
   hasMessages,
   shouldCollapseSelectors,
-  shouldHideQuotaUsage,
+  shouldHideToolbarStatus,
   shouldHideChatInput,
   isModelSelectionRequired,
   isAttachmentReadyToSend,
@@ -275,7 +275,7 @@ export function ChatInputControls({
   // Check if we're in generation mode (video or image)
   const isGenerationMode = isVideoMode || isImageMode
   // Always use compact mode (icon only) to save space
-  const shouldUseCompactQuota = true
+  const shouldUseCompactToolbarStatus = true
   const isMobile = useIsMobile()
   const { t } = useTranslation('cloud-drive')
   const [cloudPickerOpen, setCloudPickerOpen] = React.useState(false)
@@ -644,9 +644,9 @@ export function ChatInputControls({
           </div>
         )}
 
-        {/* Quota Usage */}
-        {!shouldHideQuotaUsage && (
-          <QuotaUsage className="flex-shrink-0" compact={shouldUseCompactQuota} />
+        {/* Toolbar Status */}
+        {!shouldHideToolbarStatus && (
+          <ChatToolbarStatus className="flex-shrink-0" compact={shouldUseCompactToolbarStatus} />
         )}
 
         {/* Send/Stop Button */}
