@@ -11,6 +11,12 @@ from typing import Any, Dict, List
 from llama_index.core import Document, SimpleDirectoryReader
 
 from knowledge_engine.embedding.capabilities import embed_model_supports_image_input
+from knowledge_engine.ingestion.excel_qa_unitizer import (
+    EXCEL_FAQ_PARSER_SUBTYPE,
+    ExcelFAQUnitizationResult,
+    build_excel_qa_pair_nodes_from_binary,
+    build_excel_qa_pair_nodes_from_file,
+)
 from knowledge_engine.ingestion.pipeline import (
     build_ingestion_result,
     prepare_ingestion,
@@ -23,6 +29,7 @@ from shared.utils.xmind_parser import parse_xmind_to_markdown
 
 logger = logging.getLogger(__name__)
 
+OPENPYXL_EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 SAFE_METADATA_KEYS = {
     "filename",
     "file_path",
@@ -95,6 +102,20 @@ class DocumentIndexer:
         chunk_metadata: ChunkMetadata,
         **kwargs,
     ) -> Dict:
+        if (self.file_extension or "").lower() in OPENPYXL_EXCEL_EXTENSIONS:
+            excel_result = build_excel_qa_pair_nodes_from_file(
+                file_path,
+                source_file=chunk_metadata.source_file,
+            )
+            if excel_result is not None and excel_result.detected:
+                return self._index_prebuilt_nodes(
+                    nodes=excel_result.nodes,
+                    chunk_metadata=chunk_metadata,
+                    parser_subtype=EXCEL_FAQ_PARSER_SUBTYPE,
+                    excel_faq_result=excel_result,
+                    **kwargs,
+                )
+
         documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
         return self._index_documents(
             documents=documents,
@@ -109,9 +130,24 @@ class DocumentIndexer:
         chunk_metadata: ChunkMetadata,
         **kwargs,
     ) -> Dict:
+        normalized_extension = file_extension.lower()
+        if normalized_extension in OPENPYXL_EXCEL_EXTENSIONS:
+            excel_result = build_excel_qa_pair_nodes_from_binary(
+                binary_data,
+                source_file=chunk_metadata.source_file,
+            )
+            if excel_result is not None and excel_result.detected:
+                return self._index_prebuilt_nodes(
+                    nodes=excel_result.nodes,
+                    chunk_metadata=chunk_metadata,
+                    parser_subtype=EXCEL_FAQ_PARSER_SUBTYPE,
+                    excel_faq_result=excel_result,
+                    **kwargs,
+                )
+
         # XMind files require special parsing: extract content.json from the ZIP
         # archive and convert the topic tree to Markdown before indexing.
-        if file_extension.lower() == ".xmind":
+        if normalized_extension == ".xmind":
             markdown_text = parse_xmind_to_markdown(binary_data)
             filename_without_ext = Path(chunk_metadata.source_file).stem
             documents = [
@@ -233,11 +269,57 @@ class DocumentIndexer:
         )
         return result
 
+    def _index_prebuilt_nodes(
+        self,
+        *,
+        nodes: List,
+        chunk_metadata: ChunkMetadata,
+        parser_subtype: str | None = None,
+        excel_faq_result: ExcelFAQUnitizationResult | None = None,
+        **kwargs,
+    ) -> Dict:
+        chunk_metadata.apply_to_nodes(nodes)
+
+        add_span_event(
+            "rag.indexer.prebuilt_nodes.received",
+            {
+                "knowledge_id": chunk_metadata.knowledge_id,
+                "doc_ref": chunk_metadata.doc_ref,
+                "source_file": chunk_metadata.source_file,
+                "node_count": str(len(nodes)),
+                "parser_subtype": parser_subtype or "",
+            },
+        )
+
+        chunks_data = self._build_chunks_metadata(
+            nodes,
+            parser_subtype=parser_subtype,
+            excel_faq_result=excel_faq_result,
+        )
+        result = self.storage_backend.index_with_metadata(
+            nodes=nodes,
+            chunk_metadata=chunk_metadata,
+            embed_model=self.embed_model,
+            **kwargs,
+        )
+        result.update(
+            {
+                "doc_ref": chunk_metadata.doc_ref,
+                "knowledge_id": chunk_metadata.knowledge_id,
+                "source_file": chunk_metadata.source_file,
+                "chunk_count": len(nodes),
+                "created_at": chunk_metadata.created_at,
+                "chunks_data": chunks_data,
+            }
+        )
+        return result
+
     def _build_chunks_metadata(
         self,
         nodes: List,
         *,
         parser_subtype: str | None = None,
+        excel_faq_result: ExcelFAQUnitizationResult | None = None,
     ) -> Dict[str, Any]:
         items = []
         current_position = 0
@@ -253,11 +335,12 @@ class DocumentIndexer:
                     "token_count": token_count,
                     "start_position": current_position,
                     "end_position": current_position + text_length,
+                    "metadata": dict(getattr(node, "metadata", {}) or {}),
                 }
             )
             current_position += text_length
 
-        return {
+        chunks_data = {
             "items": items,
             "total_count": len(items),
             "splitter_type": self.splitter_config.chunk_strategy,
@@ -265,3 +348,15 @@ class DocumentIndexer:
             "qa_pair_count": len(items) if parser_subtype == "qa_pair" else 0,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if excel_faq_result is not None:
+            chunks_data.update(
+                {
+                    "source_format": "excel_faq",
+                    "excel_faq_detected": excel_faq_result.detected,
+                    "excel_faq_confidence": excel_faq_result.confidence,
+                    "excel_faq_sheet_count": len(excel_faq_result.sheet_summaries),
+                    "excel_faq_qa_row_count": excel_faq_result.qa_row_count,
+                    "excel_faq_skipped_row_count": excel_faq_result.skipped_row_count,
+                }
+            )
+        return chunks_data

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
+from openpyxl import Workbook
 
 from knowledge_engine.embedding.custom import CustomEmbedding
 from knowledge_engine.index.indexer import DocumentIndexer
@@ -432,6 +433,94 @@ def test_document_indexer_exposes_qa_pair_count_for_unitized_documents() -> None
         "A: Wegent indexes complete question and answer pairs."
         in result["chunks_data"]["items"][0]["content"]
     )
+
+
+def test_document_indexer_indexes_excel_faq_rows_as_qa_pair_nodes(tmp_path) -> None:
+    workbook_path = tmp_path / "faq.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "FAQ"
+    sheet.append(["Q", "A", "渠道"])
+    sheet.append(["如何找回登录名？", "通过找回登录名入口处理。", "App"])
+    sheet.append(["如何修改密码？", "在账号安全中修改密码。", "Web"])
+    workbook.save(workbook_path)
+
+    storage_backend = MagicMock()
+    storage_backend.index_with_metadata.return_value = {
+        "status": "success",
+        "indexed_count": 2,
+        "index_name": "wegent_kb_1",
+    }
+    indexer = DocumentIndexer(
+        storage_backend=storage_backend,
+        embed_model=MagicMock(),
+        splitter_config=None,
+        file_extension=".xlsx",
+    )
+
+    result = indexer.index_document(
+        file_path=str(workbook_path),
+        chunk_metadata=ChunkMetadata(
+            knowledge_id="1",
+            doc_ref="doc_excel",
+            source_file="faq.xlsx",
+            created_at="2026-04-12T00:00:00+00:00",
+        ),
+    )
+
+    indexed_nodes = storage_backend.index_with_metadata.call_args.kwargs["nodes"]
+    assert len(indexed_nodes) == 2
+    assert indexed_nodes[0].metadata["node_role"] == "qa_pair"
+    assert indexed_nodes[0].metadata["source_format"] == "excel_faq"
+    assert indexed_nodes[0].metadata["context_fields"] == {"渠道": "App"}
+    assert indexed_nodes[0].metadata["doc_ref"] == "doc_excel"
+    assert indexed_nodes[0].metadata["knowledge_id"] == "1"
+    assert result["chunks_data"]["splitter_subtype"] == "qa_pair"
+    assert result["chunks_data"]["qa_pair_count"] == 2
+    assert result["chunks_data"]["source_format"] == "excel_faq"
+    assert result["chunks_data"]["excel_faq_detected"] is True
+    assert result["chunks_data"]["excel_faq_sheet_count"] == 1
+    assert result["chunks_data"]["excel_faq_qa_row_count"] == 2
+    assert result["chunks_data"]["items"][0]["metadata"]["sheet_name"] == "FAQ"
+
+
+def test_document_indexer_keeps_legacy_xls_on_standard_reader_path(tmp_path) -> None:
+    workbook_path = tmp_path / "legacy.xls"
+    workbook_path.write_bytes(b"not an openpyxl workbook")
+
+    storage_backend = MagicMock()
+    storage_backend.index_with_metadata.return_value = {
+        "status": "success",
+        "indexed_count": 1,
+        "index_name": "wegent_kb_1",
+    }
+    indexer = DocumentIndexer(
+        storage_backend=storage_backend,
+        embed_model=MagicMock(),
+        splitter_config=None,
+        file_extension=".xls",
+    )
+
+    with patch("knowledge_engine.index.indexer.SimpleDirectoryReader") as reader_cls:
+        reader_cls.return_value.load_data.return_value = [
+            Document(text="legacy excel text", metadata={"filename": "legacy"})
+        ]
+
+        result = indexer.index_document(
+            file_path=str(workbook_path),
+            chunk_metadata=ChunkMetadata(
+                knowledge_id="1",
+                doc_ref="doc_xls",
+                source_file="legacy.xls",
+                created_at="2026-04-12T00:00:00+00:00",
+            ),
+        )
+
+    reader_cls.assert_called_once_with(input_files=[str(workbook_path)])
+    assert result["chunk_count"] == 1
+    assert result["chunks_data"]["splitter_subtype"] != "qa_pair"
+    assert result["chunks_data"]["qa_pair_count"] == 0
+    assert "source_format" not in result["chunks_data"]
 
 
 def test_document_indexer_hierarchical_routes_through_ingestion_result_contract() -> (
