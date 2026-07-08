@@ -121,6 +121,7 @@
     "prism-theme-vars": "^0.2.5",
     "prismjs": "^1.30.0",
     "react": "^19.0.1",
+    "react-arborist": "^3.13.2",
     "react-day-picker": "^9.13.0",
     "react-diff-viewer-continued": "^4.2.0",
     "react-dom": "^19.0.1",

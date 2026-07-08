@@ -4,7 +4,14 @@
 
 'use client'
 
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import {
+  Tree,
+  type NodeApi,
+  type TreeApi,
+  type RowRendererProps,
+  type NodeRendererProps,
+} from 'react-arborist'
 import {
   ChevronRight,
   ChevronDown,
@@ -164,7 +171,7 @@ function treeNodeKey(node: TreeNode): string {
   if (node.type === 'document') {
     return `doc:${(node as DocumentNode).document.id}`
   }
-  return `folder:${node.path}`
+  return node.path
 }
 
 interface FolderRowProps {
@@ -364,210 +371,44 @@ function FolderRow({
   )
 }
 
-interface FolderTreeNodeProps {
-  node: TreeNode
-  depth: number
-  compact: boolean
-  expandedFolders: Set<string>
-  onToggleFolder: (path: string) => void
-  // Folder handlers
-  onCreateFolder?: (parentId: number) => void
-  onRenameFolder?: (folderId: number, currentName: string) => void
-  onDeleteFolder?: (folderId: number, folderName: string) => void
-  canManageFolders?: boolean
-  // DocumentItem props
-  onViewDetail?: (doc: KnowledgeDocument) => void
-  onEdit?: (doc: KnowledgeDocument) => void
-  onDelete?: (doc: KnowledgeDocument) => void
-  onRefresh?: (doc: KnowledgeDocument) => void
-  onReindex?: (doc: KnowledgeDocument) => void
-  onMove?: (doc: KnowledgeDocument) => void
-  isRefreshing?: (docId: number) => boolean
-  isReindexing?: (docId: number) => boolean
-  canManage?: (doc: KnowledgeDocument) => boolean
-  canSelect?: (doc: KnowledgeDocument) => boolean
-  selected?: (docId: number) => boolean
-  includedInFolderScope?: (doc: KnowledgeDocument) => boolean
-  onSelect?: (doc: KnowledgeDocument, selected: boolean) => void
-  ragConfigured?: boolean
-  nameColumnWidth?: number
-  showActionsColumn?: boolean
-  // Folder selection props
-  canSelectFolders?: boolean
+function isCoveredBySelectedAncestorFolder(
+  node: NodeApi<TreeNode>,
   selectedFolderIds?: Set<number>
-  coveredBySelectedAncestorFolder?: boolean
-  onSelectFolder?: (folderId: number, selected: boolean) => void
-  activeFolderId?: number
-  onActivateFolder?: (folderId: number) => void
-}
-
-function FolderTreeNode({
-  node,
-  depth,
-  compact,
-  expandedFolders,
-  onToggleFolder,
-  onCreateFolder,
-  onRenameFolder,
-  onDeleteFolder,
-  canManageFolders,
-  onViewDetail,
-  onEdit,
-  onDelete,
-  onRefresh,
-  onReindex,
-  onMove,
-  isRefreshing,
-  isReindexing,
-  canManage,
-  canSelect,
-  selected,
-  includedInFolderScope,
-  onSelect,
-  ragConfigured,
-  nameColumnWidth,
-  showActionsColumn,
-  canSelectFolders,
-  selectedFolderIds,
-  coveredBySelectedAncestorFolder = false,
-  onSelectFolder,
-  activeFolderId,
-  onActivateFolder,
-}: FolderTreeNodeProps) {
-  // Hooks must be called unconditionally (before any early returns)
-  const handleFolderCheck = useCallback(
-    (checked: boolean) => {
-      if (node.type !== 'document') {
-        onSelectFolder?.((node as FolderNode).id, checked)
-      }
-    },
-    [node, onSelectFolder]
-  )
-
-  if (node.type === 'document') {
-    const doc = node.document
-    const docWithDisplayName = { ...doc, name: node.displayName }
-    const includedByFolder = includedInFolderScope?.(doc) ?? false
-
-    if (compact) {
-      return (
-        <div style={{ paddingLeft: `${depth * 12}px` }}>
-          <DocumentItem
-            document={docWithDisplayName}
-            onViewDetail={onViewDetail ? () => onViewDetail(doc) : undefined}
-            onEdit={onEdit ? () => onEdit(doc) : undefined}
-            onDelete={onDelete ? () => onDelete(doc) : undefined}
-            onRefresh={onRefresh ? () => onRefresh(doc) : undefined}
-            onReindex={onReindex ? () => onReindex(doc) : undefined}
-            onMove={onMove ? () => onMove(doc) : undefined}
-            isRefreshing={isRefreshing?.(doc.id) ?? false}
-            isReindexing={isReindexing?.(doc.id) ?? false}
-            canManage={canManage?.(doc) ?? true}
-            canSelect={canSelect?.(doc) ?? false}
-            showBorder={false}
-            selected={selected?.(doc.id) ?? false}
-            includedInFolderScope={includedByFolder}
-            onSelect={onSelect}
-            compact={true}
-            ragConfigured={ragConfigured}
-            showActionsColumn={showActionsColumn}
-          />
-        </div>
-      )
-    }
-
-    const indent = depth * 16
-    return (
-      <DocumentItem
-        document={docWithDisplayName}
-        indent={indent}
-        onViewDetail={onViewDetail ? () => onViewDetail(doc) : undefined}
-        onEdit={onEdit ? () => onEdit(doc) : undefined}
-        onDelete={onDelete ? () => onDelete(doc) : undefined}
-        onRefresh={onRefresh ? () => onRefresh(doc) : undefined}
-        onReindex={onReindex ? () => onReindex(doc) : undefined}
-        onMove={onMove ? () => onMove(doc) : undefined}
-        isRefreshing={isRefreshing?.(doc.id) ?? false}
-        isReindexing={isReindexing?.(doc.id) ?? false}
-        canManage={canManage?.(doc) ?? true}
-        canSelect={canSelect?.(doc) ?? false}
-        showBorder={true}
-        selected={selected?.(doc.id) ?? false}
-        includedInFolderScope={includedByFolder}
-        onSelect={onSelect}
-        compact={false}
-        ragConfigured={ragConfigured}
-        nameColumnWidth={nameColumnWidth}
-        showActionsColumn={showActionsColumn}
-      />
-    )
+): boolean {
+  if (!selectedFolderIds || selectedFolderIds.size === 0) {
+    return false
   }
 
-  // Folder node
-  const isExpanded = expandedFolders.has(node.path)
-  const directlySelectedFolder = selectedFolderIds?.has(node.id) ?? false
-  const folderChecked = coveredBySelectedAncestorFolder || directlySelectedFolder
-  const folderSelectionDisabled = coveredBySelectedAncestorFolder
-  const childCoveredBySelectedFolder = coveredBySelectedAncestorFolder || directlySelectedFolder
+  let parent = node.parent
+  while (parent && !parent.isRoot) {
+    if (parent.data.type === 'api-folder' && selectedFolderIds.has(parent.data.id)) {
+      return true
+    }
+    parent = parent.parent
+  }
+  return false
+}
 
+function countVisibleNodes(nodes: TreeNode[], expandedFolders: Set<string>): number {
+  let count = 0
+  for (const node of nodes) {
+    count += 1
+    if (node.type === 'api-folder' && expandedFolders.has(node.path)) {
+      count += countVisibleNodes(node.children, expandedFolders)
+    }
+  }
+  return count
+}
+
+function getTreeRowHeight(compact: boolean) {
+  return compact ? 48 : 49
+}
+
+function FolderTreeRow<T>({ attrs, innerRef, children }: RowRendererProps<T>) {
+  const { onClick: _onClick, ...safeAttrs } = attrs
   return (
-    <div>
-      <FolderRow
-        node={node}
-        depth={depth}
-        compact={compact}
-        expanded={isExpanded}
-        onToggle={onToggleFolder}
-        onCreateFolder={onCreateFolder}
-        onRenameFolder={onRenameFolder}
-        onDeleteFolder={onDeleteFolder}
-        canManageFolders={canManageFolders}
-        canSelectFolders={canSelectFolders}
-        folderChecked={folderChecked}
-        folderSelectionDisabled={folderSelectionDisabled}
-        onFolderCheck={handleFolderCheck}
-        active={activeFolderId === node.id}
-        onActivate={onActivateFolder}
-      />
-      {isExpanded && (
-        <div>
-          {node.children.map(child => (
-            <FolderTreeNode
-              key={treeNodeKey(child)}
-              node={child}
-              depth={depth + 1}
-              compact={compact}
-              expandedFolders={expandedFolders}
-              onToggleFolder={onToggleFolder}
-              onCreateFolder={onCreateFolder}
-              onRenameFolder={onRenameFolder}
-              onDeleteFolder={onDeleteFolder}
-              canManageFolders={canManageFolders}
-              onViewDetail={onViewDetail}
-              onEdit={onEdit}
-              onDelete={onDelete}
-              onRefresh={onRefresh}
-              onReindex={onReindex}
-              onMove={onMove}
-              isRefreshing={isRefreshing}
-              isReindexing={isReindexing}
-              canManage={canManage}
-              canSelect={canSelect}
-              selected={selected}
-              includedInFolderScope={includedInFolderScope}
-              onSelect={onSelect}
-              ragConfigured={ragConfigured}
-              nameColumnWidth={nameColumnWidth}
-              canSelectFolders={canSelectFolders}
-              selectedFolderIds={selectedFolderIds}
-              coveredBySelectedAncestorFolder={childCoveredBySelectedFolder}
-              onSelectFolder={onSelectFolder}
-              activeFolderId={activeFolderId}
-              onActivateFolder={onActivateFolder}
-            />
-          ))}
-        </div>
-      )}
+    <div {...safeAttrs} ref={innerRef}>
+      {children}
     </div>
   )
 }
@@ -607,6 +448,7 @@ export function FolderTree({
   onActivateFolder,
 }: FolderTreeProps) {
   const tree = useMemo(() => buildMergedTree(folders, documents), [folders, documents])
+  const treeRef = useRef<TreeApi<TreeNode> | undefined>(undefined)
 
   const defaultExpandedFolderPaths = useMemo(
     () => folders.map(folder => `folder:${folder.id}`),
@@ -627,133 +469,215 @@ export function FolderTree({
   }, [folders, documents])
 
   // Default: expand root-level folders only; active/result paths are expanded separately.
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    () => new Set(defaultExpandedFolderPaths)
+  )
 
-  useEffect(() => {
+  const openFolderPaths = useCallback((paths: string[]) => {
+    if (paths.length === 0) return
     setExpandedFolders(prev => {
       const next = new Set(prev)
-      for (const path of defaultExpandedFolderPaths) {
+      for (const path of paths) {
         next.add(path)
       }
       return next
     })
+    for (const path of paths) {
+      treeRef.current?.open(path)
+    }
+  }, [])
+
+  useEffect(() => {
+    openFolderPaths(defaultExpandedFolderPaths)
+  }, [defaultExpandedFolderPaths, openFolderPaths])
+
+  useEffect(() => {
+    openFolderPaths(activeFolderPaths)
+  }, [activeFolderPaths, openFolderPaths])
+
+  useEffect(() => {
+    openFolderPaths(resultDocumentFolderPaths)
+  }, [resultDocumentFolderPaths, openFolderPaths])
+
+  const handleToggleFolder = useCallback((path: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (treeRef.current?.isOpen(path)) {
+        next.add(path)
+      } else {
+        next.delete(path)
+      }
+      return next
+    })
+  }, [])
+
+  const initialOpenState = useMemo(() => {
+    const state: Record<string, boolean> = {}
+    for (const path of defaultExpandedFolderPaths) {
+      state[path] = true
+    }
+    return state
   }, [defaultExpandedFolderPaths])
 
-  useEffect(() => {
-    if (activeFolderPaths.length === 0) return
-    setExpandedFolders(prev => {
-      const next = new Set(prev)
-      for (const path of activeFolderPaths) {
-        next.add(path)
-      }
-      return next
-    })
-  }, [activeFolderPaths])
+  const treeHeight = useMemo(
+    () => countVisibleNodes(tree, expandedFolders) * getTreeRowHeight(compact),
+    [compact, expandedFolders, tree]
+  )
 
-  useEffect(() => {
-    if (resultDocumentFolderPaths.length === 0) return
-    setExpandedFolders(prev => {
-      const next = new Set(prev)
-      for (const path of resultDocumentFolderPaths) {
-        next.add(path)
-      }
-      return next
-    })
-  }, [resultDocumentFolderPaths])
+  const renderNode = useCallback(
+    ({ node }: NodeRendererProps<TreeNode>) => {
+      const data = node.data
+      const depth = node.level
 
-  const handleToggleFolder = (path: string) => {
-    setExpandedFolders(prev => {
-      const next = new Set(prev)
-      if (next.has(path)) {
-        next.delete(path)
-      } else {
-        next.add(path)
+      if (data.type === 'document') {
+        const doc = data.document
+        const docWithDisplayName = { ...doc, name: data.displayName }
+        const includedByFolder = includedInFolderScope?.(doc) ?? false
+
+        if (compact) {
+          return (
+            <div style={{ paddingLeft: `${depth * 12}px` }}>
+              <DocumentItem
+                document={docWithDisplayName}
+                onViewDetail={onViewDetail ? () => onViewDetail(doc) : undefined}
+                onEdit={onEdit ? () => onEdit(doc) : undefined}
+                onDelete={onDelete ? () => onDelete(doc) : undefined}
+                onRefresh={onRefresh ? () => onRefresh(doc) : undefined}
+                onReindex={onReindex ? () => onReindex(doc) : undefined}
+                onMove={onMove ? () => onMove(doc) : undefined}
+                isRefreshing={refreshingDocId === doc.id}
+                isReindexing={reindexingDocId === doc.id}
+                canManage={canManage?.(doc) ?? true}
+                canSelect={canSelect?.(doc) ?? false}
+                showBorder={false}
+                selected={selectedIds?.has(doc.id) ?? false}
+                includedInFolderScope={includedByFolder}
+                onSelect={onSelect}
+                compact={true}
+                ragConfigured={ragConfigured}
+                showActionsColumn={showActionsColumn}
+              />
+            </div>
+          )
+        }
+
+        return (
+          <DocumentItem
+            document={docWithDisplayName}
+            indent={depth * 16}
+            onViewDetail={onViewDetail ? () => onViewDetail(doc) : undefined}
+            onEdit={onEdit ? () => onEdit(doc) : undefined}
+            onDelete={onDelete ? () => onDelete(doc) : undefined}
+            onRefresh={onRefresh ? () => onRefresh(doc) : undefined}
+            onReindex={onReindex ? () => onReindex(doc) : undefined}
+            onMove={onMove ? () => onMove(doc) : undefined}
+            isRefreshing={refreshingDocId === doc.id}
+            isReindexing={reindexingDocId === doc.id}
+            canManage={canManage?.(doc) ?? true}
+            canSelect={canSelect?.(doc) ?? false}
+            showBorder={true}
+            selected={selectedIds?.has(doc.id) ?? false}
+            includedInFolderScope={includedByFolder}
+            onSelect={onSelect}
+            compact={false}
+            ragConfigured={ragConfigured}
+            nameColumnWidth={nameColumnWidth}
+            showActionsColumn={showActionsColumn}
+          />
+        )
       }
-      return next
-    })
-  }
+
+      const directlySelectedFolder = selectedFolderIds?.has(data.id) ?? false
+      const coveredBySelectedAncestorFolder = isCoveredBySelectedAncestorFolder(
+        node,
+        selectedFolderIds
+      )
+      const folderChecked = coveredBySelectedAncestorFolder || directlySelectedFolder
+      const folderSelectionDisabled = coveredBySelectedAncestorFolder
+
+      return (
+        <FolderRow
+          node={data}
+          depth={depth}
+          compact={compact}
+          expanded={node.isOpen}
+          onToggle={() => node.toggle()}
+          onCreateFolder={onCreateFolder}
+          onRenameFolder={onRenameFolder}
+          onDeleteFolder={onDeleteFolder}
+          canManageFolders={canManageFolders}
+          canSelectFolders={canSelectFolders}
+          folderChecked={folderChecked}
+          folderSelectionDisabled={folderSelectionDisabled}
+          onFolderCheck={checked => onSelectFolder?.(data.id, checked)}
+          active={activeFolderId === data.id}
+          onActivate={onActivateFolder}
+        />
+      )
+    },
+    [
+      activeFolderId,
+      canManage,
+      canManageFolders,
+      canSelect,
+      canSelectFolders,
+      compact,
+      includedInFolderScope,
+      nameColumnWidth,
+      onActivateFolder,
+      onCreateFolder,
+      onDelete,
+      onDeleteFolder,
+      onEdit,
+      onMove,
+      onRefresh,
+      onReindex,
+      onRenameFolder,
+      onSelect,
+      onSelectFolder,
+      onViewDetail,
+      ragConfigured,
+      refreshingDocId,
+      reindexingDocId,
+      selectedFolderIds,
+      selectedIds,
+      showActionsColumn,
+    ]
+  )
+
+  const treeContent = (
+    <Tree<TreeNode>
+      ref={treeRef}
+      data={tree}
+      idAccessor={treeNodeKey}
+      childrenAccessor={node => (node.type === 'api-folder' ? node.children : null)}
+      openByDefault={false}
+      initialOpenState={initialOpenState}
+      onToggle={handleToggleFolder}
+      disableDrag={true}
+      disableDrop={true}
+      disableEdit={true}
+      disableMultiSelection={true}
+      disableSelect={true}
+      rowHeight={getTreeRowHeight(compact)}
+      height={treeHeight}
+      width="100%"
+      indent={0}
+      overscanCount={8}
+      renderRow={FolderTreeRow}
+      className={compact ? 'space-y-0.5' : undefined}
+    >
+      {renderNode}
+    </Tree>
+  )
 
   if (compact) {
-    return (
-      <div className="space-y-0.5">
-        {tree.map(node => (
-          <FolderTreeNode
-            key={node.type === 'document' ? `doc:${node.document.id}` : `folder:${node.path}`}
-            node={node}
-            depth={0}
-            compact={true}
-            expandedFolders={expandedFolders}
-            onToggleFolder={handleToggleFolder}
-            onCreateFolder={onCreateFolder}
-            onRenameFolder={onRenameFolder}
-            onDeleteFolder={onDeleteFolder}
-            canManageFolders={canManageFolders}
-            onViewDetail={onViewDetail}
-            onEdit={onEdit}
-            onDelete={onDelete}
-            onRefresh={onRefresh}
-            onReindex={onReindex}
-            onMove={onMove}
-            isRefreshing={id => refreshingDocId === id}
-            isReindexing={id => reindexingDocId === id}
-            canManage={canManage}
-            canSelect={canSelect}
-            selected={id => selectedIds?.has(id) ?? false}
-            includedInFolderScope={includedInFolderScope}
-            onSelect={onSelect}
-            ragConfigured={ragConfigured}
-            showActionsColumn={showActionsColumn}
-            canSelectFolders={canSelectFolders}
-            selectedFolderIds={selectedFolderIds}
-            onSelectFolder={onSelectFolder}
-            activeFolderId={activeFolderId}
-            onActivateFolder={onActivateFolder}
-          />
-        ))}
-      </div>
-    )
+    return <div className="space-y-0.5">{treeContent}</div>
   }
-
-  // Normal (table) mode
-  const treeNodes = tree.map(node => (
-    <FolderTreeNode
-      key={node.type === 'document' ? `doc:${node.document.id}` : `folder:${node.path}`}
-      node={node}
-      depth={0}
-      compact={false}
-      expandedFolders={expandedFolders}
-      onToggleFolder={handleToggleFolder}
-      onCreateFolder={onCreateFolder}
-      onRenameFolder={onRenameFolder}
-      onDeleteFolder={onDeleteFolder}
-      canManageFolders={canManageFolders}
-      onViewDetail={onViewDetail}
-      onEdit={onEdit}
-      onDelete={onDelete}
-      onRefresh={onRefresh}
-      onReindex={onReindex}
-      onMove={onMove}
-      isRefreshing={id => refreshingDocId === id}
-      isReindexing={id => reindexingDocId === id}
-      canManage={canManage}
-      canSelect={canSelect}
-      selected={id => selectedIds?.has(id) ?? false}
-      includedInFolderScope={includedInFolderScope}
-      onSelect={onSelect}
-      ragConfigured={ragConfigured}
-      nameColumnWidth={nameColumnWidth}
-      showActionsColumn={showActionsColumn}
-      canSelectFolders={canSelectFolders}
-      selectedFolderIds={selectedFolderIds}
-      onSelectFolder={onSelectFolder}
-      activeFolderId={activeFolderId}
-      onActivateFolder={onActivateFolder}
-    />
-  ))
 
   if (withBorder) {
-    return <div className="border border-border rounded-lg overflow-x-auto">{treeNodes}</div>
+    return <div className="border border-border rounded-lg overflow-x-auto">{treeContent}</div>
   }
 
-  return <>{treeNodes}</>
+  return <>{treeContent}</>
 }

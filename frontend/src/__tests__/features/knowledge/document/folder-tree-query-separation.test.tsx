@@ -163,10 +163,13 @@ describe('FolderTree query/result separation', () => {
     )
 
     const folderRow = screen.getByRole('button', { name: /Reports/ })
-    const folderContainer = folderRow.parentElement
+    const insideDocument = screen.getByText('inside-folder.txt')
+    const rootDocument = screen.getByText('root.txt')
 
-    expect(folderContainer).toHaveTextContent('inside-folder.txt')
-    expect(folderContainer).not.toHaveTextContent('root.txt')
+    expect(folderRow.compareDocumentPosition(insideDocument)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(insideDocument.compareDocumentPosition(rootDocument)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
   })
 
   it('expands active folders so scoped documents remain visible', () => {
