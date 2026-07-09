@@ -31,7 +31,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Spinner } from '@/components/ui/spinner'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DocumentDetailDialog } from './DocumentDetailDialog'
 import { DocumentUpload, type TableDocument } from './DocumentUpload'
@@ -41,7 +40,7 @@ import { RetrievalTestDialog } from './RetrievalTestDialog'
 import { useDocuments } from '../hooks/useDocuments'
 import { useFolders } from '../hooks/useFolders'
 import { FolderTree, type SortField, type SortOrder } from './FolderTree'
-import { getDocumentTableGridTemplate } from './DocumentItem'
+import { KnowledgeDocumentTreeGrid } from './KnowledgeDocumentTreeGrid'
 import { CreateFolderDialog } from './CreateFolderDialog'
 import { DeleteFolderDialog } from './DeleteFolderDialog'
 import { MoveDocumentDialog } from './MoveDocumentDialog'
@@ -557,12 +556,6 @@ export function DocumentList({
   const documentBatchActionsDisabled = shouldDisableDocumentBatchActions({
     selectedDocumentCount: selectedIds.size,
     selectedFolderCount: selectedFolderIds.size,
-  })
-
-  const tableGridTemplate = getDocumentTableGridTemplate({
-    showSelectionColumn: canManageAllDocuments,
-    showActionsColumn: canManageAnyDocuments,
-    nameColumnWidth: nameColumnWidth ?? undefined,
   })
 
   const handleSort = (field: SortField) => {
@@ -1390,134 +1383,59 @@ export function DocumentList({
               )}
             </div>
           ) : (
-            /* Normal mode: Table layout with folder tree - single bordered container */
-            <div className="border border-border rounded-lg overflow-x-auto">
-              {/* Inner container - width determined by content, background covers all */}
-              <div className="bg-base min-w-[880px] w-fit">
-                {/* Table header */}
-                <div
-                  className="grid items-center gap-4 px-4 py-2.5 bg-surface text-xs text-text-muted font-medium border-b border-border"
-                  style={{ gridTemplateColumns: tableGridTemplate }}
-                >
-                  {/* Checkbox for select all */}
-                  {canManageAllDocuments && (
-                    <div>
-                      <Checkbox
-                        checked={isPartialSelected ? 'indeterminate' : isAllSelected}
-                        onCheckedChange={handleSelectAll}
-                        aria-label={
-                          paginationEnabled
-                            ? t('document.document.batch.selectCurrentPage')
-                            : t('document.document.batch.selectAll')
-                        }
-                        className="data-[state=checked]:bg-primary data-[state=checked]:border-primary"
-                      />
-                    </div>
-                  )}
-                  {/* Icon + Name column header */}
-                  <div ref={nameColumnRef} className="relative flex items-center gap-2 min-w-0">
-                    {/* Icon placeholder */}
-                    <div className="w-4 h-4 flex-shrink-0" />
-                    <button
-                      type="button"
-                      className="cursor-pointer hover:text-text-primary select-none"
-                      onClick={() => handleSort('name')}
-                    >
-                      {t('document.document.columns.name')}
-                      <SortIcon field="name" />
-                    </button>
-                    {/* Column resize handle */}
-                    <div
-                      className="absolute top-0 right-0 bottom-0 w-3 cursor-col-resize z-10 group/resize flex items-center justify-center"
-                      onMouseDown={handleNameResizeMouseDown}
-                      onClick={e => e.stopPropagation()}
-                    >
-                      <div className="w-0.5 h-3/4 rounded-full bg-border group-hover/resize:bg-primary/50 transition-colors" />
-                    </div>
-                  </div>
-                  {/* Spacer to match DocumentItem edit button area */}
-                  <div />
-                  <div className="text-center">{t('document.document.columns.type')}</div>
-                  <button
-                    type="button"
-                    className="text-center cursor-pointer hover:text-text-primary select-none"
-                    onClick={() => handleSort('size')}
-                  >
-                    {t('document.document.columns.size')}
-                    <SortIcon field="size" />
-                  </button>
-                  {/* Creator column header */}
-                  <div className="text-center">{t('document.document.columns.createdBy')}</div>
-                  <button
-                    type="button"
-                    className="text-center cursor-pointer hover:text-text-primary select-none"
-                    onClick={() => handleSort('createdAt')}
-                  >
-                    {t('document.document.columns.date')}
-                    <SortIcon field="createdAt" />
-                  </button>
-                  {/* Updated date column header */}
-                  <button
-                    type="button"
-                    className="text-center cursor-pointer hover:text-text-primary select-none"
-                    onClick={() => handleSort('updatedAt')}
-                  >
-                    {t('document.document.columns.updatedAt')}
-                    <SortIcon field="updatedAt" />
-                  </button>
-                  <div className="text-center">{t('document.document.columns.indexStatus')}</div>
-                  {canManageAnyDocuments && (
-                    <div className="text-center">{t('document.document.columns.actions')}</div>
-                  )}
+            <>
+              <KnowledgeDocumentTreeGrid
+                folders={folders}
+                documents={documents}
+                canManageAllDocuments={canManageAllDocuments}
+                canManageAnyDocuments={canManageAnyDocuments}
+                canUpload={canUpload}
+                canManage={canManageDocument}
+                canSelect={doc => canSelectDocument(doc) && canManageAllDocuments}
+                selectedIds={selectedIds}
+                includedInFolderScope={isDocumentIncludedInFolderScope}
+                onSelect={canManageAllDocuments ? handleSelectDoc : undefined}
+                onSelectAll={handleSelectAll}
+                isAllSelected={isAllSelected}
+                isPartialSelected={isPartialSelected}
+                paginationEnabled={paginationEnabled}
+                selectedFolderIds={selectedFolderIds}
+                onSelectFolder={handleSelectFolder}
+                activeFolderId={activeFolderId}
+                onActivateFolder={handleActivateFolder}
+                onViewDetail={setViewingDoc}
+                onEdit={setEditingDoc}
+                onDelete={setDeletingDoc}
+                onRefresh={handleRefreshWebDocument}
+                onReindex={handleReindexDocument}
+                onMove={handleMoveDocument}
+                refreshingDocId={refreshingDocId}
+                reindexingDocId={reindexingDocId}
+                ragConfigured={ragConfigured}
+                nameColumnWidth={nameColumnWidth ?? undefined}
+                nameColumnRef={nameColumnRef}
+                onNameResizeMouseDown={handleNameResizeMouseDown}
+                onCreateFolder={canUpload ? handleCreateFolder : undefined}
+                onRenameFolder={canUpload ? handleRenameFolder : undefined}
+                onDeleteFolder={canUpload ? handleDeleteFolderClick : undefined}
+                sortIcon={field => <SortIcon field={field} />}
+                onSort={handleSort}
+              />
+              {/* Pagination bar for classic mode */}
+              {paginationEnabled && (
+                <div className="min-w-[880px]">
+                  <Pagination
+                    page={page}
+                    totalPages={totalPages}
+                    totalCount={totalCount}
+                    pageSize={pageSize}
+                    onGoToPage={handleGoToPage}
+                    onPageSizeChange={handlePageSizeChange}
+                    disabled={loading}
+                  />
                 </div>
-                {/* Document rows with folder tree - no extra border */}
-                <FolderTree
-                  folders={folders}
-                  documents={documents}
-                  compact={false}
-                  withBorder={false}
-                  onViewDetail={setViewingDoc}
-                  onEdit={setEditingDoc}
-                  onDelete={setDeletingDoc}
-                  onRefresh={handleRefreshWebDocument}
-                  onReindex={handleReindexDocument}
-                  onMove={handleMoveDocument}
-                  refreshingDocId={refreshingDocId}
-                  reindexingDocId={reindexingDocId}
-                  canManage={canManageDocument}
-                  canSelect={doc => canSelectDocument(doc) && canManageAllDocuments}
-                  selectedIds={selectedIds}
-                  includedInFolderScope={isDocumentIncludedInFolderScope}
-                  onSelect={canManageAllDocuments ? handleSelectDoc : undefined}
-                  ragConfigured={ragConfigured}
-                  nameColumnWidth={nameColumnWidth ?? undefined}
-                  showActionsColumn={canManageAnyDocuments}
-                  onCreateFolder={canUpload ? handleCreateFolder : undefined}
-                  onRenameFolder={canUpload ? handleRenameFolder : undefined}
-                  onDeleteFolder={canUpload ? handleDeleteFolderClick : undefined}
-                  canManageFolders={canUpload}
-                  canSelectFolders={canManageAllDocuments && !onSelectionChange}
-                  selectedFolderIds={selectedFolderIds}
-                  onSelectFolder={handleSelectFolder}
-                  activeFolderId={activeFolderId}
-                  onActivateFolder={handleActivateFolder}
-                />
-                {/* Pagination bar for classic mode */}
-                {paginationEnabled && (
-                  <div className="min-w-[880px]">
-                    <Pagination
-                      page={page}
-                      totalPages={totalPages}
-                      totalCount={totalCount}
-                      pageSize={pageSize}
-                      onGoToPage={handleGoToPage}
-                      onPageSizeChange={handlePageSizeChange}
-                      disabled={loading}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
+              )}
+            </>
           )}
           {/* Overlay during column resize to prevent pointer event interference */}
           {isColumnResizing && (
