@@ -148,6 +148,7 @@ describe('KnowledgeDetailPanel workspace', () => {
   it('shares one source scope across the source, chat, and generation columns', () => {
     render(<KnowledgeDetailPanel selectedKb={knowledgeBase} currentView="notebook" />)
 
+    expect(screen.getByTestId('knowledge-detail-notebook')).toHaveClass('border-t', 'border-border')
     expect(screen.getByTestId('mock-source-panel')).toBeInTheDocument()
     expect(screen.getByTestId('mock-chat-area')).toBeInTheDocument()
     expect(screen.getByTestId('mock-generation-panel')).toBeInTheDocument()

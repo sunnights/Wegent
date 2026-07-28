@@ -244,7 +244,7 @@ export function KnowledgeDetailPanel({
   if (selectedKb && currentView === 'notebook') {
     return (
       <div
-        className="flex flex-1 flex-col overflow-hidden bg-base xl:flex-row"
+        className="flex flex-1 flex-col overflow-hidden border-t border-border bg-base xl:flex-row"
         data-testid="knowledge-detail-notebook"
       >
         <Tabs

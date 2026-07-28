@@ -5,7 +5,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Database, FileText, Network, Settings2 } from 'lucide-react'
+import { Database, Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -72,24 +72,6 @@ export function ArtifactCreateDialog({
           <DialogDescription>{t('artifact.sharedGenerationNotice')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">
-          <div className="flex items-start gap-3 rounded-xl border border-border bg-surface p-4">
-            <div className="rounded-lg bg-primary/10 p-2 text-primary">
-              {artifactType === 'mind_map' ? (
-                <Network className="h-5 w-5" />
-              ) : (
-                <FileText className="h-5 w-5" />
-              )}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="font-medium">
-                {t(`artifact.type.${artifactType === 'mind_map' ? 'mindMap' : 'briefing'}`)}
-              </p>
-              <p className="mt-1 text-sm text-text-secondary">
-                {t(`artifact.type.${artifactType === 'mind_map' ? 'mindMapHint' : 'briefingHint'}`)}
-              </p>
-            </div>
-          </div>
-
           <div className="rounded-xl border border-border p-4">
             <div className="flex items-start gap-3">
               <div className="rounded-lg bg-primary/10 p-2 text-primary">

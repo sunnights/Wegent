@@ -46,6 +46,7 @@ describe('ArtifactCreateDialog', () => {
     expect(screen.getByText('artifact.action.briefing').parentElement).toContainElement(
       screen.getByText('artifact.createDescription')
     )
+    expect(screen.queryByText('artifact.type.briefingHint')).not.toBeInTheDocument()
     expect(screen.getByText('artifact.wholeKnowledgeBase:36')).toBeInTheDocument()
     expect(screen.getByText('artifact.sharedGenerationNotice')).toBeInTheDocument()
     expect(screen.getByTestId('artifact-create-dialog')).toHaveClass('sm:max-w-3xl')
@@ -83,6 +84,7 @@ describe('ArtifactCreateDialog', () => {
     )
 
     expect(screen.getByText('artifact.action.mind_map')).toBeInTheDocument()
+    expect(screen.queryByText('artifact.type.mindMapHint')).not.toBeInTheDocument()
     expect(screen.getByText('artifact.selectedDocuments:2')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('artifact-create-adjust-sources'))
     expect(onAdjustSources).toHaveBeenCalled()
