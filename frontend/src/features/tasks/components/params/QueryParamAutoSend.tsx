@@ -28,20 +28,23 @@ interface QueryParamAutoSendProps {
   onSendMessage: (message: string) => Promise<void>
   /** Whether there is an existing task selected (taskId in URL) */
   hasTaskId: boolean
+  /** Currently loaded task ID, used to avoid sending before an existing task is ready */
+  currentTaskId?: number | null
   /** Callback to prefill the input box with the query text (called immediately on mount) */
   onPrefillMessage?: (message: string) => void
 }
 
 /**
  * Monitors URL query parameters `q`, `teamId`, `teamName`, `teamNamespace`, and `autoSend` to automatically
- * initiate a new conversation when the chat page is opened via an
+ * initiate or continue a conversation when the chat page is opened via an
  * external link like `/chat?q=hello&teamName=myAgent&teamNamespace=default&autoSend=true`.
  *
  * Behavior:
- * - Only fires when `q` is present and non-empty, and no `taskId` exists.
+ * - Only fires when `q` is present and non-empty.
  * - `q` content is always prefilled into the input box immediately on mount.
  * - Auto-send only happens when `autoSend=true` is present in the URL.
- * - Waits for WebSocket connection + teams loaded before sending.
+ * - For a new task, waits for WebSocket connection + teams loaded before sending.
+ * - For an existing task, waits until that exact task has loaded before sending.
  * - Clears `q`, `teamId`, `teamName`, `teamNamespace`, and `autoSend` from URL after sending (taskId is
  *   set by the normal send flow).
  * - Uses a ref guard to guarantee the message is sent at most once, even
@@ -54,14 +57,15 @@ export default function QueryParamAutoSend({
   onTeamChange,
   onSendMessage,
   hasTaskId,
+  currentTaskId,
   onPrefillMessage,
 }: QueryParamAutoSendProps) {
   const searchParams = useSearchParams()
   const router = useRouter()
   const { isConnected } = useSocket()
 
-  // Guard: ensure we only process once per page load
-  const processedRef = useRef(false)
+  // Guard each external request while allowing later node questions in the same mounted chat.
+  const processedRequestRef = useRef<string | null>(null)
   // Track if user manually interacted before auto-send fires
   const userInteractedRef = useRef(false)
 
@@ -72,6 +76,7 @@ export default function QueryParamAutoSend({
   const selectedTeamRef = useRef(selectedTeam)
   const onTeamChangeRef = useRef(onTeamChange)
   const onSendMessageRef = useRef(onSendMessage)
+  const currentTaskIdRef = useRef(currentTaskId)
 
   useEffect(() => {
     isConnectedRef.current = isConnected
@@ -97,6 +102,10 @@ export default function QueryParamAutoSend({
     onSendMessageRef.current = onSendMessage
   }, [onSendMessage])
 
+  useEffect(() => {
+    currentTaskIdRef.current = currentTaskId
+  }, [currentTaskId])
+
   // Detect user interaction (typing / team switch) to cancel auto-send
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -115,41 +124,39 @@ export default function QueryParamAutoSend({
     url.searchParams.delete('teamId')
     url.searchParams.delete('teamName')
     url.searchParams.delete('teamNamespace')
+    url.searchParams.delete('autoSend')
     url.searchParams.delete('autosend')
+    url.searchParams.delete('requestId')
     router.replace(url.pathname + url.search)
   }, [router])
 
   // Prefill input box immediately when q param is present (even before auto-send conditions are met)
-  const prefillDoneRef = useRef(false)
+  const prefilledRequestRef = useRef<string | null>(null)
   useEffect(() => {
-    if (prefillDoneRef.current) return
-    if (hasTaskId) return
-
     const query = searchParams.get('q')
     if (!query) return
+    const requestKey =
+      searchParams.get('requestId') ??
+      `${searchParams.get('taskId') ?? ''}:${query}:${searchParams.get('autoSend') ?? ''}`
+    if (prefilledRequestRef.current === requestKey) return
 
-    const decodedMessage = decodeURIComponent(query).trim()
+    const decodedMessage = query.trim()
     if (!decodedMessage) return
 
-    prefillDoneRef.current = true
+    prefilledRequestRef.current = requestKey
     onPrefillMessage?.(decodedMessage)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, hasTaskId])
+  }, [searchParams])
 
   useEffect(() => {
-    // Already processed or user interacted
-    if (processedRef.current) return
-
-    // taskId takes priority - ignore q when viewing an existing task
-    if (hasTaskId) {
-      processedRef.current = true
-      return
-    }
-
     const query = searchParams.get('q')
     if (!query) return
+    const requestKey =
+      searchParams.get('requestId') ??
+      `${searchParams.get('taskId') ?? ''}:${query}:${searchParams.get('autoSend') ?? ''}`
+    if (processedRequestRef.current === requestKey) return
 
-    const decodedMessage = decodeURIComponent(query).trim()
+    const decodedMessage = query.trim()
     if (!decodedMessage) return
 
     // Only auto-send when autoSend=true is explicitly set in the URL
@@ -157,7 +164,7 @@ export default function QueryParamAutoSend({
     const autoSendParam = searchParams.get('autoSend') ?? searchParams.get('autosend')
     if (autoSendParam?.toLowerCase() !== 'true') {
       // No auto-send requested - just prefill (already done above) and stop
-      processedRef.current = true
+      processedRequestRef.current = requestKey
       return
     }
 
@@ -168,8 +175,9 @@ export default function QueryParamAutoSend({
     const teamNameParam = searchParams.get('teamName')
     const teamNamespaceParam = searchParams.get('teamNamespace') || 'default'
 
-    // Mark processed immediately to prevent duplicate triggers
-    processedRef.current = true
+    // Mark this request immediately to prevent duplicate triggers.
+    processedRequestRef.current = requestKey
+    userInteractedRef.current = false
 
     // Wait for prerequisites then send
     let cancelled = false
@@ -199,6 +207,20 @@ export default function QueryParamAutoSend({
         }
         // Retry after a short delay; polling is handled via setTimeout
         setTimeout(tryExecute, POLL_INTERVAL)
+        return
+      }
+
+      if (hasTaskId) {
+        const targetTaskId = Number(searchParams.get('taskId'))
+        if (!Number.isInteger(targetTaskId) || currentTaskIdRef.current !== targetTaskId) {
+          if (elapsed > WS_READY_TIMEOUT) {
+            clearQueryParams()
+            return
+          }
+          setTimeout(tryExecute, POLL_INTERVAL)
+          return
+        }
+        executeAutoSend(decodedMessage)
         return
       }
 

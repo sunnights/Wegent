@@ -753,6 +753,7 @@ const MessageBubble = memo(
         <EnhancedMarkdown
           source={normalizedResult}
           theme={theme}
+          onMindMapNodeAsk={!isStreaming ? onSendMessage : undefined}
           components={
             paragraphAction
               ? {

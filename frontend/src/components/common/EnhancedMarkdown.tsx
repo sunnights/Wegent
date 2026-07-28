@@ -36,10 +36,19 @@ const MermaidDiagram = dynamic(() => import('./MermaidDiagram'), {
   ),
 })
 
+const MindMapDiagram = dynamic(() => import('@/features/knowledge/mind-map/MindMapDiagram'), {
+  ssr: false,
+  loading: () => (
+    <div className="my-4 flex min-h-[420px] items-center justify-center rounded-lg border border-border bg-surface">
+      <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+    </div>
+  ),
+})
+
 interface EnhancedMarkdownProps {
   source: string
   theme: 'light' | 'dark'
-  onMermaidNodeClick?: () => void
+  onMindMapNodeAsk?: (message: string) => void
   /** Custom components to override default rendering */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   components?: Record<string, React.ComponentType<any>>
@@ -638,7 +647,7 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
   source,
   theme,
   components,
-  onMermaidNodeClick,
+  onMindMapNodeAsk,
 }: EnhancedMarkdownProps) {
   // Extract frontmatter before processing
   const { frontmatter, body } = useMemo(() => extractFrontmatter(source), [source])
@@ -791,13 +800,16 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
       {frontmatter && <FrontmatterBlock yaml={frontmatter} />}
       {contentParts.map((part, index) => {
         if (part.type === 'mermaid') {
-          return (
-            <MermaidDiagram
-              key={`mermaid-${index}`}
-              code={part.content}
-              onNodeClick={onMermaidNodeClick}
-            />
-          )
+          if (/^\s*mindmap\b/i.test(part.content)) {
+            return (
+              <MindMapDiagram
+                key={`mind-map-${index}`}
+                code={part.content}
+                onAskNode={onMindMapNodeAsk}
+              />
+            )
+          }
+          return <MermaidDiagram key={`mermaid-${index}`} code={part.content} />
         }
 
         if (part.type === 'latex') {

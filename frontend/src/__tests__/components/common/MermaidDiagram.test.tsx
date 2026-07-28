@@ -334,26 +334,6 @@ describe('MermaidDiagram', () => {
     expect(diagramContainer).toBeInTheDocument()
   })
 
-  it('opens the origin task when a mind-map node is clicked', async () => {
-    const onNodeClick = jest.fn()
-    await act(async () => {
-      renderWithProviders(
-        <MermaidDiagram code={'mindmap\n  root((Topic))'} onNodeClick={onNodeClick} />
-      )
-    })
-
-    await act(async () => {
-      mockRenderResolve({
-        svg: '<svg width="100" height="100"><g data-id="root"><text>Topic</text></g></svg>',
-      })
-    })
-
-    await waitFor(() => expect(screen.getByText('Topic')).toBeInTheDocument())
-    fireEvent.click(screen.getByText('Topic'))
-
-    expect(onNodeClick).toHaveBeenCalledTimes(1)
-  })
-
   it('handles empty code gracefully', async () => {
     await act(async () => {
       renderWithProviders(<MermaidDiagram code="" />)

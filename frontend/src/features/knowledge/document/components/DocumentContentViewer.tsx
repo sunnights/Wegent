@@ -105,24 +105,35 @@ export function DocumentContentViewer({
   const hasOriginKnowledgeBase =
     Number.isInteger(originKnowledgeBaseId) && originKnowledgeBaseId > 0
 
-  const handleMermaidNodeClick = useCallback(() => {
-    if (!canOpenOriginTask) return
-    router.push(
-      getTaskTargetHref({
-        id: originTaskId,
-        task_type: hasOriginKnowledgeBase ? 'knowledge' : 'chat',
-        knowledge_base_id: hasOriginKnowledgeBase ? originKnowledgeBaseId : undefined,
-      })
-    )
-    onOpenChange(false)
-  }, [
-    canOpenOriginTask,
-    hasOriginKnowledgeBase,
-    onOpenChange,
-    originKnowledgeBaseId,
-    originTaskId,
-    router,
-  ])
+  const handleMindMapNodeAsk = useCallback(
+    (message: string) => {
+      if (!canOpenOriginTask) return
+      const target = new URL(
+        getTaskTargetHref({
+          id: originTaskId,
+          task_type: hasOriginKnowledgeBase ? 'knowledge' : 'chat',
+          knowledge_base_id: hasOriginKnowledgeBase ? originKnowledgeBaseId : undefined,
+        }),
+        window.location.origin
+      )
+      target.searchParams.set('q', message)
+      target.searchParams.set('autoSend', 'true')
+      target.searchParams.set(
+        'requestId',
+        globalThis.crypto?.randomUUID?.() ?? `${originTaskId}-${Date.now()}`
+      )
+      router.push(`${target.pathname}${target.search}`)
+      onOpenChange(false)
+    },
+    [
+      canOpenOriginTask,
+      hasOriginKnowledgeBase,
+      onOpenChange,
+      originKnowledgeBaseId,
+      originTaskId,
+      router,
+    ]
+  )
 
   // Handle wiki link clicks
   const handleWikiLinkClick = useCallback(
@@ -163,7 +174,7 @@ export function DocumentContentViewer({
     <EnhancedMarkdown
       source={content}
       theme={theme}
-      onMermaidNodeClick={canOpenOriginTask ? handleMermaidNodeClick : undefined}
+      onMindMapNodeAsk={canOpenOriginTask ? handleMindMapNodeAsk : undefined}
       components={{
         a: ({
           href,

@@ -1786,6 +1786,7 @@ function ChatAreaContent({
         onTeamChange={handleTeamChange}
         onSendMessage={streamHandlers.handleSendMessage}
         hasTaskId={!!taskIdFromUrl}
+        currentTaskId={selectedTaskDetail?.id}
         onPrefillMessage={chatState.setTaskInputMessage}
       />
 
