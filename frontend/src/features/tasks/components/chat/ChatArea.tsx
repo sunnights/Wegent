@@ -2057,6 +2057,7 @@ function ChatAreaContent({
             <AlertDialogTitle>{t('knowledge_draft.confirm_title')}</AlertDialogTitle>
             <AlertDialogDescription>
               {t('knowledge_draft.confirm_description')}
+              <span className="mt-2 block">{t('knowledge_draft.presentation_notice')}</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
