@@ -331,15 +331,20 @@ describe('DocumentList summary header', () => {
     const search = screen.getByTestId('document-source-search-input')
     const scopeSummary = screen.getByTestId('document-source-scope-summary')
     const selectCurrentPage = screen.getByTestId('document-select-current-page')
+    const defaultScopeHint = screen.getByText('artifact.sourceDialog.defaultAllHint')
 
     expect(addSource).toHaveClass('w-full')
     expect(search).toHaveClass('w-full')
+    expect(screen.getByText('artifact.addMaterials')).toBeInTheDocument()
     expect(scopeSummary).toContainElement(selectCurrentPage)
+    expect(selectCurrentPage.compareDocumentPosition(defaultScopeHint)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
     expect(addSource.compareDocumentPosition(breadcrumb)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(breadcrumb.compareDocumentPosition(search)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(search.compareDocumentPosition(scopeSummary)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(breadcrumbRow).toContainElement(expandAll)
-    expect(screen.getByText('artifact.sourceDialog.defaultAllHint')).toBeInTheDocument()
+    expect(defaultScopeHint).toBeInTheDocument()
     expect(screen.queryByTestId('document-use-all-sources')).not.toBeInTheDocument()
     expect(screen.queryByTestId('summary-info-button')).not.toBeInTheDocument()
     expect(screen.queryByTestId('kb-summary-inline-edit-button')).not.toBeInTheDocument()

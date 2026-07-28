@@ -1127,7 +1127,7 @@ export function DocumentList({
           data-testid="document-add-source-full-width"
         >
           <Plus className="mr-1.5 h-4 w-4" />
-          {t('document.document.upload')}
+          {t('artifact.addMaterials')}
         </Button>
       )}
 
@@ -1311,17 +1311,6 @@ export function DocumentList({
           className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-2 text-xs text-text-secondary"
           data-testid="document-source-scope-summary"
         >
-          <span>
-            {usesAllAvailableDocuments
-              ? availableDocumentCount === null
-                ? t('artifact.sourceDialog.all')
-                : t('artifact.sourceDialog.defaultAllHint', {
-                    count: availableDocumentCount,
-                  })
-              : t('artifact.sourceDialog.selectedHint', {
-                  count: selectedDocumentIds.size,
-                })}
-          </span>
           {documents.length > 0 && (
             <button
               type="button"
@@ -1342,6 +1331,17 @@ export function DocumentList({
               </span>
             </button>
           )}
+          <span>
+            {usesAllAvailableDocuments
+              ? availableDocumentCount === null
+                ? t('artifact.sourceDialog.all')
+                : t('artifact.sourceDialog.defaultAllHint', {
+                    count: availableDocumentCount,
+                  })
+              : t('artifact.sourceDialog.selectedHint', {
+                  count: selectedDocumentIds.size,
+                })}
+          </span>
         </div>
       )}
 
