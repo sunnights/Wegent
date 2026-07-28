@@ -127,11 +127,10 @@ describe('ArtifactPanel AI Workshop', () => {
     expect(
       screen.getAllByTestId(/^artifact-type-/).map(element => element.getAttribute('data-testid'))
     ).toEqual(['artifact-type-mind-map', 'artifact-type-presentation', 'artifact-type-briefing'])
-    expect(screen.getByTestId('artifact-type-mind-map')).toHaveClass('h-16')
-    expect(screen.getByTestId('artifact-type-mind-map').querySelector('svg')).toHaveClass(
-      'h-4',
-      'w-4'
-    )
+    const mindMapCard = screen.getByTestId('artifact-type-mind-map')
+    expect(mindMapCard).toHaveClass('h-16', 'flex-col')
+    expect(screen.getByText('artifact.action.mind_map')).toHaveClass('w-full')
+    expect(mindMapCard.querySelector('svg')).toHaveClass('h-4', 'w-4')
 
     fireEvent.click(screen.getByTestId('artifact-type-briefing'))
     fireEvent.click(screen.getByTestId('mock-create-submit'))

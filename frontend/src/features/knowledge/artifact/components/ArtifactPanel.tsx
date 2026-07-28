@@ -76,16 +76,18 @@ function CapabilityCard({
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="group flex h-16 w-full items-center gap-2.5 rounded-xl border border-border bg-surface px-3 text-left transition-colors hover:border-primary hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="group flex h-16 w-full flex-col gap-0.5 rounded-xl border border-border bg-surface px-3 py-2 text-left transition-colors hover:border-primary hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
           onClick={onClick}
           disabled={disabled}
           data-testid={testId}
         >
-          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${tone}`}>
-            <Icon className="h-4 w-4" />
+          <div className="flex w-full items-center justify-between">
+            <div className={`flex h-6 w-6 items-center justify-center rounded-md ${tone}`}>
+              <Icon className="h-4 w-4" />
+            </div>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
           </div>
-          <div className="min-w-0 flex-1 truncate text-sm font-medium leading-5">{label}</div>
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
+          <div className="w-full truncate text-sm font-medium leading-5">{label}</div>
         </button>
       </TooltipTrigger>
       <TooltipContent
