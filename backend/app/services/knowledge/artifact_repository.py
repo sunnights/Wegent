@@ -237,19 +237,6 @@ class KnowledgeArtifactRepository:
         except SQLAlchemyError as exc:
             self._raise_storage_error("delete", artifact_id, exc)
 
-    def delete_by_knowledge_base(self, knowledge_base_id: int) -> bool:
-        """Delete every Artifact owned by a knowledge base."""
-        try:
-            deleted = (
-                self.db.query(KnowledgeArtifactRecord)
-                .filter(KnowledgeArtifactRecord.knowledge_base_id == knowledge_base_id)
-                .delete(synchronize_session=False)
-            )
-            self.db.commit()
-            return bool(deleted)
-        except SQLAlchemyError as exc:
-            self._raise_storage_error("delete all", str(knowledge_base_id), exc)
-
     def _query(
         self,
         knowledge_base_id: int,

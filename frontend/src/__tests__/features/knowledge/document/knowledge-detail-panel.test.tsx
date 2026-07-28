@@ -148,7 +148,15 @@ describe('KnowledgeDetailPanel workspace', () => {
   it('shares one source scope across the source, chat, and generation columns', () => {
     render(<KnowledgeDetailPanel selectedKb={knowledgeBase} currentView="notebook" />)
 
-    expect(screen.getByTestId('knowledge-detail-notebook')).toHaveClass('border-t', 'border-border')
+    expect(screen.getByTestId('knowledge-detail-notebook')).toHaveClass(
+      'border-t',
+      'border-border',
+      'lg:flex-row'
+    )
+    expect(screen.getByTestId('knowledge-workspace-chat')).toHaveClass('lg:flex')
+    expect(screen.getByTestId('knowledge-mobile-sources-tab')).toHaveClass('h-11')
+    expect(screen.getByTestId('knowledge-mobile-chat-tab')).toHaveClass('h-11')
+    expect(screen.getByTestId('knowledge-mobile-generation-tab')).toHaveClass('h-11')
     expect(screen.getByTestId('mock-source-panel')).toBeInTheDocument()
     expect(screen.getByTestId('mock-chat-area')).toBeInTheDocument()
     expect(screen.getByTestId('mock-generation-panel')).toBeInTheDocument()

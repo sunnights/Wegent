@@ -173,15 +173,6 @@ def test_retry_claim_is_atomic_and_invalidates_old_attempt(db: Session):
     assert repository.get(12, "artifact-1").status == KnowledgeArtifactStatus.QUEUED
 
 
-def test_repository_deletes_all_artifacts_for_knowledge_base(db: Session):
-    repository = KnowledgeArtifactRepository(db)
-    repository.create(build_artifact("artifact-1"))
-    repository.create(build_artifact("artifact-2"))
-
-    assert repository.delete_by_knowledge_base(12) is True
-    assert repository.list_by_knowledge_base(12) == []
-
-
 def test_retry_claim_requires_explicit_active_permission_and_current_attempt(
     db: Session,
 ):

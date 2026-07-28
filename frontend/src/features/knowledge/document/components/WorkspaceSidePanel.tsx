@@ -154,7 +154,7 @@ export function WorkspaceSidePanel({
   return (
     <div
       ref={panelRef}
-      className={`${mobileVisible ? 'flex' : 'hidden'} relative h-full shrink-0 flex-col bg-base max-xl:!w-full xl:flex ${
+      className={`${mobileVisible ? 'flex' : 'hidden'} relative h-full shrink-0 flex-col bg-base max-lg:!w-full lg:flex ${
         collapsedOnDesktop && !hasCollapsedRail
           ? ''
           : side === 'left'
@@ -188,7 +188,7 @@ export function WorkspaceSidePanel({
       )}
       <div
         className={`absolute inset-y-0 z-20 hidden w-1 touch-none cursor-col-resize transition-colors hover:bg-primary/30 focus:bg-primary/30 focus:outline-none ${
-          collapsedOnDesktop ? '' : 'xl:block'
+          collapsedOnDesktop ? '' : 'lg:block'
         } ${side === 'left' ? 'right-0' : 'left-0'}`}
         role="separator"
         aria-label={resizeLabel}
@@ -205,7 +205,7 @@ export function WorkspaceSidePanel({
           variant="ghost"
           size="sm"
           onClick={toggleCollapsed}
-          className="absolute right-3 top-3 z-10 hidden h-8 w-8 p-0 xl:inline-flex"
+          className="absolute right-3 top-3 z-10 hidden h-8 w-8 p-0 lg:inline-flex"
           title={collapseLabel}
           aria-label={collapseLabel}
           data-testid={collapseTestId}

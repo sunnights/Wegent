@@ -244,26 +244,30 @@ export function KnowledgeDetailPanel({
   if (selectedKb && currentView === 'notebook') {
     return (
       <div
-        className="flex flex-1 flex-col overflow-hidden border-t border-border bg-base xl:flex-row"
+        className="flex flex-1 flex-col overflow-hidden border-t border-border bg-base lg:flex-row"
         data-testid="knowledge-detail-notebook"
       >
         <Tabs
           value={mobileWorkspaceTab}
           onValueChange={value => setMobileWorkspaceTab(value as 'sources' | 'chat' | 'generation')}
-          className="border-b border-border p-2 xl:hidden"
+          className="border-b border-border p-2 lg:hidden"
         >
           <TabsList className="grid h-11 w-full grid-cols-3">
-            <TabsTrigger value="sources" className="h-9" data-testid="knowledge-mobile-sources-tab">
+            <TabsTrigger
+              value="sources"
+              className="h-11"
+              data-testid="knowledge-mobile-sources-tab"
+            >
               <Files className="mr-1.5 h-4 w-4" />
               {t('artifact.mobile.sources')}
             </TabsTrigger>
-            <TabsTrigger value="chat" className="h-9" data-testid="knowledge-mobile-chat-tab">
+            <TabsTrigger value="chat" className="h-11" data-testid="knowledge-mobile-chat-tab">
               <MessageSquare className="mr-1.5 h-4 w-4" />
               {t('artifact.mobile.chat')}
             </TabsTrigger>
             <TabsTrigger
               value="generation"
-              className="h-9"
+              className="h-11"
               data-testid="knowledge-mobile-generation-tab"
             >
               <WandSparkles className="mr-1.5 h-4 w-4" />
@@ -293,7 +297,7 @@ export function KnowledgeDetailPanel({
         />
 
         <div
-          className={`${mobileWorkspaceTab === 'chat' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col xl:flex`}
+          className={`${mobileWorkspaceTab === 'chat' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col lg:flex`}
           data-testid="knowledge-workspace-chat"
         >
           <ChatArea

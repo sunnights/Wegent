@@ -990,7 +990,7 @@ export function DocumentList({
   return (
     <div className={sourceWorkspace ? 'space-y-3' : 'space-y-4'}>
       {/* Header - Wegent style */}
-      <div className={`flex items-center gap-3 ${sourceWorkspace ? 'xl:pr-10' : ''}`}>
+      <div className={`flex items-center gap-3 ${sourceWorkspace ? 'lg:pr-10' : ''}`}>
         {onBack && (
           <button
             onClick={onBack}

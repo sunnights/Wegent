@@ -47,7 +47,9 @@ describe('WorkspaceSidePanel', () => {
   it('uses the configured width and the correct border for each side', () => {
     const { container, rerender } = renderPanel('left')
     expect(container.firstChild).toHaveStyle({ width: '300px' })
-    expect(container.firstChild).toHaveClass('border-r')
+    expect(container.firstChild).toHaveClass('border-r', 'max-lg:!w-full', 'lg:flex')
+    expect(screen.getByRole('separator')).toHaveClass('lg:block')
+    expect(screen.getByTestId('collapse-panel')).toHaveClass('lg:inline-flex')
 
     rerender(
       <WorkspaceSidePanel
