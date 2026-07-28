@@ -44,6 +44,8 @@ describe('ArtifactCreateDialog', () => {
     )
 
     expect(screen.getByText('artifact.wholeKnowledgeBase:36')).toBeInTheDocument()
+    expect(screen.getByText('artifact.sharedGenerationNotice')).toBeInTheDocument()
+    expect(screen.getByTestId('artifact-create-dialog')).toHaveClass('sm:max-w-3xl')
     fireEvent.change(screen.getByTestId('artifact-title-input'), {
       target: { value: '  Weekly briefing  ' },
     })

@@ -904,6 +904,7 @@
     "createFirst": "Start first task",
     "createTitle": "Start AI task",
     "createDescription": "Configure sources and instructions. An agent will complete the task in the background.",
+    "sharedGenerationNotice": "Generated content will be saved to this knowledge base's generation history and will be visible to everyone who can access the knowledge base.",
     "start": "Start generation",
     "started": "Generation started. Track its status under Generation history.",
     "creating": "Creating...",
