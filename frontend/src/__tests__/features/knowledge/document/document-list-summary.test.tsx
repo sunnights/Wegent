@@ -306,10 +306,27 @@ describe('DocumentList summary header', () => {
     expect(screen.getByTestId('expand-all-toggle')).toBeInTheDocument()
   })
 
-  it('renders the compact add-source action as a full-width row', () => {
-    render(<DocumentList knowledgeBase={createKnowledgeBase()} canUpload compact fullWidthUpload />)
+  it('orders workspace source controls and keeps folder management out of the workspace', () => {
+    mockFolders = [createFolder()]
 
-    expect(screen.getByTestId('document-add-source-full-width')).toHaveClass('w-full')
+    render(<DocumentList knowledgeBase={createKnowledgeBase()} canUpload compact sourceWorkspace />)
+
+    const addSource = screen.getByTestId('document-add-source-full-width')
+    const breadcrumb = screen.getByTestId('breadcrumb-root')
+    const search = screen.getByTestId('document-source-search-input')
+
+    expect(addSource).toHaveClass('w-full')
+    expect(search).toHaveClass('w-full')
+    expect(addSource.compareDocumentPosition(breadcrumb)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(breadcrumb.compareDocumentPosition(search)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(mockFolderTree).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        canManageFolders: false,
+        onCreateFolder: undefined,
+        onRenameFolder: undefined,
+        onDeleteFolder: undefined,
+      })
+    )
   })
 
   it('keeps controlled source selection and disables unavailable documents', () => {

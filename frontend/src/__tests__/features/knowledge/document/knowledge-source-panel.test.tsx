@@ -93,7 +93,7 @@ describe('KnowledgeSourcePanel', () => {
         knowledgeBase,
         compact: true,
         paginationEnabled: true,
-        fullWidthUpload: true,
+        sourceWorkspace: true,
         selectedDocumentIds: [],
       })
     )

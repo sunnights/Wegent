@@ -71,7 +71,7 @@ export function KnowledgeSourcePanel({
             canManageAllDocuments={canManageAllDocuments}
             compact
             paginationEnabled
-            fullWidthUpload
+            sourceWorkspace
             selectedDocumentIds={selectedDocumentIds}
             processingDocumentCount={processingDocumentCount}
             refreshToken={refreshToken}

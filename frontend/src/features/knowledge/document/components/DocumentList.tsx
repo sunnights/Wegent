@@ -192,8 +192,8 @@ interface DocumentListProps {
   processingDocumentCount?: number
   /** Notify the workspace after document mutations. */
   onDocumentsChanged?: () => void
-  /** Render the add-source action as a dedicated full-width row. */
-  fullWidthUpload?: boolean
+  /** Adapt document browsing controls for the workspace source panel. */
+  sourceWorkspace?: boolean
   /** Callback to refresh knowledge base details (used after summary retry) */
   onRefreshKnowledgeBase?: () => void
   /** Optional header actions to display next to the title (e.g., tabs) */
@@ -236,7 +236,7 @@ export function DocumentList({
   refreshToken = 0,
   processingDocumentCount = 0,
   onDocumentsChanged,
-  fullWidthUpload = false,
+  sourceWorkspace = false,
   onRefreshKnowledgeBase,
   headerActions,
   groupInfo,
@@ -604,7 +604,7 @@ export function DocumentList({
 
   const canManageAnyDocuments = canUpload || canManageAllDocuments
   const canManageDocumentArea = canManageAnyDocuments
-  const canManageFolderStructure = canManageDocumentArea
+  const canManageFolderStructure = canManageDocumentArea && !sourceWorkspace
 
   const canManageDocument = (_document: KnowledgeDocument) => canManageDocumentArea
 
@@ -1112,7 +1112,7 @@ export function DocumentList({
       </div>
       {canManageAllDocuments && <EditKnowledgeBaseSummaryDialog {...editorDialogProps} />}
 
-      {canUpload && fullWidthUpload && (
+      {canUpload && sourceWorkspace && (
         <Button
           variant="outline"
           className="h-11 w-full"
@@ -1161,8 +1161,21 @@ export function DocumentList({
 
       {/* Search bar and action buttons */}
       <div className="flex items-center gap-3 flex-wrap">
-        {/* Search - inline for normal mode, popover for compact mode */}
-        {compact ? (
+        {/* Search - always visible in the source workspace, inline for normal mode,
+            and in a popover for other compact layouts. */}
+        {sourceWorkspace ? (
+          <div className="relative w-full">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+            <input
+              type="text"
+              className="h-11 w-full rounded-md border border-border bg-surface pl-9 pr-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder={searchPlaceholder}
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              data-testid="document-source-search-input"
+            />
+          </div>
+        ) : compact ? (
           <div className="relative">
             <Button
               variant="outline"
@@ -1213,55 +1226,59 @@ export function DocumentList({
             />
           </div>
         )}
-        {/* Spacer to push buttons to the right */}
-        <div className="flex-1" />
+        {!sourceWorkspace && (
+          <>
+            {/* Spacer to push buttons to the right */}
+            <div className="flex-1" />
 
-        {/* Refresh list button */}
-        <TooltipProvider>
-          <Tooltip delayDuration={200}>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" onClick={() => refresh()} disabled={loading}>
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            {/* Refresh list button */}
+            <TooltipProvider>
+              <Tooltip delayDuration={200}>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" onClick={() => refresh()} disabled={loading}>
+                    <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{t('common:actions.refresh')}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            {/* Retrieval test button */}
+            <TooltipProvider>
+              <Tooltip delayDuration={200}>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" onClick={() => setShowRetrievalTest(true)}>
+                    <Target className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{t('document.retrievalTest.button')}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            {/* Create folder button */}
+            {canManageFolderStructure && (
+              <Button
+                variant="outline"
+                className="h-11 min-w-[44px]"
+                onClick={() => handleCreateFolder(currentFolderId)}
+              >
+                <FolderPlus className="w-4 h-4 mr-1" />
+                {t('document.folder.create')}
               </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{t('common:actions.refresh')}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+            )}
 
-        {/* Retrieval test button */}
-        <TooltipProvider>
-          <Tooltip delayDuration={200}>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" onClick={() => setShowRetrievalTest(true)}>
-                <Target className="w-4 h-4" />
+            {/* Upload button */}
+            {canUpload && (
+              <Button variant="primary" size="sm" onClick={handleOpenUpload}>
+                <Upload className="w-4 h-4 mr-1" />
+                {t('document.document.upload')}
               </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{t('document.retrievalTest.button')}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        {/* Create folder button */}
-        {canManageFolderStructure && (
-          <Button
-            variant="outline"
-            className="h-11 min-w-[44px]"
-            onClick={() => handleCreateFolder(currentFolderId)}
-          >
-            <FolderPlus className="w-4 h-4 mr-1" />
-            {t('document.folder.create')}
-          </Button>
-        )}
-
-        {/* Upload button */}
-        {canUpload && !fullWidthUpload && (
-          <Button variant="primary" size="sm" onClick={handleOpenUpload}>
-            <Upload className="w-4 h-4 mr-1" />
-            {t('document.document.upload')}
-          </Button>
+            )}
+          </>
         )}
       </div>
 
