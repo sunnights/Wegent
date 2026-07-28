@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FileText,
   Network,
+  Plus,
   Presentation,
   type LucideIcon,
 } from 'lucide-react'
@@ -32,7 +33,11 @@ import { ArtifactCreateDialog } from './ArtifactCreateDialog'
 import { ArtifactCard } from './ArtifactCard'
 import { ArtifactViewer } from './ArtifactViewer'
 import { useKnowledgeArtifacts } from '../hooks/useKnowledgeArtifacts'
-import type { ArtifactPromptRequest, KnowledgeArtifactType } from '@/types/knowledge-artifact'
+import type {
+  ArtifactPromptRequest,
+  KnowledgeArtifact,
+  KnowledgeArtifactType,
+} from '@/types/knowledge-artifact'
 
 interface ArtifactPanelProps {
   knowledgeBaseId: number
@@ -44,6 +49,7 @@ interface ArtifactPanelProps {
   onAskNode?: (request: ArtifactPromptRequest) => void
   onCreatePptDraft: () => void
   refreshToken?: number
+  layout?: 'full' | 'rail'
 }
 
 interface CapabilityCardProps {
@@ -53,6 +59,7 @@ interface CapabilityCardProps {
   disabled: boolean
   onClick: () => void
   testId: string
+  tone: string
 }
 
 function CapabilityCard({
@@ -62,26 +69,23 @@ function CapabilityCard({
   disabled,
   onClick,
   testId,
+  tone,
 }: CapabilityCardProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="group flex h-24 flex-col justify-between rounded-xl border border-border bg-surface p-3 text-left transition-all hover:-translate-y-0.5 hover:border-primary hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+          className="group flex h-16 w-full items-center gap-2.5 rounded-xl border border-border bg-surface px-3 text-left transition-colors hover:border-primary hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
           onClick={onClick}
           disabled={disabled}
           data-testid={testId}
         >
-          <div className="flex w-full items-center justify-between">
-            <div className="rounded-lg bg-primary/10 p-2 text-primary transition-colors group-hover:bg-primary group-hover:text-white">
-              <Icon className="h-5 w-5" />
-            </div>
-            <div className="rounded-full bg-base p-2 text-text-muted transition-colors group-hover:text-primary">
-              <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-            </div>
+          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${tone}`}>
+            <Icon className="h-4 w-4" />
           </div>
-          <div className="mt-2 text-sm font-medium leading-5">{label}</div>
+          <div className="min-w-0 flex-1 truncate text-sm font-medium leading-5">{label}</div>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
         </button>
       </TooltipTrigger>
       <TooltipContent
@@ -91,6 +95,78 @@ function CapabilityCard({
         className="max-w-64 py-2 leading-5"
       >
         {description}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+type CapabilityRailButtonProps = CapabilityCardProps
+
+function CapabilityRailButton({
+  icon: Icon,
+  label,
+  description,
+  disabled,
+  onClick,
+  testId,
+  tone,
+}: CapabilityRailButtonProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className={`relative flex h-11 w-11 items-center justify-center rounded-xl transition-colors hover:ring-1 hover:ring-primary disabled:cursor-not-allowed disabled:opacity-50 ${tone}`}
+          onClick={onClick}
+          disabled={disabled}
+          aria-label={label}
+          data-testid={`artifact-rail-${testId}`}
+        >
+          <Icon className="h-5 w-5" />
+          <Plus className="absolute bottom-1 right-1 h-3 w-3" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="left" sideOffset={8} className="max-w-64">
+        <p className="font-medium">{label}</p>
+        <p className="mt-0.5 text-xs opacity-80">{description}</p>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function ArtifactRailButton({
+  artifact,
+  onOpen,
+}: {
+  artifact: KnowledgeArtifact
+  onOpen: () => void
+}) {
+  const { t } = useTranslation('knowledge')
+  const isMindMap = artifact.artifact_type === 'mind_map'
+  const label = artifact.title || t(`artifact.type.${isMindMap ? 'mindMap' : 'briefing'}`)
+  const status = t(
+    artifact.execution_health === 'stalled'
+      ? 'artifact.status.stalled'
+      : `artifact.status.${artifact.status}`
+  )
+  const Icon = isMindMap ? Network : FileText
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="flex h-11 w-11 items-center justify-center rounded-xl text-primary transition-colors hover:bg-primary/10"
+          onClick={onOpen}
+          aria-label={label}
+          data-testid={`artifact-rail-item-${artifact.artifact_id}`}
+        >
+          <Icon className="h-5 w-5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="left" sideOffset={8} className="max-w-64">
+        <p className="truncate font-medium">{label}</p>
+        <p className="mt-0.5 text-xs opacity-80">{status}</p>
       </TooltipContent>
     </Tooltip>
   )
@@ -106,6 +182,7 @@ export function ArtifactPanel({
   onAskNode,
   onCreatePptDraft,
   refreshToken = 0,
+  layout = 'full',
 }: ArtifactPanelProps) {
   const { t } = useTranslation('knowledge')
   const { toast } = useToast()
@@ -181,103 +258,153 @@ export function ArtifactPanel({
     setCreateOpen(true)
   }
 
+  const capabilities: CapabilityCardProps[] = [
+    ...(canManage
+      ? [
+          {
+            icon: Network,
+            label: t('artifact.action.mind_map'),
+            description: t('artifact.type.mindMapHint'),
+            disabled: effectiveAvailableDocumentCount === 0,
+            onClick: () => openCreate('mind_map'),
+            testId: 'artifact-type-mind-map',
+            tone: 'bg-purple-500/10 text-purple-600 dark:bg-purple-500/20 dark:text-purple-300',
+          },
+        ]
+      : []),
+    {
+      icon: Presentation,
+      label: t('artifact.action.presentation'),
+      description: t('artifact.type.presentationHint'),
+      disabled: availableDocumentCount === 0,
+      onClick: onCreatePptDraft,
+      testId: 'artifact-type-presentation',
+      tone: 'bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300',
+    },
+    ...(canManage
+      ? [
+          {
+            icon: FileText,
+            label: t('artifact.action.briefing'),
+            description: t('artifact.type.briefingHint'),
+            disabled: effectiveAvailableDocumentCount === 0,
+            onClick: () => openCreate('briefing'),
+            testId: 'artifact-type-briefing',
+            tone: 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300',
+          },
+        ]
+      : []),
+  ]
+
   return (
     <div className="flex h-full flex-col" data-testid="artifact-panel">
-      <div className="mb-5">
+      {layout === 'rail' ? (
         <TooltipProvider delayDuration={300}>
-          <div className="grid grid-cols-2 gap-3">
-            {canManage && (
-              <CapabilityCard
-                icon={Network}
-                label={t('artifact.action.mind_map')}
-                description={t('artifact.type.mindMapHint')}
-                disabled={effectiveAvailableDocumentCount === 0}
-                onClick={() => openCreate('mind_map')}
-                testId="artifact-type-mind-map"
-              />
-            )}
-            <CapabilityCard
-              icon={Presentation}
-              label={t('artifact.action.presentation')}
-              description={t('artifact.type.presentationHint')}
-              disabled={availableDocumentCount === 0}
-              onClick={onCreatePptDraft}
-              testId="artifact-type-presentation"
-            />
-            {canManage && (
-              <>
-                <CapabilityCard
-                  icon={FileText}
-                  label={t('artifact.action.briefing')}
-                  description={t('artifact.type.briefingHint')}
-                  disabled={effectiveAvailableDocumentCount === 0}
-                  onClick={() => openCreate('briefing')}
-                  testId="artifact-type-briefing"
+          <div className="flex min-h-0 flex-1 flex-col items-center" data-testid="artifact-rail">
+            <div className="flex w-full shrink-0 flex-col items-center gap-3 border-b border-border pb-4">
+              {capabilities.map(capability => (
+                <CapabilityRailButton key={capability.testId} {...capability} />
+              ))}
+            </div>
+            <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto">
+              {items.slice(0, 5).map(artifact => (
+                <ArtifactRailButton
+                  key={artifact.artifact_id}
+                  artifact={artifact}
+                  onOpen={() => setSelectedArtifactId(artifact.artifact_id)}
                 />
-              </>
-            )}
+              ))}
+              {error && items.length === 0 && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex h-11 w-11 items-center justify-center rounded-xl text-error hover:bg-error/10"
+                      onClick={() => void refresh(true)}
+                      aria-label={t('artifact.retry')}
+                      data-testid="artifact-rail-refresh-button"
+                    >
+                      <AlertCircle className="h-5 w-5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">{t('artifact.loadFailed')}</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           </div>
         </TooltipProvider>
-        {!isLoading && !error && effectiveAvailableDocumentCount === 0 && (
-          <p className="mt-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-text-secondary">
-            {t(
-              processingDocumentCount > 0
-                ? 'artifact.documentsProcessingHint'
-                : 'artifact.noDocumentsHint'
-            )}
-          </p>
-        )}
-      </div>
-
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{t('artifact.recentGenerations')}</h3>
-        {items.some(item => item.status === 'queued' || item.status === 'running') && (
-          <span className="text-xs text-text-secondary">
-            {t('artifact.runningCount', {
-              count: items.filter(item => item.status === 'queued' || item.status === 'running')
-                .length,
-            })}
-          </span>
-        )}
-      </div>
-
-      {isLoading ? (
-        <div className="space-y-3">
-          <Skeleton className="h-24 w-full" />
-          <Skeleton className="h-24 w-full" />
-        </div>
-      ) : error && items.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center text-center">
-          <AlertCircle className="mb-2 h-8 w-8 text-error" />
-          <p className="text-sm text-text-secondary">{t('artifact.loadFailed')}</p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={() => void refresh(true)}
-            data-testid="artifact-refresh-button"
-          >
-            {t('artifact.retry')}
-          </Button>
-        </div>
-      ) : items.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-border px-5 py-8 text-center">
-          <p className="text-sm font-medium">{t('artifact.empty')}</p>
-          <p className="mt-1 text-xs text-text-secondary">
-            {t(canManage ? 'artifact.emptyHint' : 'artifact.emptyReadOnlyHint')}
-          </p>
-        </div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-2 overflow-auto pb-4">
-          {items.map(artifact => (
-            <ArtifactCard
-              key={artifact.artifact_id}
-              artifact={artifact}
-              onOpen={() => setSelectedArtifactId(artifact.artifact_id)}
-              onDelete={() => setPendingDeleteArtifactId(artifact.artifact_id)}
-            />
-          ))}
-        </div>
+        <>
+          <div className="mb-4">
+            <TooltipProvider delayDuration={300}>
+              <div className="grid grid-cols-2 gap-2">
+                {capabilities.map(capability => (
+                  <CapabilityCard key={capability.testId} {...capability} />
+                ))}
+              </div>
+            </TooltipProvider>
+            {!isLoading && !error && effectiveAvailableDocumentCount === 0 && (
+              <p className="mt-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-text-secondary">
+                {t(
+                  processingDocumentCount > 0
+                    ? 'artifact.documentsProcessingHint'
+                    : 'artifact.noDocumentsHint'
+                )}
+              </p>
+            )}
+          </div>
+
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold">{t('artifact.recentGenerations')}</h3>
+            {items.some(item => item.status === 'queued' || item.status === 'running') && (
+              <span className="text-xs text-text-secondary">
+                {t('artifact.runningCount', {
+                  count: items.filter(item => item.status === 'queued' || item.status === 'running')
+                    .length,
+                })}
+              </span>
+            )}
+          </div>
+
+          {isLoading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-24 w-full" />
+              <Skeleton className="h-24 w-full" />
+            </div>
+          ) : error && items.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center text-center">
+              <AlertCircle className="mb-2 h-8 w-8 text-error" />
+              <p className="text-sm text-text-secondary">{t('artifact.loadFailed')}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void refresh(true)}
+                data-testid="artifact-refresh-button"
+              >
+                {t('artifact.retry')}
+              </Button>
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-border px-5 py-8 text-center">
+              <p className="text-sm font-medium">{t('artifact.empty')}</p>
+              <p className="mt-1 text-xs text-text-secondary">
+                {t(canManage ? 'artifact.emptyHint' : 'artifact.emptyReadOnlyHint')}
+              </p>
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 space-y-2 overflow-auto pb-4">
+              {items.map(artifact => (
+                <ArtifactCard
+                  key={artifact.artifact_id}
+                  artifact={artifact}
+                  onOpen={() => setSelectedArtifactId(artifact.artifact_id)}
+                  onDelete={() => setPendingDeleteArtifactId(artifact.artifact_id)}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
       <AlertDialog
         open={pendingDeleteArtifactId !== null}

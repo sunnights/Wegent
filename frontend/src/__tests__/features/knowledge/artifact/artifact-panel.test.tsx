@@ -127,6 +127,11 @@ describe('ArtifactPanel AI Workshop', () => {
     expect(
       screen.getAllByTestId(/^artifact-type-/).map(element => element.getAttribute('data-testid'))
     ).toEqual(['artifact-type-mind-map', 'artifact-type-presentation', 'artifact-type-briefing'])
+    expect(screen.getByTestId('artifact-type-mind-map')).toHaveClass('h-16')
+    expect(screen.getByTestId('artifact-type-mind-map').querySelector('svg')).toHaveClass(
+      'h-4',
+      'w-4'
+    )
 
     fireEvent.click(screen.getByTestId('artifact-type-briefing'))
     fireEvent.click(screen.getByTestId('mock-create-submit'))
@@ -139,6 +144,51 @@ describe('ArtifactPanel AI Workshop', () => {
     )
     expect(screen.queryByTestId('mock-artifact-viewer')).not.toBeInTheDocument()
     expect(toastMock).toHaveBeenCalledWith({ description: 'artifact.started' })
+  })
+
+  it('reuses the panel state for a compact capability and recent-artifact rail', () => {
+    ;(useKnowledgeArtifacts as jest.Mock).mockReturnValue({
+      items: [
+        {
+          artifact_id: 'artifact-1',
+          artifact_type: 'mind_map',
+          title: '主题导图',
+          status: 'succeeded',
+          source_document_ids: [101],
+          created_at: '2026-07-26T12:00:00+08:00',
+        },
+      ],
+      canManage: true,
+      availableDocumentCount: 1,
+      processingDocumentCount: 0,
+      isLoading: false,
+      error: null,
+      create: createMock,
+      rename: jest.fn(),
+      retry: jest.fn(),
+      remove: jest.fn(),
+      refresh: jest.fn(),
+    })
+
+    render(
+      <ArtifactPanel
+        knowledgeBaseId={12}
+        selectedDocumentIds={[]}
+        layout="rail"
+        onAdjustSources={jest.fn()}
+        onCreatePptDraft={createPptDraftMock}
+      />
+    )
+
+    expect(useKnowledgeArtifacts).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('artifact-rail')).toBeInTheDocument()
+    expect(screen.getByTestId('artifact-rail-artifact-type-mind-map')).toHaveClass('h-11', 'w-11')
+
+    fireEvent.click(screen.getByTestId('artifact-rail-artifact-type-presentation'))
+    expect(createPptDraftMock).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTestId('artifact-rail-item-artifact-1'))
+    expect(screen.getByTestId('mock-artifact-viewer')).toBeInTheDocument()
   })
 
   it('shows capability descriptions on keyboard focus instead of inside the cards', async () => {

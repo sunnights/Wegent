@@ -80,4 +80,35 @@ describe('WorkspaceSidePanel', () => {
     expect(container.firstChild).toHaveStyle({ width: '320px' })
     expect(localStorage.getItem('test-left-panel-width')).toBe('320')
   })
+
+  it('keeps a configured desktop rail visible and exposes the collapsed state', () => {
+    const { container } = render(
+      <WorkspaceSidePanel
+        side="right"
+        storageKey="test-right-rail"
+        defaultWidth={360}
+        minWidth={280}
+        maxWidth={520}
+        collapsedWidth={72}
+        mobileVisible={false}
+        expandLabel="expand"
+        collapseLabel="collapse"
+        resizeLabel="resize"
+        expandTestId="expand-panel"
+        collapseTestId="collapse-panel"
+      >
+        {({ isDesktopCollapsed }) => (
+          <div data-testid={isDesktopCollapsed ? 'collapsed-content' : 'expanded-content'} />
+        )}
+      </WorkspaceSidePanel>
+    )
+
+    fireEvent.click(screen.getByTestId('collapse-panel'))
+
+    expect(container.firstChild).toHaveStyle({ width: '72px' })
+    expect(container.firstChild).toHaveClass('border-l')
+    expect(screen.getByTestId('collapsed-content')).toBeInTheDocument()
+    expect(screen.queryByTestId('expanded-content')).not.toBeInTheDocument()
+    expect(screen.getByTestId('expand-panel')).toBeInTheDocument()
+  })
 })

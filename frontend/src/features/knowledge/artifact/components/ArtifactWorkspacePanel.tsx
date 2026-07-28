@@ -43,6 +43,7 @@ export function ArtifactWorkspacePanel({
       defaultWidth={360}
       minWidth={280}
       maxWidth={520}
+      collapsedWidth={72}
       mobileVisible={mobileVisible}
       expandLabel={t('artifact.showGeneration')}
       collapseLabel={t('artifact.hideGeneration')}
@@ -50,25 +51,32 @@ export function ArtifactWorkspacePanel({
       expandTestId="knowledge-generation-panel-expand-button"
       collapseTestId="knowledge-generation-panel-collapse-button"
     >
-      <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden p-4"
-        data-testid="knowledge-generation-panel"
-      >
-        <h2 className="mb-4 pr-9 text-sm font-semibold">{t('artifact.generation')}</h2>
-        <div className="min-h-0 flex-1">
-          <ArtifactPanel
-            knowledgeBaseId={knowledgeBaseId}
-            selectedDocumentIds={selectedDocumentIds}
-            refreshToken={refreshToken}
-            onAdjustSources={onAdjustSources}
-            onAvailableDocumentCountChange={onAvailableDocumentCountChange}
-            onProcessingDocumentCountChange={onProcessingDocumentCountChange}
-            onCanManageChange={onCanManageChange}
-            onAskNode={onAskNode}
-            onCreatePptDraft={onCreatePptDraft}
-          />
+      {({ isDesktopCollapsed }) => (
+        <div
+          className={`flex min-h-0 flex-1 flex-col overflow-hidden ${
+            isDesktopCollapsed ? 'px-2 pb-2 pt-14' : 'p-4'
+          }`}
+          data-testid="knowledge-generation-panel"
+        >
+          {!isDesktopCollapsed && (
+            <h2 className="mb-4 pr-9 text-sm font-semibold">{t('artifact.generation')}</h2>
+          )}
+          <div className="min-h-0 flex-1">
+            <ArtifactPanel
+              knowledgeBaseId={knowledgeBaseId}
+              selectedDocumentIds={selectedDocumentIds}
+              refreshToken={refreshToken}
+              layout={isDesktopCollapsed ? 'rail' : 'full'}
+              onAdjustSources={onAdjustSources}
+              onAvailableDocumentCountChange={onAvailableDocumentCountChange}
+              onProcessingDocumentCountChange={onProcessingDocumentCountChange}
+              onCanManageChange={onCanManageChange}
+              onAskNode={onAskNode}
+              onCreatePptDraft={onCreatePptDraft}
+            />
+          </div>
         </div>
-      </div>
+      )}
     </WorkspaceSidePanel>
   )
 }

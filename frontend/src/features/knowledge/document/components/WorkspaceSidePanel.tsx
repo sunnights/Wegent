@@ -23,13 +23,14 @@ interface WorkspaceSidePanelProps {
   defaultWidth: number
   minWidth: number
   maxWidth: number
+  collapsedWidth?: number
   mobileVisible: boolean
   expandLabel: string
   collapseLabel: string
   resizeLabel: string
   expandTestId: string
   collapseTestId: string
-  children: ReactNode
+  children: ReactNode | ((state: { isDesktopCollapsed: boolean }) => ReactNode)
 }
 
 function readStoredWidth(storageKey: string, fallback: number, min: number, max: number) {
@@ -65,6 +66,7 @@ export function WorkspaceSidePanel({
   defaultWidth,
   minWidth,
   maxWidth,
+  collapsedWidth = 0,
   mobileVisible,
   expandLabel,
   collapseLabel,
@@ -145,29 +147,34 @@ export function WorkspaceSidePanel({
   const ExpandIcon = side === 'left' ? PanelLeftOpen : PanelRightOpen
   const CollapseIcon = side === 'left' ? PanelLeftClose : PanelRightClose
   const collapsedOnDesktop = isCollapsed && !mobileVisible
+  const hasCollapsedRail = collapsedWidth > 0
+  const content =
+    typeof children === 'function' ? children({ isDesktopCollapsed: collapsedOnDesktop }) : children
 
   return (
     <div
       ref={panelRef}
       className={`${mobileVisible ? 'flex' : 'hidden'} relative h-full shrink-0 flex-col bg-base max-xl:!w-full xl:flex ${
-        collapsedOnDesktop
+        collapsedOnDesktop && !hasCollapsedRail
           ? ''
           : side === 'left'
             ? 'border-r border-border'
             : 'border-l border-border'
       }`}
-      style={{ width: collapsedOnDesktop ? 0 : width }}
+      style={{ width: collapsedOnDesktop ? collapsedWidth : width }}
     >
       {collapsedOnDesktop && (
         <TooltipProvider>
           <Tooltip delayDuration={300}>
             <TooltipTrigger asChild>
               <Button
-                variant="outline"
+                variant={hasCollapsedRail ? 'ghost' : 'outline'}
                 size="sm"
                 onClick={toggleCollapsed}
-                className={`absolute top-4 z-30 h-8 w-8 rounded-full bg-base p-0 shadow-md ${
-                  side === 'left' ? 'left-3' : 'right-3'
+                className={`absolute z-30 h-8 w-8 bg-base p-0 ${
+                  hasCollapsedRail
+                    ? 'left-1/2 top-3 -translate-x-1/2 rounded-md'
+                    : `top-4 rounded-full shadow-md ${side === 'left' ? 'left-3' : 'right-3'}`
                 }`}
                 aria-label={expandLabel}
                 data-testid={expandTestId}
@@ -206,8 +213,12 @@ export function WorkspaceSidePanel({
           <CollapseIcon className="h-4 w-4" />
         </Button>
       )}
-      <div className={`${collapsedOnDesktop ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
-        {children}
+      <div
+        className={`${
+          collapsedOnDesktop && !hasCollapsedRail ? 'hidden' : 'flex'
+        } min-h-0 flex-1 flex-col`}
+      >
+        {content}
       </div>
       {isResizing && <div className="fixed inset-0 z-50 cursor-col-resize select-none" />}
     </div>
