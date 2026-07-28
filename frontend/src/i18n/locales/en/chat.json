@@ -300,7 +300,6 @@
   "knowledge_draft": {
     "confirm_title": "Start a new task?",
     "confirm_description": "Your current unsent message, attachments, and additional context will be cleared before creating the presentation draft.",
-    "presentation_notice": "You can edit the prompt before sending it. The presentation will be generated as a personal task, visible only to you, and will not be saved to this knowledge base's generation history.",
     "confirm_cancel": "Keep current draft",
     "confirm_action": "Start new task"
   },

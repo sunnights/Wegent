@@ -43,6 +43,9 @@ describe('ArtifactCreateDialog', () => {
       />
     )
 
+    expect(screen.getByText('artifact.action.briefing').parentElement).toContainElement(
+      screen.getByText('artifact.createDescription')
+    )
     expect(screen.getByText('artifact.wholeKnowledgeBase:36')).toBeInTheDocument()
     expect(screen.getByText('artifact.sharedGenerationNotice')).toBeInTheDocument()
     expect(screen.getByTestId('artifact-create-dialog')).toHaveClass('sm:max-w-3xl')

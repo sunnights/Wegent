@@ -184,6 +184,10 @@ describe('ArtifactPanel AI Workshop', () => {
     expect(screen.getByTestId('artifact-rail-artifact-type-mind-map')).toHaveClass('h-11', 'w-11')
 
     fireEvent.click(screen.getByTestId('artifact-rail-artifact-type-presentation'))
+    expect(screen.getByTestId('ppt-draft-dialog')).toBeInTheDocument()
+    expect(screen.getByText('artifact.presentationDialog.notice')).toBeInTheDocument()
+    expect(createPptDraftMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('ppt-draft-continue'))
     expect(createPptDraftMock).toHaveBeenCalledTimes(1)
 
     fireEvent.click(screen.getByTestId('artifact-rail-item-artifact-1'))
@@ -302,6 +306,8 @@ describe('ArtifactPanel AI Workshop', () => {
     expect(screen.queryByTestId('artifact-type-briefing')).not.toBeInTheDocument()
     expect(screen.queryByTestId('artifact-type-mind-map')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('artifact-type-presentation'))
+    expect(createPptDraftMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('ppt-draft-continue'))
     expect(createPptDraftMock).toHaveBeenCalledTimes(1)
     expect(screen.getByText('artifact.emptyReadOnlyHint')).toBeInTheDocument()
     expect(createMock).not.toHaveBeenCalled()
@@ -410,6 +416,8 @@ describe('ArtifactPanel AI Workshop', () => {
     )
 
     fireEvent.click(screen.getByTestId('artifact-type-presentation'))
+    expect(createPptDraftMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('ppt-draft-continue'))
     expect(createPptDraftMock).toHaveBeenCalledTimes(1)
   })
 

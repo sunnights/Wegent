@@ -903,7 +903,7 @@
     "create": "Start task",
     "createFirst": "Start first task",
     "createTitle": "Start AI task",
-    "createDescription": "Configure sources and instructions. An agent will complete the task in the background.",
+    "createDescription": "Choose sources and add generation instructions",
     "sharedGenerationNotice": "Generated content will be saved to this knowledge base's generation history and will be visible to everyone who can access the knowledge base.",
     "start": "Start generation",
     "started": "Generation started. Track its status under Generation history.",
@@ -942,9 +942,8 @@
     "allDocuments": "All indexed documents will be used",
     "wholeKnowledgeBase": "Entire knowledge base · {{count}} documents",
     "wholeKnowledgeBaseShort": "Entire knowledge base",
-    "materials": "Sources",
     "addMaterials": "Add sources",
-    "source": "Knowledge sources",
+    "source": "Sources to use",
     "sourceCount": "{{count}} sources",
     "adjustSources": "Adjust",
     "sourceBrowser": {
@@ -959,7 +958,7 @@
       "presentation": "Generate PPT"
     },
     "sourceDialog": {
-      "title": "Choose knowledge sources",
+      "title": "Choose sources",
       "description": "Use all available documents by default, or choose specific documents.",
       "all": "All available documents",
       "allHint": "Use the current {{count}} available documents",
@@ -968,7 +967,7 @@
       "search": "Search documents...",
       "empty": "No documents found",
       "clear": "Use all documents",
-      "apply": "Apply sources",
+      "apply": "Confirm selection",
       "status": {
         "not_indexed": "Not indexed",
         "queued": "Queued",
@@ -993,6 +992,11 @@
       "presentationHint": "Create a presentation in a new task"
     },
     "presentationPrompt": "Generate a PPT based on the currently selected knowledge base documents",
+    "presentationDialog": {
+      "description": "A default prompt will be added for you to edit before sending.",
+      "notice": "The presentation will be generated as a personal task, visible only to you, and will not be saved to this knowledge base's generation history.",
+      "continue": "Edit prompt"
+    },
     "mindMap": {
       "ask": "Ask AI",
       "expand": "Expand node",

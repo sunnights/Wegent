@@ -614,7 +614,6 @@ describe('ChatArea queue message handler mounting', () => {
     )
 
     expect(screen.getByText('knowledge_draft.confirm_title')).toBeInTheDocument()
-    expect(screen.getByText('knowledge_draft.presentation_notice')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('knowledge-draft-cancel'))
 
     expect(mockRouterReplace).not.toHaveBeenCalled()

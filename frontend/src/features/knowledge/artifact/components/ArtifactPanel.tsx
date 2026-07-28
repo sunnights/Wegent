@@ -205,6 +205,7 @@ export function ArtifactPanel({
   const [createOpen, setCreateOpen] = useState(false)
   const [createType, setCreateType] = useState<KnowledgeArtifactType>('briefing')
   const [createSessionKey, setCreateSessionKey] = useState(0)
+  const [pptDraftDialogOpen, setPptDraftDialogOpen] = useState(false)
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null)
   const [pendingDeleteArtifactId, setPendingDeleteArtifactId] = useState<string | null>(null)
   const selectedArtifact = useMemo(
@@ -279,7 +280,7 @@ export function ArtifactPanel({
       label: t('artifact.action.presentation'),
       description: t('artifact.type.presentationHint'),
       disabled: availableDocumentCount === 0,
-      onClick: onCreatePptDraft,
+      onClick: () => setPptDraftDialogOpen(true),
       testId: 'artifact-type-presentation',
       tone: 'bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300',
     },
@@ -457,6 +458,32 @@ export function ArtifactPanel({
           }}
         />
       )}
+      <AlertDialog open={pptDraftDialogOpen} onOpenChange={setPptDraftDialogOpen}>
+        <AlertDialogContent className="sm:max-w-xl" data-testid="ppt-draft-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('artifact.action.presentation')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('artifact.presentationDialog.description')}
+              <span className="mt-2 block">{t('artifact.presentationDialog.notice')}</span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="ppt-draft-cancel">
+              {t('artifact.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="primary"
+              data-testid="ppt-draft-continue"
+              onClick={() => {
+                setPptDraftDialogOpen(false)
+                onCreatePptDraft()
+              }}
+            >
+              {t('artifact.presentationDialog.continue')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <ArtifactViewer
         artifact={selectedArtifact}
         canManage={canManage}

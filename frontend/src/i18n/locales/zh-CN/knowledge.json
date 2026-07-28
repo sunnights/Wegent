@@ -293,7 +293,7 @@
     },
     "document": {
       "title": "文档",
-      "upload": "添加来源",
+      "upload": "添加资料",
       "edit": "编辑文档",
       "enable": "启用",
       "disable": "停用",
@@ -903,7 +903,7 @@
     "create": "开始任务",
     "createFirst": "开始第一个任务",
     "createTitle": "开始 AI 任务",
-    "createDescription": "设置来源和要求，智能体将在后台完成任务。",
+    "createDescription": "选择资料并补充生成要求",
     "sharedGenerationNotice": "生成内容将保存到当前知识库的生成记录中，所有可访问该知识库的用户均可查看。",
     "start": "开始生成",
     "started": "已开始生成，可在“生成记录”中查看状态",
@@ -942,9 +942,8 @@
     "allDocuments": "将使用知识库中全部已索引文档",
     "wholeKnowledgeBase": "整个知识库 · {{count}} 篇文档",
     "wholeKnowledgeBaseShort": "整个知识库",
-    "materials": "资料",
     "addMaterials": "添加资料",
-    "source": "知识来源",
+    "source": "使用资料",
     "sourceCount": "{{count}} 篇来源",
     "adjustSources": "调整",
     "sourceBrowser": {
@@ -959,16 +958,16 @@
       "presentation": "生成 PPT"
     },
     "sourceDialog": {
-      "title": "选择知识来源",
-      "description": "默认使用全部可用文档，也可以只使用指定文档。",
-      "all": "全部可用文档",
-      "allHint": "使用当前 {{count}} 篇可用文档",
+      "title": "选择资料",
+      "description": "默认使用全部可用资料，也可以只使用指定资料。",
+      "all": "全部可用资料",
+      "allHint": "使用当前 {{count}} 篇可用资料",
       "defaultAllHint": "默认使用全部 {{count}} 篇资料",
       "selectedHint": "已选择 {{count}} 篇资料",
-      "search": "搜索文档...",
-      "empty": "没有找到文档",
-      "clear": "使用全部文档",
-      "apply": "应用来源",
+      "search": "搜索资料...",
+      "empty": "没有找到资料",
+      "clear": "使用全部资料",
+      "apply": "确认选择",
       "status": {
         "not_indexed": "未索引",
         "queued": "等待索引",
@@ -981,7 +980,7 @@
       }
     },
     "mobile": {
-      "sources": "来源",
+      "sources": "资料",
       "chat": "对话",
       "generation": "生成"
     },
@@ -993,6 +992,11 @@
       "presentationHint": "在新任务中制作演示文稿"
     },
     "presentationPrompt": "请根据当前选中的知识库文档生成PPT",
+    "presentationDialog": {
+      "description": "系统会填入默认提示词，你可以修改后直接发送。",
+      "notice": "PPT 将作为个人任务生成，仅你可查看，不会保存到当前知识库的生成记录。",
+      "continue": "填写提示词"
+    },
     "mindMap": {
       "ask": "问 AI",
       "expand": "展开节点",

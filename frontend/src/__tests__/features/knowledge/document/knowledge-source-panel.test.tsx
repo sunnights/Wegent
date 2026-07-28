@@ -82,7 +82,7 @@ describe('KnowledgeSourcePanel', () => {
   it('uses the main document browser dimensions and compact layout', () => {
     render(<KnowledgeSourcePanel {...defaultProps} />)
 
-    expect(screen.getByText('artifact.materials')).toBeInTheDocument()
+    expect(screen.queryByText('artifact.materials')).not.toBeInTheDocument()
     expect(mockWorkspaceSidePanel).toHaveBeenLastCalledWith(
       expect.objectContaining({
         defaultWidth: 420,

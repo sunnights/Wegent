@@ -64,12 +64,12 @@ export function ArtifactCreateDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl" data-testid="artifact-create-dialog">
-        <DialogHeader>
-          <DialogTitle>{t(`artifact.action.${artifactType}`)}</DialogTitle>
-          <DialogDescription>
-            {t('artifact.createDescription')}
-            <span className="mt-2 block">{t('artifact.sharedGenerationNotice')}</span>
-          </DialogDescription>
+        <DialogHeader className="gap-2 space-y-0">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:gap-3">
+            <DialogTitle className="shrink-0">{t(`artifact.action.${artifactType}`)}</DialogTitle>
+            <span className="text-sm text-muted-foreground">{t('artifact.createDescription')}</span>
+          </div>
+          <DialogDescription>{t('artifact.sharedGenerationNotice')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="flex items-start gap-3 rounded-xl border border-border bg-surface p-4">

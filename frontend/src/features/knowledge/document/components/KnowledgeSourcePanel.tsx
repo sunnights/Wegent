@@ -63,10 +63,7 @@ export function KnowledgeSourcePanel({
       collapseTestId="knowledge-source-panel-collapse-button"
     >
       <div className="flex min-h-0 flex-1 flex-col" data-testid="knowledge-source-panel">
-        <div className="flex min-h-12 items-center px-4 pr-14">
-          <h2 className="text-sm font-semibold">{t('artifact.materials')}</h2>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
+        <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 pt-3">
           <DocumentList
             knowledgeBase={knowledgeBase}
             canUpload={canUploadDocuments}
