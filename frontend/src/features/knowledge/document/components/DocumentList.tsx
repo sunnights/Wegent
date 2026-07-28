@@ -186,6 +186,8 @@ interface DocumentListProps {
   onSelectionChange?: (documentIds: number[]) => void
   /** Controlled selection used when another panel can also change the source scope. */
   selectedDocumentIds?: number[]
+  /** Number of active, indexed documents available to the workspace. */
+  availableDocumentCount?: number | null
   /** Refresh the browser without remounting it. */
   refreshToken?: number
   /** Continue polling while documents outside the visible page are processing. */
@@ -233,6 +235,7 @@ export function DocumentList({
   compact = false,
   onSelectionChange,
   selectedDocumentIds: controlledSelectedDocumentIds,
+  availableDocumentCount = null,
   refreshToken = 0,
   processingDocumentCount = 0,
   onDocumentsChanged,
@@ -757,6 +760,7 @@ export function DocumentList({
 
   const isPartialSelected =
     selectableDocuments.some(doc => selectedDocumentIds.has(doc.id)) && !isAllSelected
+  const usesAllAvailableDocuments = selectionIsControlled && selectedDocumentIds.size === 0
 
   // Batch operations using batch API
   const handleBatchDelete = async () => {
@@ -981,6 +985,7 @@ export function DocumentList({
     knowledgeBase.retrieval_config?.retriever_name &&
     knowledgeBase.retrieval_config?.embedding_config?.model_name
   )
+  const canToggleExpandAll = folders.length > 0 && (knowledgeBase.document_count ?? 0) < 200
 
   return (
     <div className="space-y-4">
@@ -1019,7 +1024,7 @@ export function DocumentList({
               {knowledgeBase.name}
             </h2>
             {/* Summary tooltip - keep visible when manual summary exists after AI failure */}
-            {(hasVisibleSummary || canManageAllDocuments) && (
+            {!sourceWorkspace && (hasVisibleSummary || canManageAllDocuments) && (
               <>
                 <TooltipProvider>
                   <Tooltip delayDuration={200}>
@@ -1098,7 +1103,7 @@ export function DocumentList({
           )}
         </div>
         {/* Header actions (e.g., tabs) + expand-all toggle */}
-        {folders.length > 0 && (knowledgeBase.document_count ?? 0) < 200 && (
+        {!sourceWorkspace && canToggleExpandAll && (
           <Button
             variant="outline"
             size="sm"
@@ -1110,7 +1115,9 @@ export function DocumentList({
         )}
         {headerActions}
       </div>
-      {canManageAllDocuments && <EditKnowledgeBaseSummaryDialog {...editorDialogProps} />}
+      {canManageAllDocuments && !sourceWorkspace && (
+        <EditKnowledgeBaseSummaryDialog {...editorDialogProps} />
+      )}
 
       {canUpload && sourceWorkspace && (
         <Button
@@ -1125,37 +1132,54 @@ export function DocumentList({
       )}
 
       {/* Folder breadcrumb navigation (layered nav only) */}
-      {!isExpandAllView && (
-        <div className="flex items-center gap-1 text-sm text-text-muted flex-wrap">
-          <button
-            onClick={() => {
-              setCurrentFolderId(0)
-              resetSelectionForNavigation()
-            }}
-            className={`hover:text-text-primary transition-colors ${currentFolderId === 0 ? 'text-text-primary font-medium' : ''}`}
-            data-testid="breadcrumb-root"
-          >
-            {t('document.breadcrumb.root')}
-          </button>
-          {folderBreadcrumb.map((folder, i) => (
-            <span key={folder.id} className="flex items-center gap-1">
-              <ChevronRight className="w-3.5 h-3.5 flex-shrink-0" />
-              {i < folderBreadcrumb.length - 1 ? (
-                <button
-                  onClick={() => {
-                    setCurrentFolderId(folder.id)
-                    resetSelectionForNavigation()
-                  }}
-                  className="hover:text-text-primary transition-colors"
-                  data-testid={`breadcrumb-folder-${folder.id}`}
-                >
-                  {folder.name}
-                </button>
-              ) : (
-                <span className="text-text-primary font-medium">{folder.name}</span>
-              )}
-            </span>
-          ))}
+      {(!isExpandAllView || sourceWorkspace) && (
+        <div
+          className="flex items-center justify-between gap-2"
+          data-testid={sourceWorkspace ? 'document-source-breadcrumb-row' : undefined}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-sm text-text-muted">
+            <button
+              onClick={() => {
+                setCurrentFolderId(0)
+                resetSelectionForNavigation()
+              }}
+              className={`shrink-0 hover:text-text-primary transition-colors ${currentFolderId === 0 ? 'text-text-primary font-medium' : ''}`}
+              data-testid="breadcrumb-root"
+            >
+              {t('document.breadcrumb.root')}
+            </button>
+            {!isExpandAllView &&
+              folderBreadcrumb.map((folder, i) => (
+                <span key={folder.id} className="flex min-w-0 items-center gap-1">
+                  <ChevronRight className="w-3.5 h-3.5 flex-shrink-0" />
+                  {i < folderBreadcrumb.length - 1 ? (
+                    <button
+                      onClick={() => {
+                        setCurrentFolderId(folder.id)
+                        resetSelectionForNavigation()
+                      }}
+                      className="truncate hover:text-text-primary transition-colors"
+                      data-testid={`breadcrumb-folder-${folder.id}`}
+                    >
+                      {folder.name}
+                    </button>
+                  ) : (
+                    <span className="truncate text-text-primary font-medium">{folder.name}</span>
+                  )}
+                </span>
+              ))}
+          </div>
+          {sourceWorkspace && canToggleExpandAll && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={handleToggleExpandAll}
+              data-testid="expand-all-toggle"
+            >
+              {isExpandAllView ? t('document.tree.layeredNav') : t('document.tree.expandAll')}
+            </Button>
+          )}
         </div>
       )}
 
@@ -1281,6 +1305,46 @@ export function DocumentList({
           </>
         )}
       </div>
+
+      {sourceWorkspace && onSelectionChange && (
+        <div
+          className="flex min-h-11 items-center justify-between gap-2 px-2 text-xs text-text-secondary"
+          data-testid="document-source-scope-summary"
+        >
+          <span className="min-w-0 flex-1 truncate">
+            {usesAllAvailableDocuments
+              ? availableDocumentCount === null
+                ? t('artifact.sourceDialog.all')
+                : t('artifact.sourceDialog.allSelectedHint', {
+                    count: availableDocumentCount,
+                  })
+              : t('artifact.sourceDialog.selectedHint', {
+                  count: selectedDocumentIds.size,
+                })}
+          </span>
+          <TooltipProvider>
+            <Tooltip delayDuration={200}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface hover:text-primary"
+                  onClick={() => onSelectionChange([])}
+                  aria-label={t('artifact.sourceDialog.clear')}
+                  aria-pressed={usesAllAvailableDocuments}
+                  data-testid="document-use-all-sources"
+                >
+                  {usesAllAvailableDocuments ? (
+                    <CheckSquare className="h-4 w-4 text-primary" />
+                  ) : (
+                    <Square className="h-4 w-4" />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="left">{t('artifact.sourceDialog.clear')}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      )}
 
       {/* Document List */}
       {loading && documents.length === 0 ? (

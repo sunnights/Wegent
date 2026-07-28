@@ -960,6 +960,7 @@
       "description": "默认使用全部可用文档，也可以只使用指定文档。",
       "all": "全部可用文档",
       "allHint": "使用当前 {{count}} 篇可用文档",
+      "allSelectedHint": "已选择全部 {{count}} 篇可用文档",
       "selectedHint": "已选择 {{count}} 篇文档",
       "search": "搜索文档...",
       "empty": "没有找到文档",

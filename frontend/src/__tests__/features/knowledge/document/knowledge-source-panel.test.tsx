@@ -64,6 +64,7 @@ const knowledgeBase: KnowledgeBase = {
 const defaultProps = {
   knowledgeBase,
   selectedDocumentIds: [] as number[],
+  availableDocumentCount: null,
   processingDocumentCount: 0,
   canUploadDocuments: false,
   canManageAllDocuments: false,
@@ -95,6 +96,7 @@ describe('KnowledgeSourcePanel', () => {
         paginationEnabled: true,
         sourceWorkspace: true,
         selectedDocumentIds: [],
+        availableDocumentCount: null,
       })
     )
   })
@@ -114,6 +116,7 @@ describe('KnowledgeSourcePanel', () => {
         canUploadDocuments
         canManageAllDocuments
         selectedDocumentIds={[7]}
+        availableDocumentCount={36}
         processingDocumentCount={2}
         refreshToken={3}
         groupInfo={groupInfo}
@@ -130,6 +133,7 @@ describe('KnowledgeSourcePanel', () => {
         canUpload: true,
         canManageAllDocuments: true,
         selectedDocumentIds: [7],
+        availableDocumentCount: 36,
         processingDocumentCount: 2,
         refreshToken: 3,
         groupInfo,

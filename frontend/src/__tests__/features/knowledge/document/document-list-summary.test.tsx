@@ -308,17 +308,47 @@ describe('DocumentList summary header', () => {
 
   it('orders workspace source controls and keeps folder management out of the workspace', () => {
     mockFolders = [createFolder()]
+    const onSelectionChange = jest.fn()
 
-    render(<DocumentList knowledgeBase={createKnowledgeBase()} canUpload compact sourceWorkspace />)
+    render(
+      <DocumentList
+        knowledgeBase={createKnowledgeBase({ document_count: 1 })}
+        canUpload
+        canManageAllDocuments
+        compact
+        sourceWorkspace
+        selectedDocumentIds={[]}
+        availableDocumentCount={48}
+        onSelectionChange={onSelectionChange}
+      />
+    )
 
     const addSource = screen.getByTestId('document-add-source-full-width')
     const breadcrumb = screen.getByTestId('breadcrumb-root')
+    const breadcrumbRow = screen.getByTestId('document-source-breadcrumb-row')
+    const expandAll = screen.getByTestId('expand-all-toggle')
     const search = screen.getByTestId('document-source-search-input')
+    const scopeSummary = screen.getByTestId('document-source-scope-summary')
+    const useAll = screen.getByTestId('document-use-all-sources')
 
     expect(addSource).toHaveClass('w-full')
     expect(search).toHaveClass('w-full')
     expect(addSource.compareDocumentPosition(breadcrumb)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(breadcrumb.compareDocumentPosition(search)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(search.compareDocumentPosition(scopeSummary)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(breadcrumbRow).toContainElement(expandAll)
+    expect(screen.getByText('artifact.sourceDialog.allSelectedHint')).toBeInTheDocument()
+    expect(useAll).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByTestId('summary-info-button')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('kb-summary-inline-edit-button')).not.toBeInTheDocument()
+
+    fireEvent.click(expandAll)
+    expect(screen.getByTestId('document-source-breadcrumb-row')).toContainElement(
+      screen.getByTestId('expand-all-toggle')
+    )
+
+    fireEvent.click(useAll)
+    expect(onSelectionChange).toHaveBeenCalledWith([])
     expect(mockFolderTree).toHaveBeenLastCalledWith(
       expect.objectContaining({
         canManageFolders: false,
@@ -344,7 +374,9 @@ describe('DocumentList summary header', () => {
       <DocumentList
         knowledgeBase={createKnowledgeBase({ document_count: 2 })}
         compact
+        sourceWorkspace
         selectedDocumentIds={[10]}
+        availableDocumentCount={1}
         onSelectionChange={onSelectionChange}
       />
     )
@@ -355,6 +387,12 @@ describe('DocumentList summary header', () => {
       })
     )
     expect(screen.getByTestId('compact-select-document-11')).toBeDisabled()
+    expect(screen.getByText('artifact.sourceDialog.selectedHint')).toBeInTheDocument()
+    expect(screen.getByTestId('document-use-all-sources')).toHaveAttribute('aria-pressed', 'false')
+
+    onSelectionChange.mockClear()
+    fireEvent.click(screen.getByTestId('document-use-all-sources'))
+    expect(onSelectionChange).toHaveBeenCalledWith([])
 
     onSelectionChange.mockClear()
     fireEvent.click(screen.getByTestId('compact-select-document-10'))

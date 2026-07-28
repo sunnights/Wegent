@@ -276,6 +276,7 @@ export function KnowledgeDetailPanel({
           key={`sources-${selectedKb.id}`}
           knowledgeBase={selectedKb}
           selectedDocumentIds={selectedDocumentIds}
+          availableDocumentCount={availableDocumentCount}
           processingDocumentCount={processingDocumentCount}
           canUploadDocuments={canUploadDocuments}
           canManageAllDocuments={canManageKb}

@@ -12,6 +12,7 @@ import { WorkspaceSidePanel } from './WorkspaceSidePanel'
 interface KnowledgeSourcePanelProps {
   knowledgeBase: KnowledgeBase
   selectedDocumentIds: number[]
+  availableDocumentCount: number | null
   processingDocumentCount: number
   canUploadDocuments: boolean
   canManageAllDocuments: boolean
@@ -30,6 +31,7 @@ interface KnowledgeSourcePanelProps {
 export function KnowledgeSourcePanel({
   knowledgeBase,
   selectedDocumentIds,
+  availableDocumentCount,
   processingDocumentCount,
   canUploadDocuments,
   canManageAllDocuments,
@@ -73,6 +75,7 @@ export function KnowledgeSourcePanel({
             paginationEnabled
             sourceWorkspace
             selectedDocumentIds={selectedDocumentIds}
+            availableDocumentCount={availableDocumentCount}
             processingDocumentCount={processingDocumentCount}
             refreshToken={refreshToken}
             groupInfo={groupInfo}
