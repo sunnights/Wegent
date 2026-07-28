@@ -329,7 +329,6 @@ describe('DocumentList summary header', () => {
     const expandAll = screen.getByTestId('expand-all-toggle')
     const search = screen.getByTestId('document-source-search-input')
     const scopeSummary = screen.getByTestId('document-source-scope-summary')
-    const useAll = screen.getByTestId('document-use-all-sources')
 
     expect(addSource).toHaveClass('w-full')
     expect(search).toHaveClass('w-full')
@@ -337,8 +336,8 @@ describe('DocumentList summary header', () => {
     expect(breadcrumb.compareDocumentPosition(search)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(search.compareDocumentPosition(scopeSummary)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(breadcrumbRow).toContainElement(expandAll)
-    expect(screen.getByText('artifact.sourceDialog.allSelectedHint')).toBeInTheDocument()
-    expect(useAll).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('artifact.sourceDialog.defaultAllHint')).toBeInTheDocument()
+    expect(screen.queryByTestId('document-use-all-sources')).not.toBeInTheDocument()
     expect(screen.queryByTestId('summary-info-button')).not.toBeInTheDocument()
     expect(screen.queryByTestId('kb-summary-inline-edit-button')).not.toBeInTheDocument()
 
@@ -347,8 +346,6 @@ describe('DocumentList summary header', () => {
       screen.getByTestId('expand-all-toggle')
     )
 
-    fireEvent.click(useAll)
-    expect(onSelectionChange).toHaveBeenCalledWith([])
     expect(mockFolderTree).toHaveBeenLastCalledWith(
       expect.objectContaining({
         canManageFolders: false,
@@ -388,11 +385,7 @@ describe('DocumentList summary header', () => {
     )
     expect(screen.getByTestId('compact-select-document-11')).toBeDisabled()
     expect(screen.getByText('artifact.sourceDialog.selectedHint')).toBeInTheDocument()
-    expect(screen.getByTestId('document-use-all-sources')).toHaveAttribute('aria-pressed', 'false')
-
-    onSelectionChange.mockClear()
-    fireEvent.click(screen.getByTestId('document-use-all-sources'))
-    expect(onSelectionChange).toHaveBeenCalledWith([])
+    expect(screen.queryByTestId('document-use-all-sources')).not.toBeInTheDocument()
 
     onSelectionChange.mockClear()
     fireEvent.click(screen.getByTestId('compact-select-document-10'))

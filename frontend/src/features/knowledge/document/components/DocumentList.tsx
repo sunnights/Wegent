@@ -1308,41 +1308,18 @@ export function DocumentList({
 
       {sourceWorkspace && onSelectionChange && (
         <div
-          className="flex min-h-11 items-center justify-between gap-2 px-2 text-xs text-text-secondary"
+          className="px-2 py-1.5 text-xs text-text-secondary"
           data-testid="document-source-scope-summary"
         >
-          <span className="min-w-0 flex-1 truncate">
-            {usesAllAvailableDocuments
-              ? availableDocumentCount === null
-                ? t('artifact.sourceDialog.all')
-                : t('artifact.sourceDialog.allSelectedHint', {
-                    count: availableDocumentCount,
-                  })
-              : t('artifact.sourceDialog.selectedHint', {
-                  count: selectedDocumentIds.size,
-                })}
-          </span>
-          <TooltipProvider>
-            <Tooltip delayDuration={200}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface hover:text-primary"
-                  onClick={() => onSelectionChange([])}
-                  aria-label={t('artifact.sourceDialog.clear')}
-                  aria-pressed={usesAllAvailableDocuments}
-                  data-testid="document-use-all-sources"
-                >
-                  {usesAllAvailableDocuments ? (
-                    <CheckSquare className="h-4 w-4 text-primary" />
-                  ) : (
-                    <Square className="h-4 w-4" />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left">{t('artifact.sourceDialog.clear')}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          {usesAllAvailableDocuments
+            ? availableDocumentCount === null
+              ? t('artifact.sourceDialog.all')
+              : t('artifact.sourceDialog.defaultAllHint', {
+                  count: availableDocumentCount,
+                })
+            : t('artifact.sourceDialog.selectedHint', {
+                count: selectedDocumentIds.size,
+              })}
         </div>
       )}
 

@@ -960,7 +960,7 @@
       "description": "Use all available documents by default, or choose specific documents.",
       "all": "All available documents",
       "allHint": "Use the current {{count}} available documents",
-      "allSelectedHint": "All {{count}} available documents selected",
+      "defaultAllHint": "Use all {{count}} available documents by default",
       "selectedHint": "{{count}} documents selected",
       "search": "Search documents...",
       "empty": "No documents found",
