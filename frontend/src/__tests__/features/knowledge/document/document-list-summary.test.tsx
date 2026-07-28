@@ -308,6 +308,7 @@ describe('DocumentList summary header', () => {
 
   it('orders workspace source controls and keeps folder management out of the workspace', () => {
     mockFolders = [createFolder()]
+    mockDocuments = [createDocument()]
     const onSelectionChange = jest.fn()
 
     render(
@@ -329,9 +330,11 @@ describe('DocumentList summary header', () => {
     const expandAll = screen.getByTestId('expand-all-toggle')
     const search = screen.getByTestId('document-source-search-input')
     const scopeSummary = screen.getByTestId('document-source-scope-summary')
+    const selectCurrentPage = screen.getByTestId('document-select-current-page')
 
     expect(addSource).toHaveClass('w-full')
     expect(search).toHaveClass('w-full')
+    expect(scopeSummary).toContainElement(selectCurrentPage)
     expect(addSource.compareDocumentPosition(breadcrumb)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(breadcrumb.compareDocumentPosition(search)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(search.compareDocumentPosition(scopeSummary)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)

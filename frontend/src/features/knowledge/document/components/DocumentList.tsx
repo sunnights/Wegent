@@ -988,7 +988,7 @@ export function DocumentList({
   const canToggleExpandAll = folders.length > 0 && (knowledgeBase.document_count ?? 0) < 200
 
   return (
-    <div className="space-y-4">
+    <div className={sourceWorkspace ? 'space-y-3' : 'space-y-4'}>
       {/* Header - Wegent style */}
       <div className="flex items-center gap-3">
         {onBack && (
@@ -1308,18 +1308,40 @@ export function DocumentList({
 
       {sourceWorkspace && onSelectionChange && (
         <div
-          className="px-2 py-1.5 text-xs text-text-secondary"
+          className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-2 text-xs text-text-secondary"
           data-testid="document-source-scope-summary"
         >
-          {usesAllAvailableDocuments
-            ? availableDocumentCount === null
-              ? t('artifact.sourceDialog.all')
-              : t('artifact.sourceDialog.defaultAllHint', {
-                  count: availableDocumentCount,
-                })
-            : t('artifact.sourceDialog.selectedHint', {
-                count: selectedDocumentIds.size,
-              })}
+          <span>
+            {usesAllAvailableDocuments
+              ? availableDocumentCount === null
+                ? t('artifact.sourceDialog.all')
+                : t('artifact.sourceDialog.defaultAllHint', {
+                    count: availableDocumentCount,
+                  })
+              : t('artifact.sourceDialog.selectedHint', {
+                  count: selectedDocumentIds.size,
+                })}
+          </span>
+          {documents.length > 0 && (
+            <button
+              type="button"
+              onClick={() => handleSelectAll(!isAllSelected)}
+              className="flex min-h-11 shrink-0 items-center gap-1.5 text-text-muted transition-colors hover:text-text-primary md:min-h-0"
+              aria-pressed={isAllSelected}
+              data-testid="document-select-current-page"
+            >
+              {isAllSelected ? (
+                <CheckSquare className="h-3.5 w-3.5 text-primary" />
+              ) : (
+                <Square className="h-3.5 w-3.5" />
+              )}
+              <span>{t('document.document.batch.selectCurrentPage')}</span>
+              <span>
+                ({selectableDocuments.filter(doc => selectedDocumentIds.has(doc.id)).length}/
+                {selectableDocuments.length})
+              </span>
+            </button>
+          )}
         </div>
       )}
 
@@ -1420,7 +1442,7 @@ export function DocumentList({
           {compact ? (
             <div className="space-y-2">
               {/* Select all control bar for notebook mode */}
-              {onSelectionChange && documents.length > 0 && (
+              {!sourceWorkspace && onSelectionChange && documents.length > 0 && (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-text-muted">
                   <button
                     onClick={() => handleSelectAll(!isAllSelected)}
