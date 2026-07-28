@@ -240,52 +240,6 @@ describe('useChatStreamHandlers external knowledge contexts', () => {
     ])
   })
 
-  it('sends Artifact node identity without trusting the current document selection', async () => {
-    const currentContext: ContextItem = {
-      type: 'knowledge_base',
-      id: 99,
-      name: 'Unrelated KB',
-      document_count: 1,
-    } as ContextItem
-    const attachment = {
-      id: 88,
-      filename: 'draft.pdf',
-      status: 'uploading',
-    }
-    const { result, setTaskInputMessage, resetAttachment, resetContexts } = renderSendHook(
-      [currentContext],
-      {
-        taskType: 'knowledge',
-        knowledgeBaseId: 12,
-        selectedDocumentIds: [999],
-        attachments: [attachment],
-        isAttachmentReadyToSend: false,
-        externalApiParams: { token: 'draft-value' },
-      }
-    )
-
-    await act(async () => {
-      await result.current.handleSendMessage('解释这个节点', {
-        artifactContext: {
-          artifact_id: 'artifact-1',
-          node_id: 'node-2',
-        },
-      })
-    })
-
-    const request = mockContextSendMessage.mock.calls[0][0]
-    expect(request.artifact_context).toEqual({
-      artifact_id: 'artifact-1',
-      node_id: 'node-2',
-    })
-    expect(request.message).toBe('解释这个节点')
-    expect(request.attachment_ids).toEqual([])
-    expect(request.contexts).toBeUndefined()
-    expect(setTaskInputMessage).not.toHaveBeenCalled()
-    expect(resetAttachment).not.toHaveBeenCalled()
-    expect(resetContexts).not.toHaveBeenCalled()
-  })
-
   it('replaces the current-KB context with an explicit whole-KB scope', async () => {
     const existingContext: ContextItem = {
       type: 'knowledge_base',

@@ -41,12 +41,10 @@ import type {
   InteractiveFormAnswerPayload,
 } from '@/types/api'
 import type { ContextItem, ExternalKnowledgeContext } from '@/types/context'
-import type { ArtifactNodeContext } from '@/types/knowledge-artifact'
 import type { SkillRef } from '../../hooks/useSkillSelector'
 
 export interface SendMessageOptions {
   interactiveFormAnswer?: InteractiveFormAnswerPayload
-  artifactContext?: ArtifactNodeContext
 }
 
 function isVirtualKnowledgeBasePath(path: string): boolean {
@@ -436,15 +434,13 @@ export function useChatStreamHandlers({
       > | null,
       sendOptions?: SendMessageOptions
     ): PreparedChatSend => {
-      const isArtifactQuestion = Boolean(sendOptions?.artifactContext)
-      const snapshotAttachments = isArtifactQuestion ? [] : [...attachments]
-      const snapshotContexts = isArtifactQuestion ? [] : [...selectedContextsRef.current]
-      const snapshotAdditionalSkills =
-        !isArtifactQuestion && additionalSkills ? [...additionalSkills] : undefined
+      const snapshotAttachments = [...attachments]
+      const snapshotContexts = [...selectedContextsRef.current]
+      const snapshotAdditionalSkills = additionalSkills ? [...additionalSkills] : undefined
       const modelId = selectedModel?.name === DEFAULT_MODEL_NAME ? undefined : selectedModel?.name
 
       let finalMessage = message
-      if (!isArtifactQuestion && Object.keys(externalApiParams).length > 0) {
+      if (Object.keys(externalApiParams).length > 0) {
         const paramsJson = JSON.stringify(externalApiParams)
         finalMessage = `[EXTERNAL_API_PARAMS]${paramsJson}[/EXTERNAL_API_PARAMS]\n${message}`
       }
@@ -485,7 +481,7 @@ export function useChatStreamHandlers({
           }
         })
 
-      if (taskType === 'knowledge' && knowledgeBaseId && !sendOptions?.artifactContext) {
+      if (taskType === 'knowledge' && knowledgeBaseId) {
         const workspaceKnowledgeContext = {
           type: 'knowledge_base' as const,
           data: {
@@ -557,7 +553,6 @@ export function useChatStreamHandlers({
 
       if (
         taskType === 'knowledge' &&
-        !sendOptions?.artifactContext &&
         selectedDocumentIds &&
         selectedDocumentIds.length > 0 &&
         knowledgeBaseId
@@ -703,7 +698,6 @@ export function useChatStreamHandlers({
           : undefined,
         task_type: taskType,
         knowledge_base_id: taskType === 'knowledge' ? knowledgeBaseId : undefined,
-        artifact_context: sendOptions?.artifactContext,
         contexts: contextItems.length > 0 ? contextItems : undefined,
         device_id: effectiveDeviceId,
         // Project association for workspace project conversations
@@ -1048,7 +1042,7 @@ export function useChatStreamHandlers({
       const hasAttachments = attachments.length > 0
       if (!message && !hasAttachments && !shouldHideChatInput) return
 
-      if (!sendOptions?.artifactContext && !isAttachmentReadyToSend) {
+      if (!isAttachmentReadyToSend) {
         toast({
           variant: 'destructive',
           title: '请等待文件上传完成',
@@ -1095,11 +1089,7 @@ export function useChatStreamHandlers({
           .reverse()
           .find(queuedMessage => queuedMessage.status === 'queued')
 
-        if (
-          mergeTarget &&
-          !prepared.request.artifact_context &&
-          !mergeTarget.snapshot.request.artifact_context
-        ) {
+        if (mergeTarget) {
           updateQueuedMessage(mergeTarget.id, queuedMessage => {
             const mergedPrepared = mergePreparedChatSend(queuedMessage.snapshot, prepared)
             return {
@@ -1116,20 +1106,16 @@ export function useChatStreamHandlers({
             snapshot: prepared,
           })
         }
-        if (!sendOptions?.artifactContext) {
-          setTaskInputMessage('')
-          resetAttachment()
-          resetContexts?.()
-        }
+        setTaskInputMessage('')
+        resetAttachment()
+        resetContexts?.()
         setTimeout(() => scrollToBottom(true), 0)
         return
       }
 
-      if (!sendOptions?.artifactContext) {
-        setTaskInputMessage('')
-        resetAttachment()
-        resetContexts?.()
-      }
+      setTaskInputMessage('')
+      resetAttachment()
+      resetContexts?.()
 
       if (!currentTaskId) {
         setPendingTaskId(immediateTaskId)

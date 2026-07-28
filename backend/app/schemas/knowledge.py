@@ -7,6 +7,7 @@ Pydantic schemas for knowledge base and document management.
 """
 
 import logging
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
@@ -1091,6 +1092,15 @@ class KnowledgeDocumentCreateV1(BaseModel):
         max_length=500_000,
         description="Text content (required for source_type='text')",
     )
+    content_kind: Optional[Literal["mind_map"]] = Field(
+        None,
+        description="Structured Markdown content kind",
+    )
+    origin_task_id: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Task that generated the structured Markdown content",
+    )
     file_extension: Optional[str] = Field(
         None,
         max_length=50,
@@ -1118,6 +1128,22 @@ class KnowledgeDocumentCreateV1(BaseModel):
         None,
         description="Custom text splitter configuration",
     )
+
+    @model_validator(mode="after")
+    def validate_structured_content(self) -> "KnowledgeDocumentCreateV1":
+        if self.content_kind is None and self.origin_task_id is None:
+            return self
+        if self.content_kind != "mind_map" or self.origin_task_id is None:
+            raise ValueError(
+                "content_kind and origin_task_id must be provided together"
+            )
+        if self.source_type != DocumentSourceType.TEXT or not self.content:
+            raise ValueError("mind_map content must use source_type='text'")
+        if not re.search(
+            r"```[ \t]*mermaid\b[\s\S]*?\bmindmap\b", self.content, re.IGNORECASE
+        ):
+            raise ValueError("mind_map content must contain a Mermaid mindmap block")
+        return self
 
 
 class DocumentContentUpdateResponse(BaseModel):

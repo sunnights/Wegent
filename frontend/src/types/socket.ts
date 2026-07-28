@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { InteractiveFormAnswerPayload, TaskType } from './api'
-import type { ArtifactNodeContext } from './knowledge-artifact'
 
 /**
  * Socket.IO event types and payload definitions
@@ -127,7 +126,6 @@ export interface ChatSendPayload {
   task_type?: TaskType
   // Knowledge base ID for knowledge type tasks
   knowledge_base_id?: number
-  artifact_context?: ArtifactNodeContext
   // Local device execution
   device_id?: string // Local device ID for task execution (if undefined, use cloud executor)
   // Project association

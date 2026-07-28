@@ -4,46 +4,15 @@
 
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  AlertCircle,
-  ChevronRight,
-  FileText,
-  Network,
-  Presentation,
-  type LucideIcon,
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { ChevronRight, FileText, Network, Presentation, type LucideIcon } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { Skeleton } from '@/components/ui/skeleton'
-import { useToast } from '@/hooks/use-toast'
 import { useTranslation } from '@/hooks/useTranslation'
-import { ArtifactCreateDialog } from './ArtifactCreateDialog'
-import { ArtifactCard } from './ArtifactCard'
-import { ArtifactViewer } from './ArtifactViewer'
-import { useKnowledgeArtifacts } from '../hooks/useKnowledgeArtifacts'
-import type { ArtifactPromptRequest, KnowledgeArtifactType } from '@/types/knowledge-artifact'
+
+export type KnowledgeWorkshopCapability = 'mind_map' | 'presentation' | 'briefing'
 
 interface ArtifactPanelProps {
-  knowledgeBaseId: number
-  selectedDocumentIds: number[]
-  onAdjustSources: (onApplied?: () => void) => void
-  onAvailableDocumentCountChange?: (count: number | null) => void
-  onProcessingDocumentCountChange?: (count: number) => void
-  onCanManageChange?: (canManage: boolean) => void
-  onAskNode?: (request: ArtifactPromptRequest) => void
-  onCreatePptDraft: () => void
-  refreshToken?: number
+  availableDocumentCount: number
+  onCreateDraft: (capability: KnowledgeWorkshopCapability) => void
 }
 
 interface CapabilityCardProps {
@@ -96,269 +65,45 @@ function CapabilityCard({
   )
 }
 
-export function ArtifactPanel({
-  knowledgeBaseId,
-  selectedDocumentIds,
-  onAdjustSources,
-  onAvailableDocumentCountChange,
-  onProcessingDocumentCountChange,
-  onCanManageChange,
-  onAskNode,
-  onCreatePptDraft,
-  refreshToken = 0,
-}: ArtifactPanelProps) {
+export function ArtifactPanel({ availableDocumentCount, onCreateDraft }: ArtifactPanelProps) {
   const { t } = useTranslation('knowledge')
-  const { toast } = useToast()
-  const {
-    items,
-    canManage,
-    availableDocumentCount,
-    processingDocumentCount,
-    isLoading,
-    error,
-    create,
-    rename,
-    retry,
-    remove,
-    refresh,
-  } = useKnowledgeArtifacts(knowledgeBaseId)
-  const previousRefreshTokenRef = useRef(refreshToken)
-  const [createOpen, setCreateOpen] = useState(false)
-  const [createType, setCreateType] = useState<KnowledgeArtifactType>('briefing')
-  const [createSessionKey, setCreateSessionKey] = useState(0)
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null)
-  const [pendingDeleteArtifactId, setPendingDeleteArtifactId] = useState<string | null>(null)
-  const selectedArtifact = useMemo(
-    () => items.find(item => item.artifact_id === selectedArtifactId) ?? null,
-    [items, selectedArtifactId]
-  )
-  const effectiveAvailableDocumentCount = availableDocumentCount ?? 0
-
-  useEffect(() => {
-    onAvailableDocumentCountChange?.(availableDocumentCount)
-  }, [availableDocumentCount, onAvailableDocumentCountChange])
-
-  useEffect(() => {
-    if (previousRefreshTokenRef.current === refreshToken) return
-    previousRefreshTokenRef.current = refreshToken
-    void refresh()
-  }, [refresh, refreshToken])
-
-  useEffect(() => {
-    if (isLoading || error) return
-    onProcessingDocumentCountChange?.(processingDocumentCount)
-    onCanManageChange?.(canManage)
-  }, [
-    canManage,
-    error,
-    isLoading,
-    onCanManageChange,
-    onProcessingDocumentCountChange,
-    processingDocumentCount,
-  ])
-
-  const showError = (nextError: unknown) => {
-    toast({
-      description: nextError instanceof Error ? nextError.message : t('artifact.operationFailed'),
-      variant: 'destructive',
-    })
-  }
-
-  const deleteArtifact = async (artifactId: string) => {
-    try {
-      await remove(artifactId)
-      if (selectedArtifactId === artifactId) {
-        setSelectedArtifactId(null)
-      }
-    } catch (nextError) {
-      showError(nextError)
-    }
-  }
-
-  const openCreate = (artifactType: KnowledgeArtifactType) => {
-    setCreateType(artifactType)
-    setCreateSessionKey(current => current + 1)
-    setCreateOpen(true)
-  }
+  const disabled = availableDocumentCount === 0
 
   return (
-    <div className="flex h-full flex-col" data-testid="artifact-panel">
-      <div className="mb-5">
-        <TooltipProvider delayDuration={300}>
-          <div className="grid grid-cols-2 gap-3">
-            {canManage && (
-              <CapabilityCard
-                icon={Network}
-                label={t('artifact.action.mind_map')}
-                description={t('artifact.type.mindMapHint')}
-                disabled={effectiveAvailableDocumentCount === 0}
-                onClick={() => openCreate('mind_map')}
-                testId="artifact-type-mind-map"
-              />
-            )}
-            <CapabilityCard
-              icon={Presentation}
-              label={t('artifact.action.presentation')}
-              description={t('artifact.type.presentationHint')}
-              disabled={availableDocumentCount === 0}
-              onClick={onCreatePptDraft}
-              testId="artifact-type-presentation"
-            />
-            {canManage && (
-              <>
-                <CapabilityCard
-                  icon={FileText}
-                  label={t('artifact.action.briefing')}
-                  description={t('artifact.type.briefingHint')}
-                  disabled={effectiveAvailableDocumentCount === 0}
-                  onClick={() => openCreate('briefing')}
-                  testId="artifact-type-briefing"
-                />
-              </>
-            )}
-          </div>
-        </TooltipProvider>
-        {!isLoading && !error && effectiveAvailableDocumentCount === 0 && (
-          <p className="mt-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-text-secondary">
-            {t(
-              processingDocumentCount > 0
-                ? 'artifact.documentsProcessingHint'
-                : 'artifact.noDocumentsHint'
-            )}
-          </p>
-        )}
-      </div>
-
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{t('artifact.recentGenerations')}</h3>
-        {items.some(item => item.status === 'queued' || item.status === 'running') && (
-          <span className="text-xs text-text-secondary">
-            {t('artifact.runningCount', {
-              count: items.filter(item => item.status === 'queued' || item.status === 'running')
-                .length,
-            })}
-          </span>
-        )}
-      </div>
-
-      {isLoading ? (
-        <div className="space-y-3">
-          <Skeleton className="h-24 w-full" />
-          <Skeleton className="h-24 w-full" />
+    <div data-testid="artifact-panel">
+      <TooltipProvider delayDuration={300}>
+        <div className="grid grid-cols-2 gap-3">
+          <CapabilityCard
+            icon={Network}
+            label={t('artifact.action.mind_map')}
+            description={t('artifact.type.mindMapHint')}
+            disabled={disabled}
+            onClick={() => onCreateDraft('mind_map')}
+            testId="artifact-type-mind-map"
+          />
+          <CapabilityCard
+            icon={Presentation}
+            label={t('artifact.action.presentation')}
+            description={t('artifact.type.presentationHint')}
+            disabled={disabled}
+            onClick={() => onCreateDraft('presentation')}
+            testId="artifact-type-presentation"
+          />
+          <CapabilityCard
+            icon={FileText}
+            label={t('artifact.action.briefing')}
+            description={t('artifact.type.briefingHint')}
+            disabled={disabled}
+            onClick={() => onCreateDraft('briefing')}
+            testId="artifact-type-briefing"
+          />
         </div>
-      ) : error && items.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center text-center">
-          <AlertCircle className="mb-2 h-8 w-8 text-error" />
-          <p className="text-sm text-text-secondary">{t('artifact.loadFailed')}</p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={() => void refresh(true)}
-            data-testid="artifact-refresh-button"
-          >
-            {t('artifact.retry')}
-          </Button>
-        </div>
-      ) : items.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-border px-5 py-8 text-center">
-          <p className="text-sm font-medium">{t('artifact.empty')}</p>
-          <p className="mt-1 text-xs text-text-secondary">
-            {t(canManage ? 'artifact.emptyHint' : 'artifact.emptyReadOnlyHint')}
-          </p>
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 space-y-2 overflow-auto pb-4">
-          {items.map(artifact => (
-            <ArtifactCard
-              key={artifact.artifact_id}
-              artifact={artifact}
-              onOpen={() => setSelectedArtifactId(artifact.artifact_id)}
-              onDelete={() => setPendingDeleteArtifactId(artifact.artifact_id)}
-            />
-          ))}
-        </div>
+      </TooltipProvider>
+      {disabled && (
+        <p className="mt-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-text-secondary">
+          {t('artifact.noDocumentsHint')}
+        </p>
       )}
-      <AlertDialog
-        open={pendingDeleteArtifactId !== null}
-        onOpenChange={open => !open && setPendingDeleteArtifactId(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('artifact.delete')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('artifact.deleteConfirm')}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t('artifact.cancel')}</AlertDialogCancel>
-            <AlertDialogAction
-              data-testid="artifact-delete-confirm"
-              onClick={() => {
-                if (!pendingDeleteArtifactId) return
-                const artifactId = pendingDeleteArtifactId
-                setPendingDeleteArtifactId(null)
-                void deleteArtifact(artifactId)
-              }}
-            >
-              {t('artifact.delete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {canManage && (
-        <ArtifactCreateDialog
-          key={createSessionKey}
-          open={createOpen}
-          onOpenChange={setCreateOpen}
-          artifactType={createType}
-          selectedDocumentIds={selectedDocumentIds}
-          knowledgeBaseDocumentCount={effectiveAvailableDocumentCount}
-          onAdjustSources={() => {
-            setCreateOpen(false)
-            onAdjustSources(() => setCreateOpen(true))
-          }}
-          onCreate={async request => {
-            try {
-              await create(request)
-              toast({ description: t('artifact.started') })
-            } catch (nextError) {
-              showError(nextError)
-              throw nextError
-            }
-          }}
-        />
-      )}
-      <ArtifactViewer
-        artifact={selectedArtifact}
-        canManage={canManage}
-        onClose={() => setSelectedArtifactId(null)}
-        onRename={async title => {
-          if (!selectedArtifact) return
-          try {
-            await rename(selectedArtifact.artifact_id, title)
-          } catch (nextError) {
-            showError(nextError)
-            throw nextError
-          }
-        }}
-        onRetry={async () => {
-          if (!selectedArtifact) return
-          try {
-            await retry(selectedArtifact.artifact_id)
-          } catch (nextError) {
-            showError(nextError)
-          }
-        }}
-        onDelete={async () => {
-          if (selectedArtifact) {
-            setPendingDeleteArtifactId(selectedArtifact.artifact_id)
-          }
-        }}
-        onAskNode={request => {
-          setSelectedArtifactId(null)
-          onAskNode?.(request)
-        }}
-      />
     </div>
   )
 }

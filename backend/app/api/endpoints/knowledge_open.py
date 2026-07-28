@@ -493,6 +493,8 @@ async def create_document_open(
         "trigger_indexing": True,
         "trigger_summary": True,
         "splitter_config": splitter_config_dict,
+        "content_kind": data.content_kind,
+        "origin_task_id": data.origin_task_id,
     }
 
     # Add source-specific parameters

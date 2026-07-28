@@ -100,6 +100,10 @@ export function deriveSaveToKnowledgeTitle(
   return fallbackTitle
 }
 
+export function containsMermaidMindMap(content: string): boolean {
+  return /```[ \t]*mermaid\b[\s\S]*?\bmindmap\b/i.test(content)
+}
+
 /**
  * Component to render a streaming message with typewriter effect.
  */
@@ -330,6 +334,8 @@ function MessagesArea({
   const [saveKnowledgeDraft, setSaveKnowledgeDraft] = useState<{
     title: string
     content: string
+    contentKind?: 'mind_map'
+    originTaskId?: number
   } | null>(null)
   const [knowledgeDocumentToView, setKnowledgeDocumentToView] =
     useState<KnowledgeDocumentViewTarget | null>(null)
@@ -1174,6 +1180,7 @@ function MessagesArea({
 
   const handleSaveToKnowledge = useCallback(
     (messageIndex: number, content: string) => {
+      const contentKind = containsMermaidMindMap(content) ? 'mind_map' : undefined
       setSaveKnowledgeDraft({
         title: deriveSaveToKnowledgeTitle(
           messages,
@@ -1181,9 +1188,11 @@ function MessagesArea({
           t('chat:saveToKnowledge.fallbackTitle')
         ),
         content,
+        contentKind,
+        originTaskId: contentKind ? selectedTaskDetail?.id : undefined,
       })
     },
-    [messages, t]
+    [messages, selectedTaskDetail?.id, t]
   )
 
   const handleKnowledgeDocumentCreated = useCallback(
@@ -1470,6 +1479,8 @@ function MessagesArea({
           }}
           initialTitle={saveKnowledgeDraft.title}
           initialContent={saveKnowledgeDraft.content}
+          contentKind={saveKnowledgeDraft.contentKind}
+          originTaskId={saveKnowledgeDraft.originTaskId}
           defaultKnowledgeBaseId={defaultSaveKnowledgeBaseId}
           onCreated={handleKnowledgeDocumentCreated}
         />

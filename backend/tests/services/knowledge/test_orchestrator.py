@@ -980,6 +980,63 @@ class TestKnowledgeOrchestrator:
                     call_args = mock_context.upload_attachment.call_args
                     assert call_args[1]["binary_data"] == b"file content"
 
+    def test_create_mind_map_records_origin_task(
+        self, orchestrator, mock_db, mock_user
+    ):
+        """Structured Markdown keeps only validated origin metadata."""
+        mock_user.id = 7
+        origin_task = MagicMock()
+        origin_task.json = {
+            "spec": {"knowledgeBaseRefs": [{"id": 11, "name": "source-kb"}]}
+        }
+
+        with patch(
+            "app.services.knowledge.orchestrator.KnowledgeService"
+        ) as mock_kb_service:
+            mock_kb_service.get_knowledge_base.return_value = (MagicMock(), True)
+            mock_kb_service.can_manage_knowledge_base_documents.return_value = True
+            mock_kb_service.create_document.return_value = MagicMock()
+
+            with patch(
+                "app.services.knowledge.orchestrator.task_store.get_owned_active_task",
+                return_value=origin_task,
+            ) as get_origin_task:
+                with patch("app.services.context.context_service") as mock_context:
+                    mock_context.upload_attachment.return_value = (
+                        MagicMock(id=1),
+                        None,
+                    )
+                    with patch(
+                        "app.services.knowledge.orchestrator."
+                        "KnowledgeDocumentResponse.model_validate",
+                        return_value=MagicMock(),
+                    ):
+                        orchestrator.create_document_with_content(
+                            db=mock_db,
+                            user=mock_user,
+                            knowledge_base_id=12,
+                            name="mind-map",
+                            source_type="text",
+                            content="```mermaid\nmindmap\n  root((Topic))\n```",
+                            file_extension="md",
+                            content_kind="mind_map",
+                            origin_task_id=42,
+                            trigger_indexing=False,
+                            trigger_summary=False,
+                        )
+
+        get_origin_task.assert_called_once_with(
+            mock_db,
+            task_id=42,
+            user_id=7,
+        )
+        data = mock_kb_service.create_document.call_args.kwargs["data"]
+        assert data.source_config == {
+            "content_kind": "mind_map",
+            "origin_task_id": 42,
+            "origin_knowledge_base_id": 11,
+        }
+
     def test_create_document_raises_for_missing_content(
         self, orchestrator, mock_db, mock_user
     ):

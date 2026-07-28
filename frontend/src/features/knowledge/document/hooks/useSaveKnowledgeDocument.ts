@@ -22,6 +22,8 @@ interface UseSaveKnowledgeDocumentOptions {
   open: boolean
   initialTitle: string
   initialContent: string
+  contentKind?: 'mind_map'
+  originTaskId?: number
   knowledgeBaseId?: number
   onSaved: (document: KnowledgeDocument) => void
   onError?: (error: SaveKnowledgeDocumentError) => void
@@ -41,6 +43,8 @@ export function useSaveKnowledgeDocument({
   open,
   initialTitle,
   initialContent,
+  contentKind,
+  originTaskId,
   knowledgeBaseId,
   onSaved,
   onError,
@@ -76,6 +80,8 @@ export function useSaveKnowledgeDocument({
         knowledge_base_id: knowledgeBaseId,
         name: trimmedTitle,
         content: trimmedContent,
+        ...(contentKind ? { content_kind: contentKind } : {}),
+        ...(originTaskId ? { origin_task_id: originTaskId } : {}),
       })
       onSaved(document)
     } catch (nextError) {

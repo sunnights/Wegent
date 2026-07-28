@@ -24,6 +24,8 @@ import {
   InlineImageViewer,
 } from '@/features/knowledge/multimodal/components/InlineImageViewer'
 import { resolveWikiLink } from '../utils/wikiLinkResolver'
+import { getTaskTargetHref } from '@/utils/taskRouting'
+import { useUser } from '@/features/common/UserContext'
 import type { KnowledgeDocument } from '@/types/knowledge'
 
 // Dynamically import EnhancedMarkdown for markdown preview
@@ -69,6 +71,7 @@ export function DocumentContentViewer({
 }: DocumentContentViewerProps) {
   const { t } = useTranslation('knowledge')
   const { theme } = useTheme()
+  const { user } = useUser()
   const router = useRouter()
 
   // Check if content is JSON
@@ -92,6 +95,34 @@ export function DocumentContentViewer({
   // Detect image documents: render the original image above the (Gemini-extracted)
   // text content so the user can see both the picture and its multimodal analysis.
   const isImageDocType = isImageDocument(document)
+  const originTaskId = Number(document.source_config.origin_task_id)
+  const originKnowledgeBaseId = Number(document.source_config.origin_knowledge_base_id)
+  const canOpenOriginTask =
+    document.source_config.content_kind === 'mind_map' &&
+    Number.isInteger(originTaskId) &&
+    originTaskId > 0 &&
+    user?.id === document.user_id
+  const hasOriginKnowledgeBase =
+    Number.isInteger(originKnowledgeBaseId) && originKnowledgeBaseId > 0
+
+  const handleMermaidNodeClick = useCallback(() => {
+    if (!canOpenOriginTask) return
+    router.push(
+      getTaskTargetHref({
+        id: originTaskId,
+        task_type: hasOriginKnowledgeBase ? 'knowledge' : 'chat',
+        knowledge_base_id: hasOriginKnowledgeBase ? originKnowledgeBaseId : undefined,
+      })
+    )
+    onOpenChange(false)
+  }, [
+    canOpenOriginTask,
+    hasOriginKnowledgeBase,
+    onOpenChange,
+    originKnowledgeBaseId,
+    originTaskId,
+    router,
+  ])
 
   // Handle wiki link clicks
   const handleWikiLinkClick = useCallback(
@@ -132,6 +163,7 @@ export function DocumentContentViewer({
     <EnhancedMarkdown
       source={content}
       theme={theme}
+      onMermaidNodeClick={canOpenOriginTask ? handleMermaidNodeClick : undefined}
       components={{
         a: ({
           href,

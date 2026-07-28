@@ -980,7 +980,9 @@
       "mindMapHint": "可浏览、展开并继续追问的知识导图",
       "presentationHint": "在新任务中制作演示文稿"
     },
-    "presentationPrompt": "请根据当前选中的知识库文档生成PPT",
+    "mind_mapPrompt": "请严格基于当前选中的知识库文档生成思维导图。使用 mermaid-diagram 技能，先给出一句简短说明，再输出一个经过语法校验的 ```mermaid mindmap 代码块。节点 ID 使用稳定的 ASCII 标识，最多 80 个节点、5 层，不要引入文档之外的事实。",
+    "presentationPrompt": "请根据当前选中的知识库文档生成 PPT。",
+    "briefingPrompt": "请严格基于当前选中的知识库文档生成一份结构清晰、包含关键结论和来源引用的 Markdown 简报。",
     "mindMap": {
       "ask": "问 AI",
       "expand": "展开节点",

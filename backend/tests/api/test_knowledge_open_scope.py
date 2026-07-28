@@ -103,9 +103,11 @@ def test_open_create_text_document_accepts_jwt_session(
             "knowledge_base_id": kb_id,
             "name": "Saved answer",
             "source_type": "text",
-            "content": "# Saved answer",
+            "content": "```mermaid\nmindmap\n  root((Saved answer))\n```",
             "file_extension": "md",
             "folder_id": 0,
+            "content_kind": "mind_map",
+            "origin_task_id": 42,
         },
     )
 
@@ -114,9 +116,11 @@ def test_open_create_text_document_accepts_jwt_session(
     assert captured["user"].id == test_user.id
     assert captured["knowledge_base_id"] == kb_id
     assert captured["source_type"] == "text"
-    assert captured["content"] == "# Saved answer"
+    assert captured["content"] == "```mermaid\nmindmap\n  root((Saved answer))\n```"
     assert captured["file_extension"] == "md"
     assert captured["folder_id"] == 0
+    assert captured["content_kind"] == "mind_map"
+    assert captured["origin_task_id"] == 42
 
 
 def test_open_create_text_document_rejects_reporter_before_attachment_upload(

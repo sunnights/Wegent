@@ -1243,6 +1243,8 @@ class KnowledgeOrchestrator:
         trigger_indexing: bool = True,
         trigger_summary: bool = True,
         splitter_config: Optional[Dict[str, Any]] = None,
+        content_kind: Optional[Literal["mind_map"]] = None,
+        origin_task_id: Optional[int] = None,
     ) -> KnowledgeDocumentResponse:
         """
         Create a document with complete workflow.
@@ -1264,6 +1266,8 @@ class KnowledgeOrchestrator:
             trigger_indexing: Whether to trigger RAG indexing
             trigger_summary: Whether to trigger summary generation
             splitter_config: Optional splitter configuration dict
+            content_kind: Optional structured Markdown content kind
+            origin_task_id: Task that generated the structured content
 
         Returns:
             KnowledgeDocumentResponse
@@ -1289,6 +1293,35 @@ class KnowledgeOrchestrator:
             raise ValueError(
                 "You do not have permission to add documents to this knowledge base"
             )
+
+        source_config: Dict[str, Any] = {}
+        if content_kind:
+            if source_type != "text" or not origin_task_id:
+                raise ValueError(
+                    "origin_task_id is required for structured text content"
+                )
+            origin_task = task_store.get_owned_active_task(
+                db,
+                task_id=origin_task_id,
+                user_id=user.id,
+            )
+            if not origin_task:
+                raise ValueError("Origin task not found or access denied")
+            knowledge_base_refs = origin_task.json.get("spec", {}).get(
+                "knowledgeBaseRefs"
+            )
+            origin_knowledge_base_id = (
+                knowledge_base_refs[0].get("id")
+                if isinstance(knowledge_base_refs, list)
+                and knowledge_base_refs
+                and isinstance(knowledge_base_refs[0], dict)
+                else None
+            )
+            source_config = {
+                "content_kind": content_kind,
+                "origin_task_id": origin_task_id,
+                "origin_knowledge_base_id": origin_knowledge_base_id,
+            }
 
         # Validate input based on source_type
         normalized_ext: str = DEFAULT_TEXT_FILE_EXTENSION
@@ -1374,6 +1407,7 @@ class KnowledgeOrchestrator:
                 file_extension=normalized_ext,
                 file_size=len(binary_data),
                 folder_id=folder_id,
+                source_config=source_config,
             )
 
             return self._create_and_index_document(
@@ -1408,6 +1442,7 @@ class KnowledgeOrchestrator:
             file_extension=normalized_ext,
             file_size=len(binary_data),
             folder_id=folder_id,
+            source_config=source_config,
         )
 
         return self._create_and_index_document(

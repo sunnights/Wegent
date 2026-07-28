@@ -39,6 +39,7 @@ const MermaidDiagram = dynamic(() => import('./MermaidDiagram'), {
 interface EnhancedMarkdownProps {
   source: string
   theme: 'light' | 'dark'
+  onMermaidNodeClick?: () => void
   /** Custom components to override default rendering */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   components?: Record<string, React.ComponentType<any>>
@@ -637,6 +638,7 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
   source,
   theme,
   components,
+  onMermaidNodeClick,
 }: EnhancedMarkdownProps) {
   // Extract frontmatter before processing
   const { frontmatter, body } = useMemo(() => extractFrontmatter(source), [source])
@@ -789,7 +791,13 @@ export const EnhancedMarkdown = memo(function EnhancedMarkdown({
       {frontmatter && <FrontmatterBlock yaml={frontmatter} />}
       {contentParts.map((part, index) => {
         if (part.type === 'mermaid') {
-          return <MermaidDiagram key={`mermaid-${index}`} code={part.content} />
+          return (
+            <MermaidDiagram
+              key={`mermaid-${index}`}
+              code={part.content}
+              onNodeClick={onMermaidNodeClick}
+            />
+          )
         }
 
         if (part.type === 'latex') {

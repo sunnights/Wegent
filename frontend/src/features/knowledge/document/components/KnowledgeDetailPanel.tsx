@@ -36,8 +36,8 @@ import {
 import { getKnowledgeBase } from '@/apis/knowledge'
 import type { KnowledgeBase, KnowledgeView } from '@/types/knowledge'
 import type { Team } from '@/types/api'
-import type { ArtifactPromptRequest } from '@/types/knowledge-artifact'
 import type { KnowledgeCapabilityDraftRequest } from '@/types/knowledge-capability'
+import type { KnowledgeWorkshopCapability } from '@/features/knowledge/artifact/components/ArtifactPanel'
 
 interface KnowledgeDetailPanelProps {
   /** Currently selected knowledge base */
@@ -89,9 +89,6 @@ export function KnowledgeDetailPanel({
   // Document panel collapsed state (for notebook mode)
   const [_isDocumentPanelCollapsed, setIsDocumentPanelCollapsed] = useState(false)
   const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<'chat' | 'workshop'>('chat')
-  const [artifactPromptRequest, setArtifactPromptRequest] = useState<ArtifactPromptRequest | null>(
-    null
-  )
   const [capabilityDraftRequest, setCapabilityDraftRequest] =
     useState<KnowledgeCapabilityDraftRequest | null>(null)
 
@@ -206,7 +203,6 @@ export function KnowledgeDetailPanel({
       setSelectedDocumentIds([])
       setIsDocumentPanelCollapsed(false)
       setMobileWorkspaceTab('chat')
-      setArtifactPromptRequest(null)
       setCapabilityDraftRequest(null)
     }
 
@@ -274,12 +270,6 @@ export function KnowledgeDetailPanel({
             selectedDocumentIds={selectedDocumentIds}
             guidedQuestions={selectedKb.guided_questions}
             inputAlwaysAtBottom={true}
-            externalPromptRequest={artifactPromptRequest}
-            onExternalPromptConsumed={requestId => {
-              setArtifactPromptRequest(current =>
-                current?.requestId === requestId ? null : current
-              )
-            }}
             externalDraftRequest={capabilityDraftRequest}
             onExternalDraftConsumed={requestId => {
               setCapabilityDraftRequest(current =>
@@ -310,14 +300,10 @@ export function KnowledgeDetailPanel({
           canManageDocuments={canUploadDocuments}
           initialDocPath={initialDocPath}
           initialDocumentId={initialDocumentId}
-          onAskArtifactNode={request => {
-            setArtifactPromptRequest(request)
-            setMobileWorkspaceTab('chat')
-          }}
-          onCreatePptDraft={() => {
+          onCreateCapabilityDraft={(capability: KnowledgeWorkshopCapability) => {
             setCapabilityDraftRequest({
-              requestId: `presentation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              message: t('artifact.presentationPrompt'),
+              requestId: `${capability}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              message: t(`artifact.${capability}Prompt`),
             })
             setMobileWorkspaceTab('chat')
           }}

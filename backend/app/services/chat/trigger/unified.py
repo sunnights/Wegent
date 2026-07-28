@@ -52,7 +52,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SELECTED_KB_PRELOAD_SKILL = "wegent-knowledge"
-KNOWLEDGE_ARTIFACT_SOURCE = "knowledge_artifact"
 CODEX_RUNTIME = "codex"
 RUNTIME_MODEL_TYPE = "runtime"
 EXECUTOR_ATTACHMENT_METADATA_ONLY_SHELLS = {"ClaudeCode", "Agno", "CodeX", "Codex"}
@@ -818,19 +817,14 @@ async def build_execution_request(
             user_subtask_id if user_subtask_id else processed_subtask_id
         )
         if context_subtask_id:
-            preload_selected_kb_skill = (
-                task_labels.get("source") != KNOWLEDGE_ARTIFACT_SOURCE
-            )
             request = await _process_contexts(
                 db,
                 request,
                 context_subtask_id,
                 user.id,
-                preload_selected_kb_skill=preload_selected_kb_skill,
             )
             if (
-                preload_selected_kb_skill
-                and device_id
+                device_id
                 and request.knowledge_base_ids
                 and request.is_user_selected_kb
                 and SELECTED_KB_PRELOAD_SKILL not in (request.skill_names or [])
@@ -858,8 +852,6 @@ async def _process_contexts(
     request: "ExecutionRequest",
     user_subtask_id: int,
     user_id: int,
-    *,
-    preload_selected_kb_skill: bool = True,
 ) -> "ExecutionRequest":
     """Process contexts (attachments, knowledge bases, etc.) for the request.
 
@@ -916,8 +908,7 @@ async def _process_contexts(
         request.kb_tool_access_mode = ctx.kb.kb_tool_access_mode
         if ctx.kb.document_ids and not ctx.kb.knowledge_base_scopes:
             request.document_ids = ctx.kb.document_ids
-        if preload_selected_kb_skill:
-            _ensure_selected_kb_skill_priority(request)
+        _ensure_selected_kb_skill_priority(request)
 
     logger.info(
         "[ai_trigger_unified] Context processing completed: "

@@ -10,8 +10,10 @@ import { Button } from '@/components/ui/button'
 import type { KnowledgeBase, KnowledgeDocument, SplitterConfig } from '@/types/knowledge'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { ArtifactPanel } from '@/features/knowledge/artifact/components/ArtifactPanel'
-import { ArtifactSourceDialog } from '@/features/knowledge/artifact/components/ArtifactSourceDialog'
+import {
+  ArtifactPanel,
+  type KnowledgeWorkshopCapability,
+} from '@/features/knowledge/artifact/components/ArtifactPanel'
 import {
   ArtifactSourceSelector,
   type ArtifactSourceScope,
@@ -22,7 +24,6 @@ import { useDocuments } from '../hooks/useDocuments'
 import { findDocumentForDeepLink } from '../utils/document-lookup'
 import { useModelSupportsVideo } from '@/features/knowledge/multimodal/hooks/useModelSupportsVideo'
 import { createWebDocument } from '@/apis/knowledge'
-import type { ArtifactPromptRequest } from '@/types/knowledge-artifact'
 import { createDocumentsFromAttachments } from '../utils/document-creation'
 
 const EMPTY_DOCUMENT_IDS: number[] = []
@@ -83,8 +84,7 @@ interface DocumentPanelProps {
   initialDocPath?: string
   /** Stable document identity for deep links. */
   initialDocumentId?: number
-  onAskArtifactNode?: (request: ArtifactPromptRequest) => void
-  onCreatePptDraft: () => void
+  onCreateCapabilityDraft: (capability: KnowledgeWorkshopCapability) => void
 }
 
 const MIN_WIDTH = 280
@@ -113,20 +113,15 @@ export function DocumentPanel({
   canManageDocuments = false,
   initialDocPath,
   initialDocumentId,
-  onAskArtifactNode,
-  onCreatePptDraft,
+  onCreateCapabilityDraft,
 }: DocumentPanelProps) {
   const { t } = useTranslation('knowledge')
   const { t: tCommon } = useTranslation('common')
 
-  const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
   const [viewingDocument, setViewingDocument] = useState<KnowledgeDocument | null>(null)
-  const [canManageArtifacts, setCanManageArtifacts] = useState<boolean | null>(null)
-  const [availableDocumentCount, setAvailableDocumentCount] = useState<number | null>(null)
-  const [processingDocumentCount, setProcessingDocumentCount] = useState(0)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [sourceRefreshToken, setSourceRefreshToken] = useState(0)
-  const sourceApplyContinuationRef = useRef<(() => void) | null>(null)
+  const [documentCount, setDocumentCount] = useState(knowledgeBase.document_count)
   const modelSupportsVideo = useModelSupportsVideo(knowledgeBase)
   const { create: createDocument } = useDocuments({
     knowledgeBaseId: knowledgeBase.id,
@@ -154,6 +149,10 @@ export function DocumentPanel({
   useEffect(() => {
     setIsInitialized(true)
   }, [])
+
+  useEffect(() => {
+    setDocumentCount(knowledgeBase.document_count)
+  }, [knowledgeBase.document_count, knowledgeBase.id])
 
   // Notify parent when collapsed state changes
   useEffect(() => {
@@ -192,15 +191,6 @@ export function DocumentPanel({
     })
   }, [saveCollapsed])
 
-  const openSourceDialog = useCallback((onApplied?: () => void) => {
-    sourceApplyContinuationRef.current = onApplied ?? null
-    setSourceDialogOpen(true)
-  }, [])
-
-  const handleSourceDialogOpenChange = useCallback((open: boolean) => {
-    setSourceDialogOpen(open)
-  }, [])
-
   const handleInlineSourceScopeChange = (scope: ArtifactSourceScope) => {
     onDocumentSelectionChange?.(scope.mode === 'all' ? [] : Array.from(scope.documentIds))
   }
@@ -225,7 +215,11 @@ export function DocumentPanel({
       createDocument,
       fallbackError: t('document.document.createFailed'),
     })
-    if (results.some(result => result.documentId !== undefined)) refreshSources()
+    const createdCount = results.filter(result => result.documentId !== undefined).length
+    if (createdCount > 0) {
+      setDocumentCount(current => current + createdCount)
+      refreshSources()
+    }
     return results
   }
 
@@ -239,6 +233,7 @@ export function DocumentPanel({
       folder_id: 0,
     })
     setUploadOpen(false)
+    setDocumentCount(current => current + 1)
     refreshSources()
   }
 
@@ -248,6 +243,7 @@ export function DocumentPanel({
       throw new Error(result.error_message || t('document.document.createFailed'))
     }
     setUploadOpen(false)
+    setDocumentCount(current => current + 1)
     refreshSources()
   }
 
@@ -405,13 +401,7 @@ export function DocumentPanel({
 
         <div className="mx-4 mt-4 shrink-0" data-testid="artifact-source-summary">
           <div className="mb-2 flex min-h-11 items-center justify-between gap-2 md:min-h-8">
-            <h3 className="text-sm font-semibold">
-              {t(
-                canManageArtifacts === false
-                  ? 'artifact.sourceBrowser.documents'
-                  : 'artifact.source'
-              )}
-            </h3>
+            <h3 className="text-sm font-semibold">{t('artifact.source')}</h3>
             {canManageDocuments && (
               <Button
                 variant="outline"
@@ -426,13 +416,13 @@ export function DocumentPanel({
             )}
           </div>
           <ArtifactSourceSelector
+            key={sourceRefreshToken}
             knowledgeBaseId={knowledgeBase.id}
             scope={sourceScope}
-            availableDocumentCount={availableDocumentCount ?? knowledgeBase.document_count}
-            processingDocumentCount={processingDocumentCount}
+            availableDocumentCount={documentCount}
             compact
-            purpose={canManageArtifacts === false ? 'question' : 'workspace'}
-            defaultDocumentsExpanded={canManageArtifacts === null ? undefined : !canManageArtifacts}
+            purpose="workspace"
+            defaultDocumentsExpanded
             onScopeChange={handleInlineSourceScopeChange}
             onOpenDocument={setViewingDocument}
           />
@@ -440,32 +430,11 @@ export function DocumentPanel({
 
         <div className="min-h-0 flex-1 overflow-hidden px-4 pb-4 pt-5">
           <ArtifactPanel
-            knowledgeBaseId={knowledgeBase.id}
-            selectedDocumentIds={selectedDocumentIds}
-            refreshToken={sourceRefreshToken}
-            onAdjustSources={openSourceDialog}
-            onAvailableDocumentCountChange={setAvailableDocumentCount}
-            onProcessingDocumentCountChange={setProcessingDocumentCount}
-            onCanManageChange={setCanManageArtifacts}
-            onAskNode={onAskArtifactNode}
-            onCreatePptDraft={onCreatePptDraft}
+            availableDocumentCount={documentCount}
+            onCreateDraft={onCreateCapabilityDraft}
           />
         </div>
       </div>
-
-      <ArtifactSourceDialog
-        knowledgeBaseId={knowledgeBase.id}
-        open={sourceDialogOpen}
-        selectedDocumentIds={selectedDocumentIds}
-        availableDocumentCount={availableDocumentCount}
-        onOpenChange={handleSourceDialogOpenChange}
-        onApply={documentIds => {
-          const continuation = sourceApplyContinuationRef.current
-          onDocumentSelectionChange?.(documentIds)
-          sourceApplyContinuationRef.current = null
-          continuation?.()
-        }}
-      />
 
       <DocumentDetailDialog
         open={!!viewingDocument}

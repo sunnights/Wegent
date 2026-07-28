@@ -5,6 +5,7 @@
 import React from 'react'
 import { act, render, screen } from '@testing-library/react'
 import MessagesArea, {
+  containsMermaidMindMap,
   deriveSaveToKnowledgeTitle,
 } from '@/features/tasks/components/message/MessagesArea'
 import type { DisplayMessage } from '@/features/tasks/presentation/useMessagePresenter'
@@ -214,6 +215,13 @@ describe('deriveSaveToKnowledgeTitle', () => {
     ]
 
     expect(deriveSaveToKnowledgeTitle(messages, 1, 'fallback')).toBe('Deployment guide')
+  })
+})
+
+describe('containsMermaidMindMap', () => {
+  it('recognizes a Mermaid mindmap block only', () => {
+    expect(containsMermaidMindMap('```mermaid\nmindmap\n  root((Topic))\n```')).toBe(true)
+    expect(containsMermaidMindMap('```mermaid\ngraph TD\n  A --> B\n```')).toBe(false)
   })
 })
 

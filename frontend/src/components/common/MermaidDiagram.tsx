@@ -28,6 +28,7 @@ import { useTheme } from '@/features/theme/ThemeProvider'
 export interface MermaidDiagramProps {
   code: string
   className?: string
+  onNodeClick?: () => void
 }
 
 /**
@@ -41,7 +42,7 @@ export interface MermaidDiagramProps {
  * - Fullscreen modal view
  * - Error handling with fallback to raw code
  */
-export function MermaidDiagram({ code, className = '' }: MermaidDiagramProps) {
+export function MermaidDiagram({ code, className = '', onNodeClick }: MermaidDiagramProps) {
   const { t } = useTranslation()
   const { theme } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -63,6 +64,16 @@ export function MermaidDiagram({ code, className = '' }: MermaidDiagramProps) {
   const [showCode, setShowCode] = useState(false)
   const [codeCopied, setCodeCopied] = useState(false)
   const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null)
+
+  const handleNodeClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!onNodeClick || !(event.target instanceof Element)) return
+      if (event.target.closest('.mindmap-node, [data-id], [data-node]')) {
+        onNodeClick()
+      }
+    },
+    [onNodeClick]
+  )
 
   // Generate unique ID for this diagram instance
   const diagramId = useMemo(() => `mermaid-${Math.random().toString(36).substr(2, 9)}`, [])
@@ -973,8 +984,11 @@ export function MermaidDiagram({ code, className = '' }: MermaidDiagramProps) {
               }}
             >
               <div
-                className="max-h-[calc(100vh-8rem)] max-w-[calc(100vw-4rem)] overflow-auto rounded-2xl bg-white p-8 shadow-2xl transition-all duration-100 ease-out dark:bg-slate-900"
-                onClick={e => e.stopPropagation()}
+                className={`max-h-[calc(100vh-8rem)] max-w-[calc(100vw-4rem)] overflow-auto rounded-2xl bg-white p-8 shadow-2xl transition-all duration-100 ease-out dark:bg-slate-900 ${onNodeClick ? '[&_.mindmap-node]:cursor-pointer [&_[data-id]]:cursor-pointer [&_[data-node]]:cursor-pointer' : ''}`}
+                onClick={event => {
+                  event.stopPropagation()
+                  handleNodeClick(event)
+                }}
                 dangerouslySetInnerHTML={{ __html: svgContent }}
               />
             </div>
@@ -1014,8 +1028,9 @@ export function MermaidDiagram({ code, className = '' }: MermaidDiagramProps) {
         {/* Diagram content */}
         <div
           ref={diagramRef}
-          className="max-h-[620px] min-h-[220px] overflow-auto bg-[radial-gradient(circle_at_1px_1px,rgba(148,163,184,0.20)_1px,transparent_0)] bg-[length:20px_20px] p-4 dark:bg-[radial-gradient(circle_at_1px_1px,rgba(71,85,105,0.35)_1px,transparent_0)] sm:p-6"
+          className={`max-h-[620px] min-h-[220px] overflow-auto bg-[radial-gradient(circle_at_1px_1px,rgba(148,163,184,0.20)_1px,transparent_0)] bg-[length:20px_20px] p-4 dark:bg-[radial-gradient(circle_at_1px_1px,rgba(71,85,105,0.35)_1px,transparent_0)] sm:p-6 ${onNodeClick ? '[&_.mindmap-node]:cursor-pointer [&_[data-id]]:cursor-pointer [&_[data-node]]:cursor-pointer' : ''}`}
           onWheel={handleWheel}
+          onClick={handleNodeClick}
         >
           <div className="flex min-w-fit justify-center">
             <div

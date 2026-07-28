@@ -72,7 +72,6 @@ import type { QuickPresetSelection } from './quick-launch/types'
 import { useDevices } from '@/contexts/DeviceContext'
 import { filterTeamsByMode, type TeamModeFilter } from '../selector/team-selector-utils'
 import type { UnifiedMessage } from '@wegent/chat-core'
-import type { ArtifactPromptRequest } from '@/types/knowledge-artifact'
 import type { KnowledgeCapabilityDraftRequest } from '@/types/knowledge-capability'
 import { getFirstSearchParam, getSearchParam, stringifySearchParams } from '@/lib/search-params'
 import { removeTaskQueryParams } from '@/features/tasks/utils/task-query-params'
@@ -199,9 +198,6 @@ interface ChatAreaProps {
   emptyStateContent?: React.ReactNode
   /** Extension for team editing functionality (injected from parent to avoid module coupling) */
   extension?: ChatAreaExtension
-  /** One-shot prompt submitted through the normal chat send path. */
-  externalPromptRequest?: ArtifactPromptRequest | null
-  onExternalPromptConsumed?: (requestId: string) => void
   /** One-shot request that opens and prefills a new task without sending. */
   externalDraftRequest?: KnowledgeCapabilityDraftRequest | null
   onExternalDraftConsumed?: (requestId: string) => void
@@ -231,8 +227,6 @@ function ChatAreaContent({
   inputAlwaysAtBottom,
   emptyStateContent,
   extension,
-  externalPromptRequest,
-  onExternalPromptConsumed,
   externalDraftRequest,
   onExternalDraftConsumed,
 }: ChatAreaProps) {
@@ -1058,21 +1052,6 @@ function ChatAreaContent({
       streamHandlers,
     ]
   )
-
-  const consumedExternalPromptRef = useRef<string | null>(null)
-  useEffect(() => {
-    if (
-      !externalPromptRequest ||
-      consumedExternalPromptRef.current === externalPromptRequest.requestId
-    ) {
-      return
-    }
-    consumedExternalPromptRef.current = externalPromptRequest.requestId
-    onExternalPromptConsumed?.(externalPromptRequest.requestId)
-    void sendOrConfirmPendingReplacement(externalPromptRequest.message, {
-      artifactContext: externalPromptRequest.artifactContext,
-    })
-  }, [externalPromptRequest, onExternalPromptConsumed, sendOrConfirmPendingReplacement])
 
   const consumedExternalDraftRef = useRef<string | null>(null)
   const applyExternalDraft = useCallback(

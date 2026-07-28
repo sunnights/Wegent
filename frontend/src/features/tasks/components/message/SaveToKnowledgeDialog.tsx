@@ -55,6 +55,8 @@ export interface SaveToKnowledgeDialogProps {
   onOpenChange: (open: boolean) => void
   initialTitle: string
   initialContent: string
+  contentKind?: 'mind_map'
+  originTaskId?: number
   defaultKnowledgeBaseId?: number
   onCreated: (document: KnowledgeDocument, knowledgeBase: KnowledgeBaseWithGroupInfo) => void
 }
@@ -98,6 +100,8 @@ export function SaveToKnowledgeDialog({
   onOpenChange,
   initialTitle,
   initialContent,
+  contentKind,
+  originTaskId,
   defaultKnowledgeBaseId,
   onCreated,
 }: SaveToKnowledgeDialogProps) {
@@ -174,6 +178,8 @@ export function SaveToKnowledgeDialog({
     open,
     initialTitle,
     initialContent,
+    contentKind,
+    originTaskId,
     knowledgeBaseId: selectedOption?.knowledgeBase.id,
     onSaved: document => {
       if (!selectedOption) return

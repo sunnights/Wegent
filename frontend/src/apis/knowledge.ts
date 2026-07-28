@@ -152,6 +152,8 @@ export interface CreateTextKnowledgeDocumentRequest {
   knowledge_base_id: number
   name: string
   content: string
+  content_kind?: 'mind_map'
+  origin_task_id?: number
 }
 
 /**

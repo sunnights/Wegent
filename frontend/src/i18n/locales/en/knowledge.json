@@ -980,7 +980,9 @@
       "mindMapHint": "Explore, expand, and ask follow-up questions",
       "presentationHint": "Create a presentation in a new task"
     },
-    "presentationPrompt": "Generate a PPT based on the currently selected knowledge base documents",
+    "mind_mapPrompt": "Generate a mind map strictly from the currently selected knowledge base documents. Use the mermaid-diagram skill, provide one short introductory sentence, then output a syntax-validated ```mermaid mindmap code block. Use stable ASCII node IDs, no more than 80 nodes or 5 levels, and do not introduce facts outside the documents.",
+    "presentationPrompt": "Generate a PPT based on the currently selected knowledge base documents.",
+    "briefingPrompt": "Generate a well-structured Markdown briefing strictly from the currently selected knowledge base documents, including key conclusions and source citations.",
     "mindMap": {
       "ask": "Ask AI",
       "expand": "Expand node",
