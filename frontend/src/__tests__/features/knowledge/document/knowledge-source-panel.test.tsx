@@ -5,12 +5,12 @@
 import '@testing-library/jest-dom'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { KnowledgeSourcePanel } from '@/features/knowledge/document/components/KnowledgeSourcePanel'
-import type { ArtifactSourceScope } from '@/features/knowledge/artifact/components/ArtifactSourceSelector'
 import type { KnowledgeBase, KnowledgeDocument } from '@/types/knowledge'
 
 const mockDocumentDetailDialog = jest.fn((_props: unknown) => null)
-const mockArtifactSourceSelector = jest.fn()
+const mockDocumentItem = jest.fn()
 const mockCreateDocument = jest.fn()
+const mockRefreshDocuments = jest.fn()
 const mockFindDocumentForDeepLink = jest.fn()
 
 jest.mock('@/hooks/useTranslation', () => ({
@@ -23,19 +23,26 @@ jest.mock('@/features/knowledge/document/components/WorkspaceSidePanel', () => (
   WorkspaceSidePanel: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
 
-jest.mock('@/features/knowledge/artifact/components/ArtifactSourceSelector', () => ({
-  ArtifactSourceSelector: (props: { onScopeChange: (scope: ArtifactSourceScope) => void }) => {
-    mockArtifactSourceSelector(props)
+jest.mock('@/features/knowledge/document/components/DocumentItem', () => ({
+  DocumentItem: (props: {
+    document: KnowledgeDocument
+    selected: boolean
+    compact: boolean
+    onSelect?: (document: KnowledgeDocument, selected: boolean) => void
+    onViewDetail?: (document: KnowledgeDocument) => void
+  }) => {
+    mockDocumentItem(props)
     return (
-      <button
-        data-testid="mock-select-source"
-        onClick={() =>
-          props.onScopeChange({
-            mode: 'selected',
-            documentIds: new Set([11]),
-          })
-        }
-      />
+      <div>
+        <button
+          data-testid={`mock-select-document-${props.document.id}`}
+          onClick={() => props.onSelect?.(props.document, !props.selected)}
+        />
+        <button
+          data-testid={`mock-open-document-${props.document.id}`}
+          onClick={() => props.onViewDetail?.(props.document)}
+        />
+      </div>
     )
   },
 }))
@@ -68,6 +75,28 @@ jest.mock('@/features/knowledge/document/components/DocumentDetailDialog', () =>
 jest.mock('@/features/knowledge/document/hooks/useDocuments', () => ({
   useDocuments: () => ({
     create: mockCreateDocument,
+    documents: [
+      {
+        id: 7,
+        name: 'guide.md',
+        is_active: true,
+        index_status: 'success',
+      },
+      {
+        id: 11,
+        name: 'draft.md',
+        is_active: true,
+        index_status: 'success',
+      },
+    ],
+    loading: false,
+    error: null,
+    refresh: mockRefreshDocuments,
+    page: 1,
+    pageSize: 20,
+    totalCount: 2,
+    totalPages: 1,
+    goToPage: jest.fn(),
   }),
 }))
 
@@ -194,7 +223,7 @@ describe('KnowledgeSourcePanel', () => {
     )
   })
 
-  it('keeps the source list expanded and reports one shared source scope', () => {
+  it('uses the main compact document cards and reports one shared source scope', () => {
     const onDocumentSelectionChange = jest.fn()
     render(
       <KnowledgeSourcePanel
@@ -204,18 +233,23 @@ describe('KnowledgeSourcePanel', () => {
       />
     )
 
-    expect(mockArtifactSourceSelector).toHaveBeenLastCalledWith(
+    expect(mockDocumentItem).toHaveBeenCalledWith(
       expect.objectContaining({
-        defaultDocumentsExpanded: true,
-        purpose: 'workspace',
-        scope: {
-          mode: 'selected',
-          documentIds: new Set([7]),
-        },
+        compact: true,
+        selected: true,
+        document: expect.objectContaining({ id: 7 }),
       })
     )
 
-    fireEvent.click(screen.getByTestId('mock-select-source'))
-    expect(onDocumentSelectionChange).toHaveBeenCalledWith([11])
+    fireEvent.click(screen.getByTestId('mock-select-document-11'))
+    expect(onDocumentSelectionChange).toHaveBeenCalledWith([7, 11])
+  })
+
+  it('refreshes the document list without remounting when sources change', () => {
+    const { rerender } = render(<KnowledgeSourcePanel {...defaultProps} />)
+
+    rerender(<KnowledgeSourcePanel {...defaultProps} refreshToken={1} />)
+
+    expect(mockRefreshDocuments).toHaveBeenCalledTimes(1)
   })
 })
