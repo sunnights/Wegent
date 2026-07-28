@@ -10,6 +10,7 @@ import type { KnowledgeBase, KnowledgeDocument, KnowledgeFolder } from '@/types/
 
 let mockDocuments: KnowledgeDocument[] = []
 let mockFolders: KnowledgeFolder[] = []
+const mockFolderTree = jest.fn()
 
 jest.mock('@/hooks/useTranslation', () => ({
   useTranslation: () => ({
@@ -93,7 +94,26 @@ jest.mock('@/features/knowledge/document/components/RetrievalTestDialog', () => 
   RetrievalTestDialog: () => null,
 }))
 jest.mock('@/features/knowledge/document/components/FolderTree', () => ({
-  FolderTree: () => null,
+  FolderTree: (props: {
+    documents: KnowledgeDocument[]
+    selectedIds: Set<number>
+    isSelectionDisabled?: (document: KnowledgeDocument) => boolean
+    onSelect?: (document: KnowledgeDocument, selected: boolean) => void
+  }) => {
+    mockFolderTree(props)
+    return (
+      <div>
+        {props.documents.map(document => (
+          <button
+            key={document.id}
+            data-testid={`compact-select-document-${document.id}`}
+            disabled={props.isSelectionDisabled?.(document)}
+            onClick={() => props.onSelect?.(document, !props.selectedIds.has(document.id))}
+          />
+        ))}
+      </div>
+    )
+  },
 }))
 jest.mock('@/features/knowledge/document/components/knowledge-document-tree-grid', () => ({
   KnowledgeDocumentTreeGrid: ({
@@ -203,6 +223,7 @@ describe('DocumentList summary header', () => {
   beforeEach(() => {
     mockDocuments = []
     mockFolders = []
+    mockFolderTree.mockClear()
   })
 
   it('shows inline summary edit button when manual summary exists after AI failure', () => {
@@ -283,5 +304,43 @@ describe('DocumentList summary header', () => {
     render(<DocumentList knowledgeBase={createKnowledgeBase({ document_count: 1 })} />)
 
     expect(screen.getByTestId('expand-all-toggle')).toBeInTheDocument()
+  })
+
+  it('renders the compact add-source action as a full-width row', () => {
+    render(<DocumentList knowledgeBase={createKnowledgeBase()} canUpload compact fullWidthUpload />)
+
+    expect(screen.getByTestId('document-add-source-full-width')).toHaveClass('w-full')
+  })
+
+  it('keeps controlled source selection and disables unavailable documents', () => {
+    const available = createDocument({ id: 10 })
+    const unavailable = createDocument({
+      id: 11,
+      name: 'unavailable.txt',
+      is_active: false,
+      index_status: 'failed',
+    })
+    mockDocuments = [available, unavailable]
+    const onSelectionChange = jest.fn()
+
+    render(
+      <DocumentList
+        knowledgeBase={createKnowledgeBase({ document_count: 2 })}
+        compact
+        selectedDocumentIds={[10]}
+        onSelectionChange={onSelectionChange}
+      />
+    )
+
+    expect(mockFolderTree).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        selectedIds: new Set([10]),
+      })
+    )
+    expect(screen.getByTestId('compact-select-document-11')).toBeDisabled()
+
+    onSelectionChange.mockClear()
+    fireEvent.click(screen.getByTestId('compact-select-document-10'))
+    expect(onSelectionChange).toHaveBeenCalledWith([])
   })
 })

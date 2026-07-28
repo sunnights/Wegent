@@ -88,7 +88,7 @@ export function KnowledgeDetailPanel({
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<number[]>([])
   const [availableDocumentCount, setAvailableDocumentCount] = useState<number | null>(null)
   const [processingDocumentCount, setProcessingDocumentCount] = useState(0)
-  const [canManageArtifacts, setCanManageArtifacts] = useState<boolean | null>(null)
+  const [, setCanManageArtifacts] = useState<boolean | null>(null)
   const [sourceRefreshToken, setSourceRefreshToken] = useState(0)
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
   const sourceApplyContinuationRef = useRef<(() => void) | null>(null)
@@ -276,16 +276,18 @@ export function KnowledgeDetailPanel({
           key={`sources-${selectedKb.id}`}
           knowledgeBase={selectedKb}
           selectedDocumentIds={selectedDocumentIds}
-          availableDocumentCount={availableDocumentCount}
           processingDocumentCount={processingDocumentCount}
-          canManageArtifacts={canManageArtifacts}
-          canManageDocuments={canUploadDocuments}
+          canUploadDocuments={canUploadDocuments}
+          canManageAllDocuments={canManageKb}
           mobileVisible={mobileWorkspaceTab === 'sources'}
           refreshToken={sourceRefreshToken}
+          groupInfo={groupInfo}
+          onGroupClick={onGroupClick}
           isOrganization={groupInfo?.groupType === 'organization'}
           initialDocPath={initialDocPath}
           initialDocumentId={initialDocumentId}
           onDocumentSelectionChange={setSelectedDocumentIds}
+          onRefreshKnowledgeBase={handleRefreshKnowledgeBase}
           onSourcesChanged={() => setSourceRefreshToken(current => current + 1)}
         />
 

@@ -25,6 +25,7 @@ import {
   FolderInput,
   ArrowRightLeft,
   ChevronRight,
+  Plus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -171,6 +172,9 @@ function DocAutoOpener({
 // Re-export KbGroupInfo from types for backwards compatibility
 export type { KbGroupInfo } from '@/types/knowledge'
 
+const canUseAsKnowledgeSource = (document: KnowledgeDocument) =>
+  document.is_active && document.index_status === 'success'
+
 interface DocumentListProps {
   knowledgeBase: KnowledgeBase
   onBack?: () => void
@@ -180,6 +184,16 @@ interface DocumentListProps {
   compact?: boolean
   /** Callback when document selection changes (for notebook mode context injection) */
   onSelectionChange?: (documentIds: number[]) => void
+  /** Controlled selection used when another panel can also change the source scope. */
+  selectedDocumentIds?: number[]
+  /** Refresh the browser without remounting it. */
+  refreshToken?: number
+  /** Continue polling while documents outside the visible page are processing. */
+  processingDocumentCount?: number
+  /** Notify the workspace after document mutations. */
+  onDocumentsChanged?: () => void
+  /** Render the add-source action as a dedicated full-width row. */
+  fullWidthUpload?: boolean
   /** Callback to refresh knowledge base details (used after summary retry) */
   onRefreshKnowledgeBase?: () => void
   /** Optional header actions to display next to the title (e.g., tabs) */
@@ -218,6 +232,11 @@ export function DocumentList({
   canManageAllDocuments = false,
   compact = false,
   onSelectionChange,
+  selectedDocumentIds: controlledSelectedDocumentIds,
+  refreshToken = 0,
+  processingDocumentCount = 0,
+  onDocumentsChanged,
+  fullWidthUpload = false,
   onRefreshKnowledgeBase,
   headerActions,
   groupInfo,
@@ -233,6 +252,7 @@ export function DocumentList({
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
   // 0 = root level, positive number = subfolder id
   const [currentFolderId, setCurrentFolderId] = useState<number>(0)
+  const previousRefreshTokenRef = useRef(refreshToken)
   // Expand-all view: show full folder+document tree when KB document_count < 200
   const [isExpandAllView, setIsExpandAllView] = useState(false)
 
@@ -355,7 +375,7 @@ export function DocumentList({
   const [editingDoc, setEditingDoc] = useState<KnowledgeDocument | null>(null)
   const [deletingDoc, setDeletingDoc] = useState<KnowledgeDocument | null>(null)
   const {
-    selectedDocumentIds,
+    selectedDocumentIds: internalSelectedDocumentIds,
     selectedFolderIds,
     summary: selectionSummary,
     resetSelection,
@@ -369,15 +389,24 @@ export function DocumentList({
     documents,
     treeIndex: fullTree.index,
   })
+  const selectionIsControlled = controlledSelectedDocumentIds !== undefined
+  const selectedDocumentIds = useMemo(
+    () =>
+      selectionIsControlled ? new Set(controlledSelectedDocumentIds) : internalSelectedDocumentIds,
+    [controlledSelectedDocumentIds, internalSelectedDocumentIds, selectionIsControlled]
+  )
+  const resetSelectionForNavigation = useCallback(() => {
+    if (!selectionIsControlled) resetSelection()
+  }, [resetSelection, selectionIsControlled])
 
   // Navigate into a subfolder (layered navigation)
   const handleNavigateIntoFolder = useCallback(
     (folderId: number) => {
       setCurrentFolderId(folderId)
       setSearchQuery('')
-      resetSelection()
+      resetSelectionForNavigation()
     },
-    [resetSelection]
+    [resetSelectionForNavigation]
   )
 
   // Toggle expand-all view
@@ -385,9 +414,9 @@ export function DocumentList({
     if (!isExpandAllView) {
       setCurrentFolderId(0)
     }
-    resetSelection()
+    resetSelectionForNavigation()
     setIsExpandAllView(prev => !prev)
-  }, [isExpandAllView, resetSelection])
+  }, [isExpandAllView, resetSelectionForNavigation])
   const [batchLoading, setBatchLoading] = useState(false)
   const [showSearchPopover, setShowSearchPopover] = useState(false)
   // Track if initialDocPath has been handled
@@ -516,42 +545,62 @@ export function DocumentList({
   // documents to narrow the chat context; otherwise the whole KB is available
   // through retrieval without injecting every document into context.
   useEffect(() => {
-    if (onSelectionChange) {
+    if (onSelectionChange && !selectionIsControlled) {
       skipNextSelectionNotifyRef.current = true
       resetSelection()
       onSelectionChange([])
     }
-  }, [knowledgeBase.id, onSelectionChange, resetSelection])
+  }, [knowledgeBase.id, onSelectionChange, resetSelection, selectionIsControlled])
 
   // Notify parent when selection changes.
   useEffect(() => {
-    if (onSelectionChange) {
+    if (onSelectionChange && !selectionIsControlled) {
       if (skipNextSelectionNotifyRef.current) {
         skipNextSelectionNotifyRef.current = false
         return
       }
       onSelectionChange(Array.from(selectedDocumentIds))
     }
-  }, [selectedDocumentIds, onSelectionChange])
+  }, [selectedDocumentIds, onSelectionChange, selectionIsControlled])
 
   useEffect(() => {
-    resetSelection()
-  }, [currentFolderId, isExpandAllView, searchQuery, sortField, sortOrder, resetSelection])
+    resetSelectionForNavigation()
+  }, [
+    currentFolderId,
+    isExpandAllView,
+    searchQuery,
+    sortField,
+    sortOrder,
+    resetSelectionForNavigation,
+  ])
 
   useEffect(() => {
     if (currentFolderId !== 0 && !folderTreeContainsId(folders, currentFolderId)) {
       setCurrentFolderId(0)
-      resetSelection()
+      resetSelectionForNavigation()
     }
-  }, [folders, currentFolderId, resetSelection])
+  }, [folders, currentFolderId, resetSelectionForNavigation])
 
   // Auto-exit expand-all view if KB document count exceeds the threshold
   useEffect(() => {
     if (isExpandAllView && (knowledgeBase.document_count ?? 0) >= 200) {
       setIsExpandAllView(false)
-      resetSelection()
+      resetSelectionForNavigation()
     }
-  }, [isExpandAllView, knowledgeBase.document_count, resetSelection])
+  }, [isExpandAllView, knowledgeBase.document_count, resetSelectionForNavigation])
+
+  useEffect(() => {
+    if (previousRefreshTokenRef.current === refreshToken) return
+    previousRefreshTokenRef.current = refreshToken
+    void refresh()
+    void fetchFolders()
+  }, [fetchFolders, refresh, refreshToken])
+
+  useEffect(() => {
+    if (processingDocumentCount <= 0) return
+    const timer = window.setInterval(() => void refresh(), 5000)
+    return () => window.clearInterval(timer)
+  }, [processingDocumentCount, refresh])
 
   const canManageAnyDocuments = canUpload || canManageAllDocuments
   const canManageDocumentArea = canManageAnyDocuments
@@ -561,6 +610,14 @@ export function DocumentList({
 
   const canSelectDocument = (document: KnowledgeDocument) =>
     Boolean(onSelectionChange) || canManageDocument(document)
+  const isDocumentSelectionDisabled = (document: KnowledgeDocument) =>
+    Boolean(onSelectionChange) && !canUseAsKnowledgeSource(document)
+  const getDocumentSelectionDisabledHint = (document: KnowledgeDocument) =>
+    t(
+      document.index_status === 'not_indexed'
+        ? 'document.document.indexStatus.notIndexedHint'
+        : 'document.document.indexStatus.unavailableHint'
+    )
 
   const folderSelectionBlocksDocumentBatchActions = selectionSummary.hasFolderScopeSelection
   const documentBatchActionsDisabled = shouldDisableDocumentBatchActions({
@@ -575,18 +632,18 @@ export function DocumentList({
 
   const handleGoToPage = useCallback(
     (targetPage: number) => {
-      resetSelection()
+      resetSelectionForNavigation()
       goToPage(targetPage)
     },
-    [resetSelection, goToPage]
+    [resetSelectionForNavigation, goToPage]
   )
 
   const handlePageSizeChange = useCallback(
     (targetPageSize: number) => {
-      resetSelection()
+      resetSelectionForNavigation()
       changePageSize(targetPageSize)
     },
-    [changePageSize, resetSelection]
+    [changePageSize, resetSelectionForNavigation]
   )
 
   const handleUploadComplete = async (
@@ -597,7 +654,7 @@ export function DocumentList({
       image?: string | null
     }
   ) => {
-    return createDocumentsFromAttachments({
+    const results = await createDocumentsFromAttachments({
       attachments,
       folderId: selectedUploadFolderId || 0,
       splitterConfig,
@@ -605,6 +662,8 @@ export function DocumentList({
       createDocument: create,
       fallbackError: t('document.document.createFailed'),
     })
+    if (results.some(result => result.documentId !== undefined)) onDocumentsChanged?.()
+    return results
   }
 
   const handleTableAdd = async (data: TableDocument) => {
@@ -617,6 +676,7 @@ export function DocumentList({
       folder_id: selectedUploadFolderId || 0,
     })
     setShowUpload(false)
+    onDocumentsChanged?.()
   }
 
   const handleWebAdd = async (url: string, name?: string) => {
@@ -635,13 +695,14 @@ export function DocumentList({
     await refresh()
 
     // Auto-select newly created document (for notebook mode context injection)
-    if (onSelectionChange && result.document?.id) {
+    if (onSelectionChange && !selectionIsControlled && result.document?.id) {
       const nextSelectedIds = new Set(selectedDocumentIds)
       nextSelectedIds.add(result.document.id)
       setDocumentSelection(nextSelectedIds)
     }
 
     setShowUpload(false)
+    onDocumentsChanged?.()
   }
 
   const handleDelete = async () => {
@@ -649,13 +710,21 @@ export function DocumentList({
     try {
       await remove(deletingDoc.id)
       setDeletingDoc(null)
+      onDocumentsChanged?.()
     } catch {
       // Error handled by hook
     }
   }
   // Batch selection handlers
   const handleSelectDoc = (doc: KnowledgeDocument, selected: boolean) => {
-    selectDocument(doc, selected)
+    if (!selectionIsControlled) {
+      selectDocument(doc, selected)
+      return
+    }
+    const next = new Set(selectedDocumentIds)
+    if (selected) next.add(doc.id)
+    else next.delete(doc.id)
+    onSelectionChange?.(Array.from(next))
   }
 
   // Folder selection handler: folder checkbox represents a backend-resolved scope.
@@ -667,13 +736,27 @@ export function DocumentList({
   )
 
   const handleSelectAll = (checked: boolean) => {
-    selectVisibleDocuments(checked)
+    if (!selectionIsControlled) {
+      selectVisibleDocuments(checked)
+      return
+    }
+    const next = new Set(selectedDocumentIds)
+    documents.filter(canUseAsKnowledgeSource).forEach(document => {
+      if (checked) next.add(document.id)
+      else next.delete(document.id)
+    })
+    onSelectionChange?.(Array.from(next))
   }
 
+  const selectableDocuments = onSelectionChange
+    ? documents.filter(canUseAsKnowledgeSource)
+    : documents
   const isAllSelected =
-    documents.length > 0 && documents.every(doc => selectedDocumentIds.has(doc.id))
+    selectableDocuments.length > 0 &&
+    selectableDocuments.every(doc => selectedDocumentIds.has(doc.id))
 
-  const isPartialSelected = documents.some(doc => selectedDocumentIds.has(doc.id)) && !isAllSelected
+  const isPartialSelected =
+    selectableDocuments.some(doc => selectedDocumentIds.has(doc.id)) && !isAllSelected
 
   // Batch operations using batch API
   const handleBatchDelete = async () => {
@@ -683,6 +766,7 @@ export function DocumentList({
     try {
       await batchDelete(payload.documentIds)
       resetSelection()
+      onDocumentsChanged?.()
     } catch {
       // Error handled by hook
     } finally {
@@ -705,6 +789,7 @@ export function DocumentList({
 
       // Refresh document list to show updated data
       await refresh()
+      onDocumentsChanged?.()
     } catch {
       // Error will be shown via toast in the API layer
     } finally {
@@ -734,6 +819,7 @@ export function DocumentList({
       // refresh is guaranteed to see it. Mirrors how newly-uploaded docs (which
       // enter the list already in an active status) get live progress updates.
       await refresh()
+      onDocumentsChanged?.()
     } catch (err) {
       // Use ApiError.errorCode for structured error handling
       let errorMessage = t('document.document.reindexFailed')
@@ -880,12 +966,13 @@ export function DocumentList({
           refresh()
           fetchFolders()
           setShowTransfer(false)
+          onDocumentsChanged?.()
         }
       } finally {
         setIsTransferring(false)
       }
     },
-    [getSelectionPayload, transfer, resetSelection, refresh, fetchFolders]
+    [getSelectionPayload, transfer, resetSelection, refresh, fetchFolders, onDocumentsChanged]
   )
   // Knowledge base type info
   const isNotebook = (knowledgeBase.kb_type || 'notebook') === 'notebook'
@@ -1025,13 +1112,25 @@ export function DocumentList({
       </div>
       {canManageAllDocuments && <EditKnowledgeBaseSummaryDialog {...editorDialogProps} />}
 
+      {canUpload && fullWidthUpload && (
+        <Button
+          variant="outline"
+          className="h-11 w-full"
+          onClick={handleOpenUpload}
+          data-testid="document-add-source-full-width"
+        >
+          <Plus className="mr-1.5 h-4 w-4" />
+          {t('document.document.upload')}
+        </Button>
+      )}
+
       {/* Folder breadcrumb navigation (layered nav only) */}
       {!isExpandAllView && (
         <div className="flex items-center gap-1 text-sm text-text-muted flex-wrap">
           <button
             onClick={() => {
               setCurrentFolderId(0)
-              resetSelection()
+              resetSelectionForNavigation()
             }}
             className={`hover:text-text-primary transition-colors ${currentFolderId === 0 ? 'text-text-primary font-medium' : ''}`}
             data-testid="breadcrumb-root"
@@ -1045,7 +1144,7 @@ export function DocumentList({
                 <button
                   onClick={() => {
                     setCurrentFolderId(folder.id)
-                    resetSelection()
+                    resetSelectionForNavigation()
                   }}
                   className="hover:text-text-primary transition-colors"
                   data-testid={`breadcrumb-folder-${folder.id}`}
@@ -1158,7 +1257,7 @@ export function DocumentList({
         )}
 
         {/* Upload button */}
-        {canUpload && (
+        {canUpload && !fullWidthUpload && (
           <Button variant="primary" size="sm" onClick={handleOpenUpload}>
             <Upload className="w-4 h-4 mr-1" />
             {t('document.document.upload')}
@@ -1281,8 +1380,8 @@ export function DocumentList({
                     </span>
                   </button>
                   <span className="text-text-muted">
-                    ({documents.filter(doc => selectedDocumentIds.has(doc.id)).length}/
-                    {documents.length})
+                    ({selectableDocuments.filter(doc => selectedDocumentIds.has(doc.id)).length}/
+                    {selectableDocuments.length})
                   </span>
                 </div>
               )}
@@ -1301,6 +1400,8 @@ export function DocumentList({
                 reindexingDocId={reindexingDocId}
                 canManage={canManageDocument}
                 canSelect={canSelectDocument}
+                isSelectionDisabled={isDocumentSelectionDisabled}
+                getSelectionDisabledHint={getDocumentSelectionDisabledHint}
                 selectedIds={selectedDocumentIds}
                 includedInFolderScope={isDocumentIncludedInFolderScope}
                 onSelect={handleSelectDoc}
