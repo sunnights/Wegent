@@ -889,6 +889,13 @@
     "tools": "工具",
     "showTools": "展开工具面板",
     "hideTools": "收起工具面板",
+    "generation": "内容生成",
+    "showSources": "展开知识来源",
+    "hideSources": "收起知识来源",
+    "resizeSources": "调整知识来源栏宽度",
+    "showGeneration": "展开内容生成",
+    "hideGeneration": "收起内容生成",
+    "resizeGeneration": "调整内容生成栏宽度",
     "recentGenerations": "最近生成",
     "runningCount": "{{count}} 个进行中",
     "noDocumentsHint": "知识库暂无可用文档，请先添加来源。",
@@ -970,7 +977,9 @@
       }
     },
     "mobile": {
-      "chat": "对话"
+      "sources": "来源",
+      "chat": "对话",
+      "generation": "生成"
     },
     "type": {
       "briefing": "简报",

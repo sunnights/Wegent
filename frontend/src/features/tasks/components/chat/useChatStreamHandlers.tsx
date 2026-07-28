@@ -103,7 +103,7 @@ export interface UseChatStreamHandlersOptions {
   // Callback when a new task is created (used for binding knowledge base)
   onTaskCreated?: (taskId: number) => void
 
-  // Selected document IDs from DocumentPanel (for notebook mode context injection)
+  // Selected document IDs from KnowledgeSourcePanel (for notebook mode context injection)
   selectedDocumentIds?: number[]
 
   // Skill selection

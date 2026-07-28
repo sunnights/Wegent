@@ -889,6 +889,13 @@
     "tools": "Tools",
     "showTools": "Show tools panel",
     "hideTools": "Collapse tools panel",
+    "generation": "Content generation",
+    "showSources": "Show knowledge sources",
+    "hideSources": "Collapse knowledge sources",
+    "resizeSources": "Resize knowledge sources panel",
+    "showGeneration": "Show content generation",
+    "hideGeneration": "Collapse content generation",
+    "resizeGeneration": "Resize content generation panel",
     "recentGenerations": "Recent generations",
     "runningCount": "{{count}} in progress",
     "noDocumentsHint": "This knowledge base has no available documents. Add sources first.",
@@ -970,7 +977,9 @@
       }
     },
     "mobile": {
-      "chat": "Chat"
+      "sources": "Sources",
+      "chat": "Chat",
+      "generation": "Generate"
     },
     "type": {
       "briefing": "Briefing",

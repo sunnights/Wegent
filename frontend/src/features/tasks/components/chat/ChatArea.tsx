@@ -183,7 +183,7 @@ interface ChatAreaProps {
   onTaskCreated?: (taskId: number) => void
   /** Knowledge base ID for knowledge type tasks */
   knowledgeBaseId?: number
-  /** Selected document IDs from DocumentPanel (for notebook mode context injection) */
+  /** Selected document IDs from KnowledgeSourcePanel (for notebook mode context injection) */
   selectedDocumentIds?: number[]
   /** Reason why input is disabled (e.g., device offline). If set, input will be disabled and show this message. */
   disabledReason?: string

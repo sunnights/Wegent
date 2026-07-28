@@ -109,6 +109,24 @@ describe('ArtifactSourceSelector', () => {
     expect(refreshMock).toHaveBeenCalledTimes(1)
   })
 
+  it('refreshes an expanded source list immediately after adding a source', () => {
+    const props = {
+      knowledgeBaseId: 12,
+      scope: { mode: 'all' as const },
+      availableDocumentCount: 1,
+      compact: true,
+      defaultDocumentsExpanded: true,
+      refreshToken: 0,
+      onScopeChange: jest.fn(),
+    }
+    const { rerender } = render(<ArtifactSourceSelector {...props} />)
+
+    refreshMock.mockClear()
+    rerender(<ArtifactSourceSelector {...props} refreshToken={1} />)
+
+    expect(refreshMock).toHaveBeenCalledTimes(1)
+  })
+
   it('resets the compact browser when the knowledge base changes', () => {
     const props = {
       knowledgeBaseId: 12,

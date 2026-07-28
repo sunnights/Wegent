@@ -14,8 +14,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { Wrench, Library, FileText, MessageSquare, Shield } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Files, Library, FileText, MessageSquare, Shield, WandSparkles } from 'lucide-react'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useUser } from '@/features/common/UserContext'
@@ -23,8 +22,10 @@ import { useTeamContext } from '@/contexts/TeamContext'
 import { useTaskSession } from '@/features/tasks/session/TaskSession'
 import { ChatArea } from '@/features/tasks/components/chat'
 import { DocumentList, type KbGroupInfo } from './DocumentList'
-import { DocumentPanel } from './DocumentPanel'
+import { KnowledgeSourcePanel } from './KnowledgeSourcePanel'
 import { KnowledgeBaseSummaryCard } from './KnowledgeBaseSummaryCard'
+import { ArtifactWorkspacePanel } from '@/features/knowledge/artifact/components/ArtifactWorkspacePanel'
+import { ArtifactSourceDialog } from '@/features/knowledge/artifact/components/ArtifactSourceDialog'
 import { PermissionManagementTab } from '../../permission/components/PermissionManagementTab'
 import { useKnowledgePermissions } from '../../permission/hooks/useKnowledgePermissions'
 import { useNamespaceRoleMap } from '../hooks/useNamespaceRoleMap'
@@ -85,10 +86,15 @@ export function KnowledgeDetailPanel({
 
   // State for selected document IDs (for notebook mode context injection)
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<number[]>([])
-
-  // Document panel collapsed state (for notebook mode)
-  const [_isDocumentPanelCollapsed, setIsDocumentPanelCollapsed] = useState(false)
-  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<'chat' | 'workshop'>('chat')
+  const [availableDocumentCount, setAvailableDocumentCount] = useState<number | null>(null)
+  const [processingDocumentCount, setProcessingDocumentCount] = useState(0)
+  const [canManageArtifacts, setCanManageArtifacts] = useState<boolean | null>(null)
+  const [sourceRefreshToken, setSourceRefreshToken] = useState(0)
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
+  const sourceApplyContinuationRef = useRef<(() => void) | null>(null)
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<'sources' | 'chat' | 'generation'>(
+    'chat'
+  )
   const [artifactPromptRequest, setArtifactPromptRequest] = useState<ArtifactPromptRequest | null>(
     null
   )
@@ -128,6 +134,11 @@ export function KnowledgeDetailPanel({
     const nextKb = await getKnowledgeBase(selectedKb.id)
     onSyncKnowledgeBase(nextKb)
   }, [selectedKb, onSyncKnowledgeBase])
+
+  const openSourceDialog = useCallback((onApplied?: () => void) => {
+    sourceApplyContinuationRef.current = onApplied ?? null
+    setSourceDialogOpen(true)
+  }, [])
 
   // Check if user can manage this knowledge base
   const canManageKb = useMemo(() => {
@@ -204,7 +215,11 @@ export function KnowledgeDetailPanel({
     if (isInitialKnowledgeBase || isKbSwitch) {
       setActiveTab('documents')
       setSelectedDocumentIds([])
-      setIsDocumentPanelCollapsed(false)
+      setAvailableDocumentCount(null)
+      setProcessingDocumentCount(0)
+      setCanManageArtifacts(null)
+      setSourceDialogOpen(false)
+      sourceApplyContinuationRef.current = null
       setMobileWorkspaceTab('chat')
       setArtifactPromptRequest(null)
       setCapabilityDraftRequest(null)
@@ -225,38 +240,58 @@ export function KnowledgeDetailPanel({
     }
   }, [selectedKb?.id, currentView, selectTask])
 
-  // In Notebook view, show chat interface with document panel.
-  // Simplified layout: direct left-right split without extra header bars
+  // In Notebook view, organize the workflow as sources -> conversation -> generation.
   if (selectedKb && currentView === 'notebook') {
     return (
       <div
-        className="flex flex-1 flex-col overflow-hidden bg-base lg:flex-row"
+        className="flex flex-1 flex-col overflow-hidden bg-base xl:flex-row"
         data-testid="knowledge-detail-notebook"
       >
-        <div className="grid grid-cols-2 border-b border-border p-2 lg:hidden">
-          <Button
-            variant={mobileWorkspaceTab === 'chat' ? 'secondary' : 'ghost'}
-            className="h-11"
-            onClick={() => setMobileWorkspaceTab('chat')}
-            data-testid="knowledge-mobile-chat-tab"
-          >
-            <MessageSquare className="mr-1.5 h-4 w-4" />
-            {t('artifact.mobile.chat')}
-          </Button>
-          <Button
-            variant={mobileWorkspaceTab === 'workshop' ? 'secondary' : 'ghost'}
-            className="h-11"
-            onClick={() => setMobileWorkspaceTab('workshop')}
-            data-testid="knowledge-mobile-workshop-tab"
-          >
-            <Wrench className="mr-1.5 h-4 w-4" />
-            {t('artifact.tools')}
-          </Button>
-        </div>
+        <Tabs
+          value={mobileWorkspaceTab}
+          onValueChange={value => setMobileWorkspaceTab(value as 'sources' | 'chat' | 'generation')}
+          className="border-b border-border p-2 xl:hidden"
+        >
+          <TabsList className="grid h-11 w-full grid-cols-3">
+            <TabsTrigger value="sources" className="h-9" data-testid="knowledge-mobile-sources-tab">
+              <Files className="mr-1.5 h-4 w-4" />
+              {t('artifact.mobile.sources')}
+            </TabsTrigger>
+            <TabsTrigger value="chat" className="h-9" data-testid="knowledge-mobile-chat-tab">
+              <MessageSquare className="mr-1.5 h-4 w-4" />
+              {t('artifact.mobile.chat')}
+            </TabsTrigger>
+            <TabsTrigger
+              value="generation"
+              className="h-9"
+              data-testid="knowledge-mobile-generation-tab"
+            >
+              <WandSparkles className="mr-1.5 h-4 w-4" />
+              {t('artifact.mobile.generation')}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
 
-        {/* Chat area - left side */}
+        <KnowledgeSourcePanel
+          key={`sources-${selectedKb.id}`}
+          knowledgeBase={selectedKb}
+          selectedDocumentIds={selectedDocumentIds}
+          availableDocumentCount={availableDocumentCount}
+          processingDocumentCount={processingDocumentCount}
+          canManageArtifacts={canManageArtifacts}
+          canManageDocuments={canUploadDocuments}
+          mobileVisible={mobileWorkspaceTab === 'sources'}
+          refreshToken={sourceRefreshToken}
+          isOrganization={groupInfo?.groupType === 'organization'}
+          initialDocPath={initialDocPath}
+          initialDocumentId={initialDocumentId}
+          onDocumentSelectionChange={setSelectedDocumentIds}
+          onSourcesChanged={() => setSourceRefreshToken(current => current + 1)}
+        />
+
         <div
-          className={`${mobileWorkspaceTab === 'chat' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col lg:flex`}
+          className={`${mobileWorkspaceTab === 'chat' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col xl:flex`}
+          data-testid="knowledge-workspace-chat"
         >
           <ChatArea
             teams={filteredTeams}
@@ -298,19 +333,17 @@ export function KnowledgeDetailPanel({
           />
         </div>
 
-        {/* Right panel - Document context selection */}
-        <DocumentPanel
-          key={selectedKb.id}
-          knowledgeBase={selectedKb}
-          onDocumentSelectionChange={setSelectedDocumentIds}
+        <ArtifactWorkspacePanel
+          key={`generation-${selectedKb.id}`}
+          knowledgeBaseId={selectedKb.id}
           selectedDocumentIds={selectedDocumentIds}
-          onCollapsedChange={setIsDocumentPanelCollapsed}
-          mobileVisible={mobileWorkspaceTab === 'workshop'}
-          isOrganization={groupInfo?.groupType === 'organization'}
-          canManageDocuments={canUploadDocuments}
-          initialDocPath={initialDocPath}
-          initialDocumentId={initialDocumentId}
-          onAskArtifactNode={request => {
+          refreshToken={sourceRefreshToken}
+          mobileVisible={mobileWorkspaceTab === 'generation'}
+          onAdjustSources={openSourceDialog}
+          onAvailableDocumentCountChange={setAvailableDocumentCount}
+          onProcessingDocumentCountChange={setProcessingDocumentCount}
+          onCanManageChange={setCanManageArtifacts}
+          onAskNode={request => {
             setArtifactPromptRequest(request)
             setMobileWorkspaceTab('chat')
           }}
@@ -320,6 +353,20 @@ export function KnowledgeDetailPanel({
               message: t('artifact.presentationPrompt'),
             })
             setMobileWorkspaceTab('chat')
+          }}
+        />
+
+        <ArtifactSourceDialog
+          knowledgeBaseId={selectedKb.id}
+          open={sourceDialogOpen}
+          selectedDocumentIds={selectedDocumentIds}
+          availableDocumentCount={availableDocumentCount}
+          onOpenChange={setSourceDialogOpen}
+          onApply={documentIds => {
+            const continuation = sourceApplyContinuationRef.current
+            setSelectedDocumentIds(documentIds)
+            sourceApplyContinuationRef.current = null
+            continuation?.()
           }}
         />
       </div>

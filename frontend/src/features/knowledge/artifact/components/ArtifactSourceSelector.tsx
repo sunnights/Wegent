@@ -27,6 +27,7 @@ interface ArtifactSourceSelectorProps {
   compact?: boolean
   purpose?: ArtifactSourcePurpose
   defaultDocumentsExpanded?: boolean
+  refreshToken?: number
   onScopeChange: (scope: ArtifactSourceScope) => void
   onOpenDocument?: (document: KnowledgeDocument) => void
 }
@@ -50,6 +51,7 @@ export function ArtifactSourceSelector({
   compact = false,
   purpose = 'generation',
   defaultDocumentsExpanded,
+  refreshToken = 0,
   onScopeChange,
   onOpenDocument,
 }: ArtifactSourceSelectorProps) {
@@ -59,6 +61,7 @@ export function ArtifactSourceSelector({
   const expansionInitializedRef = useRef(false)
   const previousKnowledgeBaseIdRef = useRef(knowledgeBaseId)
   const previousAvailableDocumentCountRef = useRef(availableDocumentCount)
+  const previousRefreshTokenRef = useRef(refreshToken)
   const selectedDocumentIds = scope.mode === 'selected' ? scope.documentIds : new Set<number>()
   const { documents, loading, error, page, pageSize, totalCount, totalPages, goToPage, refresh } =
     useDocuments({
@@ -109,6 +112,14 @@ export function ArtifactSourceSelector({
     window.addEventListener('focus', handleFocus)
     return () => window.removeEventListener('focus', handleFocus)
   }, [active, documentsExpanded, refresh])
+
+  useEffect(() => {
+    if (previousRefreshTokenRef.current === refreshToken) return
+    previousRefreshTokenRef.current = refreshToken
+    if (active && documentsExpanded) {
+      void refresh()
+    }
+  }, [active, documentsExpanded, refresh, refreshToken])
 
   useEffect(() => {
     if (!active || !documentsExpanded || processingDocumentCount <= 0) return
