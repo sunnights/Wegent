@@ -168,6 +168,67 @@ class TestGetDingtalkDocs:
 
 
 @pytest.mark.api
+class TestImportDingtalkSnapshot:
+    """Tests for POST /dingtalk-docs/import-snapshot."""
+
+    @patch("app.tasks.knowledge_tasks.import_dingtalk_snapshot_task.delay")
+    @patch(
+        "app.api.endpoints.dingtalk_docs.DingTalkDocService.is_configured",
+        return_value=True,
+    )
+    @patch(
+        "app.api.endpoints.dingtalk_docs.DingTalkSnapshotImportService._resolve_document_nodes",
+        return_value=[MagicMock()],
+    )
+    @patch(
+        "app.api.endpoints.dingtalk_docs.DingTalkSnapshotImportService._assert_target_writable"
+    )
+    def test_imports_selected_nodes(
+        self,
+        mock_assert_writable: MagicMock,
+        mock_resolve_nodes: MagicMock,
+        mock_is_configured: MagicMock,
+        mock_delay: MagicMock,
+        dingtalk_client: TestClient,
+        test_user: User,
+    ) -> None:
+        mock_delay.return_value.id = "task-1"
+
+        response = dingtalk_client.post(
+            "/dingtalk-docs/import-snapshot",
+            json={"knowledge_base_id": 8, "node_ids": [3]},
+        )
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "task_id": "task-1",
+            "knowledge_base_id": 8,
+            "selected_count": 1,
+        }
+        mock_delay.assert_called_once_with(
+            user_id=test_user.id,
+            knowledge_base_id=8,
+            node_ids=[3],
+        )
+
+    @patch(
+        "app.api.endpoints.dingtalk_docs.DingTalkSnapshotImportService._assert_target_writable",
+        side_effect=PermissionError("denied"),
+    )
+    def test_returns_403_without_target_write_permission(
+        self,
+        mock_import: MagicMock,
+        dingtalk_client: TestClient,
+    ) -> None:
+        response = dingtalk_client.post(
+            "/dingtalk-docs/import-snapshot",
+            json={"knowledge_base_id": 8, "node_ids": [3]},
+        )
+
+        assert response.status_code == 403
+
+
+@pytest.mark.api
 class TestSyncDingtalkDocs:
     """Tests for POST /dingtalk-docs/sync."""
 

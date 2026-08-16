@@ -44,3 +44,9 @@ export interface DingtalkSyncResult {
   total: number
   sync_time: string
 }
+
+export interface DingtalkSnapshotImportQueuedResponse {
+  task_id: string
+  knowledge_base_id: number
+  selected_count: number
+}

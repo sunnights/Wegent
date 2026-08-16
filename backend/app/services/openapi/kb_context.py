@@ -10,16 +10,11 @@ for knowledge bases specified in API requests.
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.subtask_context import ContextStatus, ContextType, SubtaskContext
-from app.services.knowledge.task_knowledge_base_service import (
-    task_knowledge_base_service,
-)
 from app.services.openapi.kb_resolver import (
     KnowledgeBaseNameResolver,
     ResolvedKnowledgeBase,
@@ -53,8 +48,6 @@ class KnowledgeBaseContextCreator:
         self,
         subtask_id: int,
         kb_names: List[dict],
-        task=None,
-        user_name: Optional[str] = None,
     ) -> List[SubtaskContext]:
         """
         Create SubtaskContext records for knowledge bases.
@@ -66,9 +59,6 @@ class KnowledgeBaseContextCreator:
         Args:
             subtask_id: ID of the subtask to attach contexts to
             kb_names: List of dicts with 'namespace' and 'name' keys
-            task: Optional task to sync selected KBs into task-level refs
-            user_name: Optional user name used as boundBy during task-level sync
-
         Returns:
             List of created SubtaskContext records
         """
@@ -106,13 +96,6 @@ class KnowledgeBaseContextCreator:
                 subtask_id,
                 [ctx.id for ctx in contexts],
             )
-
-            if task is not None and user_name:
-                self._sync_resolved_refs_to_task(
-                    task=task,
-                    resolved_refs=resolution_result.resolved,
-                    user_name=user_name,
-                )
 
         return contexts
 
@@ -164,68 +147,6 @@ class KnowledgeBaseContextCreator:
         )
 
         return context
-
-    def _sync_resolved_refs_to_task(
-        self,
-        task,
-        resolved_refs: List[ResolvedKnowledgeBase],
-        user_name: str,
-    ) -> None:
-        """Sync API-selected KB refs to task-level scope metadata."""
-        self._replace_task_scope_refs(task, resolved_refs, user_name)
-
-        for ref in resolved_refs:
-            if ref.scope_restricted:
-                continue
-            synced = task_knowledge_base_service.sync_subtask_kb_to_task(
-                db=self.db,
-                task=task,
-                knowledge_id=ref.kb_id,
-                user_id=self.user_id,
-                user_name=user_name,
-            )
-            if synced:
-                logger.info(
-                    "[KBContextCreator] Synced KB %s to task %s from subtask-level selection",
-                    ref.kb_id,
-                    task.id,
-                )
-
-    def _replace_task_scope_refs(
-        self,
-        task,
-        resolved_refs: List[ResolvedKnowledgeBase],
-        user_name: str,
-    ) -> None:
-        """Replace task-level API scope refs with the current request selection."""
-        task_json = task.json if isinstance(task.json, dict) else {}
-        spec = task_json.setdefault("spec", {})
-        bound_at = datetime.now(timezone.utc).isoformat()
-
-        spec["knowledgeBaseScopes"] = [
-            {
-                "id": ref.kb_id,
-                "namespace": ref.namespace,
-                "name": ref.name,
-                "scopeRestricted": ref.scope_restricted,
-                "folderIds": ref.folder_ids,
-                "explicitDocumentIds": ref.explicit_document_ids,
-                "includeSubfolders": ref.include_subfolders,
-                "boundBy": user_name,
-                "boundAt": bound_at,
-            }
-            for ref in resolved_refs
-        ]
-
-        task_json["spec"] = spec
-        task.json = task_json
-        flag_modified(task, "json")
-        self.db.commit()
-        logger.info(
-            "[KBContextCreator] Replaced task %s knowledgeBaseScopes with %d refs",
-            task.id,
-            len(resolved_refs),
-        )
 
 
 def get_task_knowledge_base_scope_refs(task) -> list[dict]:

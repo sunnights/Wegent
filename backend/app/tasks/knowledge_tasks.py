@@ -30,6 +30,36 @@ from app.services.knowledge.processing_errors import (
 logger = logging.getLogger(__name__)
 
 
+@celery_app.task(name="app.tasks.knowledge_tasks.import_dingtalk_snapshot")
+def import_dingtalk_snapshot_task(
+    user_id: int,
+    knowledge_base_id: int,
+    node_ids: list[int],
+) -> dict:
+    """Fetch DingTalk content and queue Wegent indexing as the initiating user."""
+    from app.models.user import User
+    from app.services.dingtalk_snapshot_import_service import (
+        DingTalkSnapshotImportService,
+    )
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None:
+            raise ValueError("Importing user not found")
+        result = asyncio.run(
+            DingTalkSnapshotImportService.import_nodes(
+                db=db,
+                user=user,
+                knowledge_base_id=knowledge_base_id,
+                node_ids=node_ids,
+            )
+        )
+        return result.model_dump(mode="json")
+    finally:
+        db.close()
+
+
 def _build_stale_processing_error(
     index_status: object, *, generation: int
 ) -> DocumentProcessingError:

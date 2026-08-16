@@ -27,6 +27,7 @@ from app.models.delivery import (
     ProjectAutomationRun,
 )
 from app.models.dingtalk_doc import DingtalkSyncedNode
+from app.models.external_knowledge_snapshot import ExternalKnowledgeSnapshot
 from app.models.im_session import IMPrivateSession, IMSessionMode, IMSessionState
 from app.models.kind import Kind
 from app.models.knowledge import KnowledgeDocument
@@ -74,6 +75,7 @@ from app.schemas.namespace import GroupRole
 
 __all__ = [
     "DingtalkSyncedNode",
+    "ExternalKnowledgeSnapshot",
     "CloudProject",
     "CloudProjectFile",
     "LoopItemTaskBinding",

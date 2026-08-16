@@ -17,11 +17,16 @@ from app.models.user import User
 from app.schemas.dingtalk_doc import (
     DingtalkDocNode,
     DingtalkDocTreeResponse,
+    DingtalkSnapshotImportQueuedResponse,
+    DingtalkSnapshotImportRequest,
     DingtalkSyncResult,
     DingtalkSyncStatus,
     build_dingtalk_tree,
 )
 from app.services.dingtalk_doc_service import DingTalkDocService
+from app.services.dingtalk_snapshot_import_service import (
+    DingTalkSnapshotImportService,
+)
 
 router = APIRouter()
 
@@ -82,6 +87,55 @@ def get_sync_status(
     """Get the sync status for the current user's DingTalk documents."""
     status = DingTalkDocService.get_sync_status(current_user, db)
     return DingtalkSyncStatus(**status)
+
+
+@router.post(
+    "/import-snapshot",
+    response_model=DingtalkSnapshotImportQueuedResponse,
+    status_code=202,
+)
+async def import_dingtalk_snapshot(
+    request: DingtalkSnapshotImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DingtalkSnapshotImportQueuedResponse:
+    """Copy selected DingTalk content into a Wegent knowledge base."""
+    try:
+        DingTalkSnapshotImportService._assert_target_writable(
+            db,
+            current_user.id,
+            request.knowledge_base_id,
+        )
+        DingTalkSnapshotImportService._resolve_document_nodes(
+            db,
+            current_user.id,
+            request.node_ids,
+        )
+        if not DingTalkDocService.is_configured(current_user):
+            raise ValueError("DingTalk Docs MCP is not configured or enabled")
+
+        from app.tasks.knowledge_tasks import import_dingtalk_snapshot_task
+
+        task = import_dingtalk_snapshot_task.delay(
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+            node_ids=request.node_ids,
+        )
+        return DingtalkSnapshotImportQueuedResponse(
+            task_id=task.id,
+            knowledge_base_id=request.knowledge_base_id,
+            selected_count=len(set(request.node_ids)),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to import DingTalk snapshot")
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to fetch or import DingTalk content",
+        ) from exc
 
 
 @router.delete("/{node_id}")

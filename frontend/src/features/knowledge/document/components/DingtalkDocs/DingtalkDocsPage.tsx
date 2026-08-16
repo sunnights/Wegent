@@ -12,15 +12,17 @@
 
 import Link from 'next/link'
 import { useState, useEffect, useCallback } from 'react'
-import { RefreshCw, FolderOpen, BookOpen, ExternalLink } from 'lucide-react'
+import { RefreshCw, FolderOpen, BookOpen, ExternalLink, Download } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from '@/hooks/useTranslation'
+import { toast } from '@/hooks/use-toast'
 import { formatDateTime } from '@/utils/dateTime'
 import { dingtalkDocApi } from '@/apis/dingtalk-doc'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { DingtalkDocTreeView } from './DingtalkDocTreeView'
+import { DingtalkSnapshotImportDialog } from './DingtalkSnapshotImportDialog'
 import { DingtalkNotConfigured } from './dingtalk-not-configured'
 import type { DingtalkDocNode, DingtalkSyncStatus } from '@/types/dingtalk-doc'
 
@@ -40,6 +42,9 @@ export function DingtalkDocsPage({
 }: DingtalkDocsPageProps) {
   const { t } = useTranslation('knowledge')
   const [activeTab, setActiveTab] = useState<'my-docs' | 'wikispace'>('my-docs')
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
 
   // My Docs state
   const [docTree, setDocTree] = useState<DingtalkDocNode[]>([])
@@ -155,6 +160,42 @@ export function DingtalkDocsPage({
   const handleSync = activeTab === 'my-docs' ? handleSyncDocs : handleSyncWikispace
   const activeSyncStatus = activeTab === 'my-docs' ? docSyncStatus : wikispaceSyncStatus
 
+  const handleNodeSelectionChange = useCallback((nodeId: number, selected: boolean) => {
+    setSelectedNodeIds(previous => {
+      const next = new Set(previous)
+      if (selected) {
+        next.add(nodeId)
+      } else {
+        next.delete(nodeId)
+      }
+      return next
+    })
+  }, [])
+
+  const handleImport = useCallback(
+    async (knowledgeBaseId: number) => {
+      setIsImporting(true)
+      try {
+        await dingtalkDocApi.importSnapshot(knowledgeBaseId, Array.from(selectedNodeIds))
+        toast({
+          title: t('document.dingtalk.importSuccess', '导入已提交'),
+          description: t('document.dingtalk.importSuccessDetail', '索引完成后即可使用。'),
+        })
+        setSelectedNodeIds(new Set())
+        setIsImportDialogOpen(false)
+      } catch (error) {
+        console.error('Failed to import DingTalk snapshot:', error)
+        toast({
+          title: t('document.dingtalk.importFailed', '导入失败'),
+          variant: 'destructive',
+        })
+      } finally {
+        setIsImporting(false)
+      }
+    },
+    [selectedNodeIds, t]
+  )
+
   return (
     <div className="flex flex-col h-full" data-testid="dingtalk-docs-page">
       {/* Header */}
@@ -171,6 +212,19 @@ export function DingtalkDocsPage({
               {t('document.dingtalk.lastSynced', '上次同步')}:{' '}
               {formatDateTime(new Date(activeSyncStatus.last_synced_at).getTime())}
             </span>
+          )}
+          {selectedNodeIds.size > 0 && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => setIsImportDialogOpen(true)}
+              disabled={isImporting}
+              className="h-11 min-w-[44px]"
+              data-testid="dingtalk-import-button"
+            >
+              <Download className="w-3.5 h-3.5 mr-1" />
+              {t('document.dingtalk.importSelected', '导入所选')} ({selectedNodeIds.size})
+            </Button>
           )}
           <Button
             variant="outline"
@@ -200,7 +254,10 @@ export function DingtalkDocsPage({
       {/* Tabs */}
       <Tabs
         value={activeTab}
-        onValueChange={v => setActiveTab(v as 'my-docs' | 'wikispace')}
+        onValueChange={v => {
+          setActiveTab(v as 'my-docs' | 'wikispace')
+          setSelectedNodeIds(new Set())
+        }}
         className="flex flex-col flex-1 min-h-0"
       >
         <TabsList className="mx-6 mt-3 self-start rounded-md">
@@ -237,7 +294,11 @@ export function DingtalkDocsPage({
             />
           ) : (
             <div className="flex-1 overflow-y-auto custom-scrollbar">
-              <DingtalkDocTreeView nodes={docTree} />
+              <DingtalkDocTreeView
+                nodes={docTree}
+                selectedNodeIds={selectedNodeIds}
+                onNodeSelectionChange={handleNodeSelectionChange}
+              />
             </div>
           )}
         </TabsContent>
@@ -259,11 +320,22 @@ export function DingtalkDocsPage({
             />
           ) : (
             <div className="flex-1 overflow-y-auto custom-scrollbar">
-              <DingtalkDocTreeView nodes={wikispaceTree} />
+              <DingtalkDocTreeView
+                nodes={wikispaceTree}
+                selectedNodeIds={selectedNodeIds}
+                onNodeSelectionChange={handleNodeSelectionChange}
+              />
             </div>
           )}
         </TabsContent>
       </Tabs>
+      <DingtalkSnapshotImportDialog
+        open={isImportDialogOpen}
+        selectedCount={selectedNodeIds.size}
+        isSubmitting={isImporting}
+        onOpenChange={setIsImportDialogOpen}
+        onConfirm={handleImport}
+      />
     </div>
   )
 }

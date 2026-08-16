@@ -1594,52 +1594,61 @@ def _prepare_kb_tools_from_contexts(
     enhanced_system_prompt = base_system_prompt
     kb_meta_prompt = ""
 
-    # Priority 1: Subtask-level knowledge bases (user-selected for this message)
+    # User-selected knowledge for the current message.
     subtask_kb_ids = [c.knowledge_id for c in kb_contexts if c.knowledge_id is not None]
 
-    # Track whether KB is user-selected (strict mode) or inherited from task (relaxed mode)
+    # Track whether KB is user-selected (strict mode) or inherited from task.
     is_user_selected_kb = bool(subtask_kb_ids)
 
-    knowledge_base_scopes: List[KnowledgeBaseScope] = []
-
-    # Determine which knowledge bases to use based on priority
-    if subtask_kb_ids:
-        # Use subtask-level KBs only (user's explicit selection takes precedence)
-        knowledge_base_ids = subtask_kb_ids
-        knowledge_base_scopes = _build_scopes_from_kb_contexts(
+    current_scopes = (
+        _build_scopes_from_kb_contexts(
             kb_contexts,
             db=db,
             user_id=user_id,
         )
-        logger.info(
-            f"[_prepare_kb_tools_from_contexts] Using {len(knowledge_base_ids)} "
-            f"subtask-level knowledge bases (priority 1, strict mode): {knowledge_base_ids}"
+        if subtask_kb_ids
+        else []
+    )
+    task_scopes: List[KnowledgeBaseScope] = []
+    task_bound_ids: List[int] = []
+    default_ids: List[int] = []
+    if task_id:
+        task_scopes = _get_bound_knowledge_base_scopes(db, task_id, user_id)
+        task_bound_ids = list(
+            dict.fromkeys(
+                [scope.knowledge_base_id for scope in task_scopes]
+                + _get_bound_knowledge_base_ids(db, task_id, user_id)
+            )
         )
-    elif task_id:
-        # Priority 2: Fall back to task-level bound knowledge bases
-        knowledge_base_scopes = _get_bound_knowledge_base_scopes(db, task_id, user_id)
-        bound_knowledge_base_ids = [
-            scope.knowledge_base_id for scope in knowledge_base_scopes
-        ] or _get_bound_knowledge_base_ids(db, task_id, user_id)
         from app.services.chat.task_default_knowledge_bases import (
             resolve_task_default_knowledge_base_ids,
         )
 
-        default_knowledge_base_ids = resolve_task_default_knowledge_base_ids(
+        default_ids = resolve_task_default_knowledge_base_ids(
             db,
             task_id,
             user_id,
         )
-        knowledge_base_ids = list(
-            dict.fromkeys(bound_knowledge_base_ids + default_knowledge_base_ids)
+
+    # Agent defaults are always present. Task/current user refs add new knowledge
+    # bases, while a user scope for the same KB replaces the default whole-KB scope.
+    knowledge_base_ids = list(
+        dict.fromkeys(default_ids + task_bound_ids + subtask_kb_ids)
+    )
+    scopes_by_kb = {scope.knowledge_base_id: scope for scope in task_scopes}
+    scopes_by_kb.update({scope.knowledge_base_id: scope for scope in current_scopes})
+    knowledge_base_scopes = [
+        scopes_by_kb[kb_id] for kb_id in knowledge_base_ids if kb_id in scopes_by_kb
+    ]
+    if knowledge_base_ids:
+        logger.info(
+            "[_prepare_kb_tools_from_contexts] Merged defaults=%s, task=%s, "
+            "current=%s into effective=%s",
+            default_ids,
+            task_bound_ids,
+            subtask_kb_ids,
+            knowledge_base_ids,
         )
-        if knowledge_base_ids:
-            logger.info(
-                f"[_prepare_kb_tools_from_contexts] Using {len(knowledge_base_ids)} "
-                f"task-level bound knowledge bases (priority 2, relaxed mode): {knowledge_base_ids}"
-            )
-    else:
-        knowledge_base_ids = []
 
     # Extract document_ids from subtask KB contexts (no extra DB query needed).
     # Normalize to int, skip invalid values, and deduplicate while preserving order.

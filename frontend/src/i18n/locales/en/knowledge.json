@@ -162,7 +162,20 @@
       "wikispaceSyncHint": "Click sync to pull knowledge bases from DingTalk",
       "wikispaceEmpty": "No knowledge base content",
       "wikispaceNotConfigured": "Sync requires both DingTalk Knowledge Base MCP and DingTalk Docs MCP",
-      "wikispaceConfigureHint": "Please configure DingTalk Knowledge Base MCP and DingTalk Docs MCP in settings"
+      "wikispaceConfigureHint": "Please configure DingTalk Knowledge Base MCP and DingTalk Docs MCP in settings",
+      "selectNode": "Select {{name}}",
+      "importSelected": "Import selected",
+      "importTitle": "Import to Wegent knowledge base",
+      "importHint": "Copy the selected {{count}} items as static snapshots.",
+      "targetKnowledgeBase": "Target knowledge base",
+      "selectKnowledgeBase": "Select a knowledge base",
+      "noTargetKnowledgeBase": "No knowledge base is available.",
+      "createKnowledgeBase": "Create knowledge base",
+      "import": "Import",
+      "importing": "Importing...",
+      "importSuccess": "Import submitted",
+      "importSuccessDetail": "The documents will be available after indexing.",
+      "importFailed": "Import failed"
     },
     "groupFilter": {
       "all": "All Groups"

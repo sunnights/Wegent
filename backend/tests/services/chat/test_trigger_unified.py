@@ -16,6 +16,61 @@ from shared.models.knowledge import (
 )
 
 
+@pytest.mark.parametrize(
+    ("team_name", "team_namespace", "internal_knowledge_only"),
+    [
+        ("wegent-chat", "default", False),
+        ("custom-agent", "default", True),
+    ],
+)
+async def test_chat_agent_runtime_uses_only_internal_knowledge(
+    monkeypatch,
+    team_name: str,
+    team_namespace: str,
+    internal_knowledge_only: bool,
+) -> None:
+    """Custom Chat agents must not mount external knowledge providers."""
+    from app.services.chat.trigger import unified as trigger_unified
+
+    monkeypatch.setattr(
+        trigger_unified.settings,
+        "DEFAULT_TEAM_CHAT",
+        "wegent-chat#default",
+    )
+    request = MagicMock()
+    build_request = AsyncMock(return_value=request)
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock()
+
+    with (
+        patch.object(
+            trigger_unified,
+            "build_execution_request",
+            new=build_request,
+        ),
+        patch("app.services.execution.execution_dispatcher", dispatcher),
+    ):
+        await trigger_unified.trigger_ai_response_unified(
+            task=SimpleNamespace(id=1),
+            assistant_subtask=SimpleNamespace(id=2),
+            team=SimpleNamespace(name=team_name, namespace=team_namespace),
+            user=SimpleNamespace(id=7),
+            message="hello",
+            payload=None,
+            task_room="task:1",
+        )
+
+    assert (
+        build_request.await_args.kwargs["internal_knowledge_only"]
+        is internal_knowledge_only
+    )
+    dispatcher.dispatch.assert_awaited_once_with(
+        request,
+        device_id=None,
+        emitter=None,
+    )
+
+
 def test_apply_image_generation_params_overrides_request_size() -> None:
     from app.services.chat.trigger import unified as trigger_unified
 
@@ -755,6 +810,93 @@ class TestBuildExecutionRequestUserSubtaskId:
         ]
         assert result is resolved_request
         assert result.provider_native_knowledge is True
+
+    async def test_internal_knowledge_only_ignores_external_task_refs(self):
+        """Agent API runtime must not mount external knowledge providers."""
+        from app.services.chat import selected_knowledge
+        from app.services.chat.trigger import unified as trigger_unified
+
+        mock_db = MagicMock()
+        request = ExecutionRequest(
+            task_id=1,
+            subtask_id=2,
+            skill_names=["dingtalk-docs", "dingtalk-wikispace", "other"],
+            skill_configs=[
+                {"name": "dingtalk-docs"},
+                {"name": "dingtalk-wikispace"},
+                {"name": "other"},
+            ],
+            preload_skills=["dingtalk-docs", "other"],
+            user_selected_skills=["dingtalk-wikispace", "other"],
+            mcp_servers=[
+                {"name": "dingtalk_docs", "url": "https://example.com/docs"},
+                {"name": "dingtalk_wikispace", "url": "https://example.com/wiki"},
+                {"name": "dingtalk_table", "url": "https://example.com/table"},
+            ],
+            bot=[
+                {
+                    "skills": ["dingtalk-docs", "other"],
+                    "skill_refs": {
+                        "dingtalk-docs": {"name": "dingtalk-docs"},
+                        "other": {"name": "other"},
+                    },
+                    "mcp_servers": [
+                        {"name": "dingtalk_docs"},
+                        {"name": "dingtalk_table"},
+                    ],
+                }
+            ],
+        )
+        builder = MagicMock()
+        builder.build.return_value = request
+        task = MagicMock(id=1, json={})
+        assistant_subtask = MagicMock(id=2)
+        user = MagicMock(id=7)
+
+        with (
+            patch.object(trigger_unified, "SessionLocal", return_value=mock_db),
+            patch(
+                "app.services.execution.TaskRequestBuilder",
+                return_value=builder,
+            ),
+            patch.object(
+                trigger_unified,
+                "extract_task_external_knowledge_refs",
+                return_value=[
+                    {
+                        "provider": "dingtalk",
+                        "mode": "explicit",
+                        "id": "doc-1",
+                        "name": "Doc 1",
+                    }
+                ],
+            ),
+            patch.object(
+                selected_knowledge,
+                "apply_selected_knowledge_context",
+            ) as apply_selected,
+        ):
+            result = await trigger_unified.build_execution_request(
+                task=task,
+                assistant_subtask=assistant_subtask,
+                team=MagicMock(),
+                user=user,
+                message="hello",
+                internal_knowledge_only=True,
+            )
+
+        assert result.external_knowledge_refs == []
+        assert result.skill_names == ["other"]
+        assert result.preload_skills == ["other"]
+        assert result.user_selected_skills == ["other"]
+        assert result.skill_configs == [{"name": "other"}]
+        assert result.mcp_servers == [
+            {"name": "dingtalk_table", "url": "https://example.com/table"}
+        ]
+        assert result.bot[0]["skills"] == ["other"]
+        assert result.bot[0]["skill_refs"] == {"other": {"name": "other"}}
+        assert result.bot[0]["mcp_servers"] == [{"name": "dingtalk_table"}]
+        apply_selected.assert_not_called()
 
     async def test_selected_kb_triggers_skill_resolution_for_claude_code_without_device_id(
         self,

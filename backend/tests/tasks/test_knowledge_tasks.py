@@ -14,8 +14,41 @@ from app.core.config import settings
 from app.models.knowledge import DocumentIndexStatus
 from app.tasks.knowledge_tasks import (
     _build_stale_processing_error,
+    import_dingtalk_snapshot_task,
     index_document_task,
 )
+
+
+def test_import_dingtalk_snapshot_task_uses_initiating_user() -> None:
+    db = MagicMock()
+    user = SimpleNamespace(id=7)
+    db.query.return_value.filter.return_value.first.return_value = user
+    result = SimpleNamespace(
+        model_dump=MagicMock(return_value={"created": 1, "updated": 0})
+    )
+
+    with (
+        patch("app.tasks.knowledge_tasks.SessionLocal", return_value=db),
+        patch(
+            "app.services.dingtalk_snapshot_import_service.DingTalkSnapshotImportService.import_nodes",
+            new=AsyncMock(return_value=result),
+        ) as import_nodes,
+    ):
+        payload = import_dingtalk_snapshot_task.run(
+            user_id=7,
+            knowledge_base_id=8,
+            node_ids=[3],
+        )
+
+    import_nodes.assert_awaited_once_with(
+        db=db,
+        user=user,
+        knowledge_base_id=8,
+        node_ids=[3],
+    )
+    result.model_dump.assert_called_once_with(mode="json")
+    assert payload == {"created": 1, "updated": 0}
+    db.close.assert_called_once()
 
 
 @contextmanager

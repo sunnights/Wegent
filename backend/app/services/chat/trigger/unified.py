@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from fastapi import HTTPException, status
 
+from app.core.config import settings
 from app.core.constants import CLIENT_ORIGIN_FRONTEND
 from app.db.session import SessionLocal
 from app.models.kind import Kind
@@ -67,6 +68,21 @@ SERVICE_TIER_ALIASES = {
     "标准": "default",
     "运行标准": "default",
 }
+
+
+def _is_default_chat_team(team: Kind) -> bool:
+    """Return whether the team is the system's ordinary Chat team."""
+    configured_name, separator, configured_namespace = (
+        settings.DEFAULT_TEAM_CHAT.strip().partition("#")
+    )
+    configured_name = configured_name.strip()
+    if not configured_name:
+        return False
+    if not separator:
+        configured_namespace = "default"
+    return (
+        team.name == configured_name and team.namespace == configured_namespace.strip()
+    )
 
 
 def _apply_image_generation_params(
@@ -699,6 +715,7 @@ async def trigger_ai_response_unified(
         enable_tools=enable_tools,
         enable_deep_thinking=enable_deep_thinking,
         previous_bot_id=previous_bot_id,
+        internal_knowledge_only=not _is_default_chat_team(team),
     )
 
     # 2. Dispatch task
@@ -740,6 +757,7 @@ async def build_execution_request(
     reasoning_config: Optional[Dict[str, Any]] = None,
     include_wework_space_mcp: bool = False,
     web_runtime_guidance: Optional[bool] = None,
+    internal_knowledge_only: bool = False,
 ):
     """Build ExecutionRequest without dispatching.
 
@@ -766,6 +784,7 @@ async def build_execution_request(
         knowledge_base_refs: Optional normalized KB refs with optional folder/document scope
         reasoning_config: Optional reasoning config dict with 'effort' and 'summary' keys
         include_wework_space_mcp: Whether to expose the Wework board MCP
+        internal_knowledge_only: Ignore external knowledge providers for this request
 
     Returns:
         ExecutionRequest ready for dispatch
@@ -892,11 +911,13 @@ async def build_execution_request(
             runtime_model_config=runtime_model_config,
             include_wework_space_mcp=include_wework_space_mcp,
         )
+        if internal_knowledge_only:
+            _strip_external_knowledge_capabilities(request)
         request.device_id = device_id or request.device_id
         # Task spec is the runtime source of truth. Message-level external
         # contexts are materialized into Task.spec before execution is built.
         task_refs = extract_task_external_knowledge_refs(task)
-        if task_refs:
+        if task_refs and not internal_knowledge_only:
             validate_external_knowledge_refs(
                 task_refs,
                 binding_level="conversation",
@@ -1070,8 +1091,6 @@ async def build_execution_request(
                 user.id,
                 processed_subtask_id,
                 normalized_kb_refs,
-                task=task,
-                user_name=user.user_name,
             )
 
         # Process contexts (attachments, knowledge bases, etc.)
@@ -1097,7 +1116,10 @@ async def build_execution_request(
         )
 
         provider_skills = []
-        if task_labels.get("source") != KNOWLEDGE_ARTIFACT_SOURCE:
+        if (
+            not internal_knowledge_only
+            and task_labels.get("source") != KNOWLEDGE_ARTIFACT_SOURCE
+        ):
             provider_skills = apply_selected_knowledge_context(db, request, task)
         unresolved_provider_skills = [
             skill_name
@@ -1122,6 +1144,77 @@ async def build_execution_request(
 
     finally:
         db.close()
+
+
+def _strip_external_knowledge_capabilities(request: Any) -> None:
+    """Remove provider-native knowledge Skills and MCPs from agent API runtime."""
+    from app.services.chat.selected_knowledge import PROVIDER_SKILLS
+    from app.services.mcp_provider_registry import get_mcp_service_by_skill_name
+
+    external_skill_names = {
+        skill_name
+        for provider, skill_name in PROVIDER_SKILLS.items()
+        if provider != "wegent"
+    }
+    # WikiSpace is a DingTalk knowledge source even though selection currently
+    # routes document reads through the shared DingTalk Docs provider Skill.
+    external_skill_names.add("dingtalk-wikispace")
+    external_mcp_names: set[str] = set()
+    for skill_name in external_skill_names:
+        service = get_mcp_service_by_skill_name(skill_name)
+        if service:
+            external_mcp_names.add(service[1]["server_name"])
+
+    request.external_knowledge_refs = []
+    request.skill_names = [
+        name for name in request.skill_names or [] if name not in external_skill_names
+    ]
+    request.preload_skills = [
+        value
+        for value in request.preload_skills or []
+        if _skill_name(value) not in external_skill_names
+    ]
+    request.user_selected_skills = [
+        value
+        for value in request.user_selected_skills or []
+        if _skill_name(value) not in external_skill_names
+    ]
+    request.skill_configs = [
+        config
+        for config in request.skill_configs or []
+        if not isinstance(config, dict)
+        or config.get("name") not in external_skill_names
+    ]
+    request.mcp_servers = [
+        server
+        for server in request.mcp_servers or []
+        if not isinstance(server, dict) or server.get("name") not in external_mcp_names
+    ]
+    for bot in request.bot or []:
+        if not isinstance(bot, dict):
+            continue
+        bot["skills"] = [
+            name for name in bot.get("skills", []) if name not in external_skill_names
+        ]
+        bot["skill_refs"] = {
+            name: ref
+            for name, ref in (bot.get("skill_refs") or {}).items()
+            if name not in external_skill_names
+        }
+        bot["mcp_servers"] = [
+            server
+            for server in bot.get("mcp_servers", [])
+            if not isinstance(server, dict)
+            or server.get("name") not in external_mcp_names
+        ]
+
+
+def _skill_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("name") or "")
+    return str(getattr(value, "name", ""))
 
 
 async def _process_contexts(
@@ -1229,8 +1322,6 @@ async def _create_kb_contexts_from_api_request(
     user_id: int,
     user_subtask_id: int,
     knowledge_base_names: List[Dict[str, Any]],
-    task=None,
-    user_name: Optional[str] = None,
 ) -> None:
     """Create SubtaskContext records for knowledge bases from API request.
 
@@ -1243,8 +1334,6 @@ async def _create_kb_contexts_from_api_request(
         user_id: User ID for permission checking
         user_subtask_id: User subtask ID to attach contexts to
         knowledge_base_names: List of dicts with 'namespace' and 'name' keys
-        task: Optional task for syncing selected KBs to task-level refs
-        user_name: Optional user name used as boundBy during task-level sync
     """
     from app.services.openapi.kb_context import KnowledgeBaseContextCreator
 
@@ -1253,8 +1342,6 @@ async def _create_kb_contexts_from_api_request(
         contexts = creator.create_contexts(
             user_subtask_id,
             knowledge_base_names,
-            task=task,
-            user_name=user_name,
         )
         logger.info(
             "[build_execution_request] Created %d KB contexts from API request "

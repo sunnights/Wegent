@@ -162,7 +162,20 @@
       "wikispaceSyncHint": "点击同步按钮从钉钉拉取知识库",
       "wikispaceEmpty": "暂无知识库内容",
       "wikispaceNotConfigured": "同步需要同时配置钉钉知识库 MCP 和钉钉文档 MCP",
-      "wikispaceConfigureHint": "请前往设置配置钉钉知识库 MCP 和钉钉文档 MCP"
+      "wikispaceConfigureHint": "请前往设置配置钉钉知识库 MCP 和钉钉文档 MCP",
+      "selectNode": "选择 {{name}}",
+      "importSelected": "导入所选",
+      "importTitle": "导入到 Wegent 知识库",
+      "importHint": "将选中的 {{count}} 项复制为静态快照。",
+      "targetKnowledgeBase": "目标知识库",
+      "selectKnowledgeBase": "请选择知识库",
+      "noTargetKnowledgeBase": "暂无可用知识库。",
+      "createKnowledgeBase": "创建知识库",
+      "import": "导入",
+      "importing": "导入中...",
+      "importSuccess": "导入已提交",
+      "importSuccessDetail": "索引完成后即可使用。",
+      "importFailed": "导入失败"
     },
     "groupFilter": {
       "all": "全部分组"

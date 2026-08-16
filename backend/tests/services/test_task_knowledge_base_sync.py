@@ -488,8 +488,8 @@ class TestKBPriorityLogic:
         """Create a mock database session"""
         return Mock(spec=Session)
 
-    def test_subtask_kb_takes_priority(self, mock_db):
-        """Test that subtask-level KB takes priority over task-level KB"""
+    def test_subtask_kb_is_appended_to_task_kbs(self, mock_db):
+        """Current-message KBs extend rather than replace task KBs."""
         from app.services.chat.preprocessing.contexts import (
             _prepare_kb_tools_from_contexts,
         )
@@ -499,7 +499,7 @@ class TestKBPriorityLogic:
         kb_context.knowledge_id = 10
         kb_context.type_data = None
 
-        # Mock task-level KB (should be ignored when subtask has KB)
+        # Task-level user knowledge remains effective for the conversation.
         with patch(
             "app.services.chat.preprocessing.contexts._get_bound_knowledge_base_ids"
         ) as mock_get_bound:
@@ -521,11 +521,65 @@ class TestKBPriorityLogic:
                         user_subtask_id=1,
                     )
 
-                    # Should use only subtask KB (10), not task-level (20, 30)
                     mock_kb_tool.assert_called_once()
                     call_args = mock_kb_tool.call_args
-                    assert call_args[1]["knowledge_base_ids"] == [10]
+                    assert call_args[1]["knowledge_base_ids"] == [20, 30, 10]
                     assert len(kb_result.extra_tools) == 1
+
+    def test_current_scope_overrides_same_default_kb(self, mock_db):
+        """A current document scope narrows the same default KB only."""
+        from app.services.chat.preprocessing.contexts import (
+            _prepare_kb_tools_from_contexts,
+        )
+
+        kb_context = Mock(spec=SubtaskContext)
+        kb_context.knowledge_id = 10
+        kb_context.type_data = {
+            "scope_restricted": True,
+            "document_ids": [101],
+        }
+
+        with (
+            patch(
+                "app.services.chat.preprocessing.contexts.KnowledgeFolderService.resolve_document_ids_for_scope",
+                return_value=[101],
+            ),
+            patch(
+                "app.services.chat.preprocessing.contexts._get_bound_knowledge_base_ids",
+                return_value=[],
+            ),
+            patch(
+                "app.services.chat.preprocessing.contexts._get_bound_knowledge_base_scopes",
+                return_value=[],
+            ),
+            patch(
+                "app.services.chat.task_default_knowledge_bases.resolve_task_default_knowledge_base_ids",
+                return_value=[10, 20],
+            ),
+            patch(
+                "app.services.chat.preprocessing.contexts._get_user_kb_tool_access_mode",
+                return_value=("full", ""),
+            ),
+            patch(
+                "chat_shell.tools.builtin.ScopedKnowledgeBaseTool"
+            ) as mock_scoped_tool,
+        ):
+            mock_scoped_tool.return_value = Mock()
+            result = _prepare_kb_tools_from_contexts(
+                kb_contexts=[kb_context],
+                user_id=1,
+                db=mock_db,
+                base_system_prompt="Base prompt",
+                task_id=100,
+                user_subtask_id=1,
+            )
+
+        call_kwargs = mock_scoped_tool.call_args.kwargs
+        assert call_kwargs["knowledge_base_ids"] == [10, 20]
+        assert len(call_kwargs["knowledge_base_scopes"]) == 1
+        assert call_kwargs["knowledge_base_scopes"][0].knowledge_base_id == 10
+        assert call_kwargs["knowledge_base_scopes"][0].document_ids == [101]
+        assert result.knowledge_base_ids == [10, 20]
 
     def test_scoped_context_uses_scopes_without_legacy_document_filters(self, mock_db):
         """Scoped document IDs should only be represented by per-KB scopes."""

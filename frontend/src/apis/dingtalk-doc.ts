@@ -11,6 +11,7 @@ import type {
   DingtalkDocTreeResponse,
   DingtalkSyncStatus,
   DingtalkSyncResult,
+  DingtalkSnapshotImportQueuedResponse,
 } from '@/types/dingtalk-doc'
 
 export const dingtalkDocApi = {
@@ -40,6 +41,19 @@ export const dingtalkDocApi = {
    */
   deleteDoc: async (nodeId: number): Promise<void> => {
     await client.delete(`/dingtalk-docs/${nodeId}`)
+  },
+
+  /**
+   * Copy selected DingTalk nodes into a Wegent knowledge base.
+   */
+  importSnapshot: async (
+    knowledgeBaseId: number,
+    nodeIds: number[]
+  ): Promise<DingtalkSnapshotImportQueuedResponse> => {
+    return client.post<DingtalkSnapshotImportQueuedResponse>('/dingtalk-docs/import-snapshot', {
+      knowledge_base_id: knowledgeBaseId,
+      node_ids: nodeIds,
+    })
   },
 
   /**

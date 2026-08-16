@@ -7,9 +7,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.dingtalk_doc import DingTalkNodeSource
 
@@ -73,6 +73,38 @@ class DingtalkSyncResult(BaseModel):
     # Useful for diagnosing issues where the MCP returns data but nothing is
     # written (e.g. all nodes lack a nodeId).
     mcp_nodes_fetched: int = 0
+
+
+class DingtalkSnapshotImportRequest(BaseModel):
+    """Import selected DingTalk nodes into a Wegent knowledge base."""
+
+    knowledge_base_id: int = Field(..., gt=0)
+    node_ids: list[int] = Field(..., min_length=1)
+
+
+class DingtalkSnapshotImportItem(BaseModel):
+    """One imported DingTalk document."""
+
+    node_id: int
+    document_id: int
+    action: Literal["created", "updated"]
+
+
+class DingtalkSnapshotImportResponse(BaseModel):
+    """Result after snapshot content is stored and indexing is queued."""
+
+    knowledge_base_id: int
+    created: int
+    updated: int
+    items: list[DingtalkSnapshotImportItem]
+
+
+class DingtalkSnapshotImportQueuedResponse(BaseModel):
+    """Accepted background snapshot import."""
+
+    task_id: str
+    knowledge_base_id: int
+    selected_count: int
 
 
 def build_dingtalk_tree(

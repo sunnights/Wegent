@@ -180,18 +180,17 @@ def _get_current_knowledge_base_refs(tool_settings: Dict[str, Any]) -> list[dict
     return refs if isinstance(refs, list) else []
 
 
-def _get_inherited_knowledge_base_refs(
-    *,
+def _has_agent_default_knowledge(
+    db: Session,
     task: TaskResource,
-    current_refs: list[dict],
-) -> list[dict]:
-    """Return task-level API KB scopes only when the current request has no KB refs."""
-    if current_refs:
-        return []
+    user_id: int,
+) -> bool:
+    """Return whether the current agent contributes an accessible default KB."""
+    from app.services.chat.task_default_knowledge_bases import (
+        resolve_task_default_knowledge_base_ids,
+    )
 
-    from app.services.openapi.kb_context import get_task_knowledge_base_scope_refs
-
-    return get_task_knowledge_base_scope_refs(task)
+    return bool(resolve_task_default_knowledge_base_ids(db, task.id, user_id))
 
 
 def _exception_message(exc: HTTPException) -> str:
@@ -506,14 +505,13 @@ async def _create_non_streaming_response_unified(
     user_id = user.id
 
     current_kb_refs = _get_current_knowledge_base_refs(tool_settings)
-    inherited_kb_refs = _get_inherited_knowledge_base_refs(
-        task=setup.task,
-        current_refs=current_kb_refs,
-    )
-
     # Auto-enable tools when knowledge_base is specified
     # This ensures KB tools and skill tools are actually added to the agent
-    enable_tools = enable_chat_bot or bool(current_kb_refs) or bool(inherited_kb_refs)
+    enable_tools = (
+        enable_chat_bot
+        or bool(current_kb_refs)
+        or _has_agent_default_knowledge(db, setup.task, user.id)
+    )
 
     # Link attachments to user subtask if provided
     if request_body.attachment_ids:
@@ -549,6 +547,7 @@ async def _create_non_streaming_response_unified(
             preload_skills=preload_skills,
             knowledge_base_refs=current_kb_refs,
             reasoning_config=reasoning_config,
+            internal_knowledge_only=True,
         )
     except ExternalRefValidationError as e:
         logger.warning("Failed to build execution request: %s", e)
@@ -829,14 +828,13 @@ async def _create_streaming_response_unified(
     user_name = user.user_name
 
     current_kb_refs = _get_current_knowledge_base_refs(tool_settings)
-    inherited_kb_refs = _get_inherited_knowledge_base_refs(
-        task=setup.task,
-        current_refs=current_kb_refs,
-    )
-
     # Auto-enable tools when knowledge_base is specified
     # This ensures KB tools and skill tools are actually added to the agent
-    enable_tools = enable_chat_bot or bool(current_kb_refs) or bool(inherited_kb_refs)
+    enable_tools = (
+        enable_chat_bot
+        or bool(current_kb_refs)
+        or _has_agent_default_knowledge(db, setup.task, user.id)
+    )
 
     # Link attachments to user subtask if provided
     if request_body.attachment_ids:
@@ -872,6 +870,7 @@ async def _create_streaming_response_unified(
             preload_skills=preload_skills,
             knowledge_base_refs=current_kb_refs,
             reasoning_config=reasoning_config,
+            internal_knowledge_only=True,
         )
     except ExternalRefValidationError as e:
         logger.warning("Failed to build execution request: %s", e)

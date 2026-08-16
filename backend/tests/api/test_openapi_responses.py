@@ -953,6 +953,10 @@ class TestOpenAPIResponsesCreate:
         assert response.status == "queued"
         query_db.close.assert_called()
         assert mock_build_execution_request.await_args.kwargs["user_subtask_id"] == 321
+        assert (
+            mock_build_execution_request.await_args.kwargs["internal_knowledge_only"]
+            is True
+        )
         assert mock_build_execution_request.await_args.kwargs["message"] == (
             "follow-up question"
         )
@@ -1876,68 +1880,23 @@ class TestOpenAPIResponsesHelpers:
         result = parse_wegent_tools(tools)
         assert result["enable_chat_bot"] is True
 
-    def test_get_inherited_knowledge_base_refs_uses_task_scopes(self):
-        """Follow-up requests without current KB refs should inherit task scopes."""
+    def test_has_agent_default_knowledge_uses_shared_resolver(self):
+        """Agent defaults enable knowledge tools even without request refs."""
         from unittest.mock import MagicMock
 
-        from app.api.endpoints.openapi_responses import (
-            _get_inherited_knowledge_base_refs,
-        )
+        from app.api.endpoints.openapi_responses import _has_agent_default_knowledge
 
         task = MagicMock()
-        task.json = {
-            "spec": {
-                "knowledgeBaseScopes": [
-                    {
-                        "id": 1,
-                        "namespace": "default",
-                        "name": "kb1",
-                        "scopeRestricted": True,
-                        "folderIds": [9],
-                        "explicitDocumentIds": [101],
-                        "includeSubfolders": False,
-                    }
-                ]
-            }
-        }
+        task.id = 42
+        db = MagicMock()
 
-        refs = _get_inherited_knowledge_base_refs(task=task, current_refs=[])
+        with patch(
+            "app.services.chat.task_default_knowledge_bases.resolve_task_default_knowledge_base_ids",
+            return_value=[7],
+        ) as resolver:
+            assert _has_agent_default_knowledge(db, task, user_id=9) is True
 
-        assert refs == [
-            {
-                "id": 1,
-                "namespace": "default",
-                "name": "kb1",
-                "folder_ids": [9],
-                "document_ids": [101],
-                "include_subfolders": False,
-                "scope_specified": True,
-            }
-        ]
-
-    def test_get_inherited_knowledge_base_refs_skips_when_current_refs_exist(self):
-        """Current KB refs should override previously bound task scopes."""
-        from unittest.mock import MagicMock
-
-        from app.api.endpoints.openapi_responses import (
-            _get_inherited_knowledge_base_refs,
-        )
-
-        task = MagicMock()
-        task.json = {
-            "spec": {
-                "knowledgeBaseScopes": [
-                    {"id": 1, "namespace": "default", "name": "kb1"}
-                ]
-            }
-        }
-
-        refs = _get_inherited_knowledge_base_refs(
-            task=task,
-            current_refs=[{"namespace": "default", "name": "kb2"}],
-        )
-
-        assert refs == []
+        resolver.assert_called_once_with(db, 42, 9)
 
     def test_wegent_status_to_openai_status(self):
         """Test status conversion from Wegent to OpenAI format."""
