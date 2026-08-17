@@ -12,7 +12,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import type { MouseEvent, KeyboardEvent } from 'react'
+import type { MouseEvent } from 'react'
 import { Folder, FolderOpen, ChevronRight, ChevronDown, FileText, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -72,25 +72,21 @@ function TreeViewNode({
     [isFolder]
   )
 
-  const handleToggleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (isFolder && (e.key === 'Enter' || e.key === ' ')) {
-        e.preventDefault()
-        setIsExpanded(prev => !prev)
-      }
-    },
-    [isFolder]
-  )
-
   const indentPx = level * 20 + 8
   const selection = onNodeSelectionChange ? (
-    <Checkbox
-      checked={selectedNodeIds?.has(node.id) ?? false}
-      onCheckedChange={checked => onNodeSelectionChange(node.id, checked === true)}
+    <label
+      className="flex h-11 w-11 shrink-0 items-center justify-center md:h-4 md:w-4"
       onClick={event => event.stopPropagation()}
-      aria-label={t('document.dingtalk.selectNode', '选择 {{name}}', { name: node.name })}
-      data-testid={`dingtalk-select-node-${node.id}`}
-    />
+      data-testid={`dingtalk-select-node-${node.id}-hit-area`}
+    >
+      <Checkbox
+        checked={selectedNodeIds?.has(node.id) ?? false}
+        onCheckedChange={checked => onNodeSelectionChange(node.id, checked === true)}
+        onClick={event => event.stopPropagation()}
+        aria-label={t('document.dingtalk.selectNode', { name: node.name })}
+        data-testid={`dingtalk-select-node-${node.id}`}
+      />
+    </label>
   ) : null
 
   if (isFolder) {
@@ -98,19 +94,18 @@ function TreeViewNode({
       <div>
         <div
           className={cn(
-            'w-full flex items-center gap-1.5 py-2 min-h-[44px] rounded-md text-sm transition-colors',
+            'w-full flex items-center gap-1.5 min-h-[44px] rounded-md text-sm transition-colors',
             'hover:bg-surface-hover text-text-primary'
           )}
           style={{ paddingLeft: `${indentPx}px`, paddingRight: '8px' }}
-          data-testid={`dingtalk-tree-folder-${node.dingtalk_node_id}`}
         >
           {selection}
           <button
             type="button"
             onClick={handleToggle}
-            onKeyDown={handleToggleKeyDown}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            className="flex min-h-[44px] min-w-0 flex-1 items-center gap-1.5 text-left"
             aria-expanded={isExpanded}
+            data-testid={`dingtalk-tree-folder-${node.dingtalk_node_id}`}
           >
             {/* Expand/collapse chevron */}
             <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">
@@ -186,7 +181,7 @@ function TreeViewNode({
       {/* Second row: last modified time */}
       {updatedTime && (
         <div className="text-xs text-text-muted mt-0.5" style={{ paddingLeft: '38px' }}>
-          {t('document.dingtalk.lastModified', 'Last modified')}: {updatedTime}
+          {t('document.dingtalk.lastModified')}: {updatedTime}
         </div>
       )}
     </>
@@ -203,7 +198,13 @@ function TreeViewNode({
         data-testid={`dingtalk-tree-doc-${node.dingtalk_node_id}`}
       >
         {selection}
-        <a href={safeDocUrl} target="_blank" rel="noopener noreferrer" className="min-w-0 flex-1">
+        <a
+          href={safeDocUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex min-h-[44px] min-w-0 flex-1 flex-col justify-center md:min-h-0"
+          data-testid={`dingtalk-open-doc-${node.dingtalk_node_id}`}
+        >
           {nodeContent}
         </a>
       </div>

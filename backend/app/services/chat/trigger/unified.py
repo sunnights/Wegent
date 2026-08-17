@@ -912,7 +912,11 @@ async def build_execution_request(
             include_wework_space_mcp=include_wework_space_mcp,
         )
         if internal_knowledge_only:
-            _strip_external_knowledge_capabilities(request)
+            from app.services.chat.selected_knowledge import (
+                strip_external_knowledge_capabilities,
+            )
+
+            strip_external_knowledge_capabilities(request)
         request.device_id = device_id or request.device_id
         # Task spec is the runtime source of truth. Message-level external
         # contexts are materialized into Task.spec before execution is built.
@@ -1144,77 +1148,6 @@ async def build_execution_request(
 
     finally:
         db.close()
-
-
-def _strip_external_knowledge_capabilities(request: Any) -> None:
-    """Remove provider-native knowledge Skills and MCPs from agent API runtime."""
-    from app.services.chat.selected_knowledge import PROVIDER_SKILLS
-    from app.services.mcp_provider_registry import get_mcp_service_by_skill_name
-
-    external_skill_names = {
-        skill_name
-        for provider, skill_name in PROVIDER_SKILLS.items()
-        if provider != "wegent"
-    }
-    # WikiSpace is a DingTalk knowledge source even though selection currently
-    # routes document reads through the shared DingTalk Docs provider Skill.
-    external_skill_names.add("dingtalk-wikispace")
-    external_mcp_names: set[str] = set()
-    for skill_name in external_skill_names:
-        service = get_mcp_service_by_skill_name(skill_name)
-        if service:
-            external_mcp_names.add(service[1]["server_name"])
-
-    request.external_knowledge_refs = []
-    request.skill_names = [
-        name for name in request.skill_names or [] if name not in external_skill_names
-    ]
-    request.preload_skills = [
-        value
-        for value in request.preload_skills or []
-        if _skill_name(value) not in external_skill_names
-    ]
-    request.user_selected_skills = [
-        value
-        for value in request.user_selected_skills or []
-        if _skill_name(value) not in external_skill_names
-    ]
-    request.skill_configs = [
-        config
-        for config in request.skill_configs or []
-        if not isinstance(config, dict)
-        or config.get("name") not in external_skill_names
-    ]
-    request.mcp_servers = [
-        server
-        for server in request.mcp_servers or []
-        if not isinstance(server, dict) or server.get("name") not in external_mcp_names
-    ]
-    for bot in request.bot or []:
-        if not isinstance(bot, dict):
-            continue
-        bot["skills"] = [
-            name for name in bot.get("skills", []) if name not in external_skill_names
-        ]
-        bot["skill_refs"] = {
-            name: ref
-            for name, ref in (bot.get("skill_refs") or {}).items()
-            if name not in external_skill_names
-        }
-        bot["mcp_servers"] = [
-            server
-            for server in bot.get("mcp_servers", [])
-            if not isinstance(server, dict)
-            or server.get("name") not in external_mcp_names
-        ]
-
-
-def _skill_name(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return str(value.get("name") or "")
-    return str(getattr(value, "name", ""))
 
 
 async def _process_contexts(

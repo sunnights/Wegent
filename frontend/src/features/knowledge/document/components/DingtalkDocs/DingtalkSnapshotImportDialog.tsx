@@ -69,10 +69,10 @@ export function DingtalkSnapshotImportDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Download className="w-5 h-5 text-primary" />
-            {t('document.dingtalk.importTitle', '导入到 Wegent 知识库')}
+            {t('document.dingtalk.importTitle')}
           </DialogTitle>
           <DialogDescription>
-            {t('document.dingtalk.importHint', '将选中的 {{count}} 项复制为静态快照。', {
+            {t('document.dingtalk.importHint', {
               count: selectedCount,
             })}
           </DialogDescription>
@@ -80,17 +80,18 @@ export function DingtalkSnapshotImportDialog({
 
         <div className="space-y-4 py-4">
           <div className="space-y-1.5">
-            <Label>{t('document.dingtalk.targetKnowledgeBase', '目标知识库')}</Label>
+            <Label>{t('document.dingtalk.targetKnowledgeBase')}</Label>
             {isLoading ? (
               <div className="flex justify-center py-3">
                 <Spinner />
               </div>
             ) : (
               <Select value={targetId} onValueChange={setTargetId}>
-                <SelectTrigger data-testid="dingtalk-import-target-kb-select">
-                  <SelectValue
-                    placeholder={t('document.dingtalk.selectKnowledgeBase', '请选择知识库')}
-                  />
+                <SelectTrigger
+                  className="h-11 md:h-10"
+                  data-testid="dingtalk-import-target-kb-select"
+                >
+                  <SelectValue placeholder={t('document.dingtalk.selectKnowledgeBase')} />
                 </SelectTrigger>
                 <SelectContent>
                   {knowledgeBases.map(kb => (
@@ -103,9 +104,13 @@ export function DingtalkSnapshotImportDialog({
             )}
             {!isLoading && knowledgeBases.length === 0 && (
               <p className="text-sm text-text-muted">
-                {t('document.dingtalk.noTargetKnowledgeBase', '暂无可用知识库。')}{' '}
-                <Link href="/knowledge" className="text-primary hover:underline">
-                  {t('document.dingtalk.createKnowledgeBase', '创建知识库')}
+                {t('document.dingtalk.noTargetKnowledgeBase')}{' '}
+                <Link
+                  href="/knowledge"
+                  className="inline-flex min-h-11 items-center text-primary hover:underline md:min-h-0"
+                  data-testid="dingtalk-create-knowledge-base-link"
+                >
+                  {t('document.dingtalk.createKnowledgeBase')}
                 </Link>
               </p>
             )}
@@ -117,6 +122,7 @@ export function DingtalkSnapshotImportDialog({
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={isSubmitting}
+            className="h-11 md:h-10"
             data-testid="dingtalk-import-cancel-button"
           >
             {t('common:actions.cancel')}
@@ -125,11 +131,10 @@ export function DingtalkSnapshotImportDialog({
             variant="primary"
             onClick={() => onConfirm(Number(targetId))}
             disabled={!targetId || isSubmitting || isLoading}
+            className="h-11 md:h-10"
             data-testid="dingtalk-import-confirm-button"
           >
-            {isSubmitting
-              ? t('document.dingtalk.importing', '导入中...')
-              : t('document.dingtalk.import', '导入')}
+            {isSubmitting ? t('document.dingtalk.importing') : t('document.dingtalk.import')}
           </Button>
         </DialogFooter>
       </DialogContent>

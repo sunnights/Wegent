@@ -39,6 +39,101 @@ def register_provider_skill(provider_id: str, skill_name: str) -> None:
     PROVIDER_SKILLS[provider_id] = skill_name
 
 
+def strip_external_knowledge_capabilities(request: "ExecutionRequest") -> None:
+    """Remove provider-native knowledge capabilities from every runtime view."""
+    external_skill_names = {
+        skill_name
+        for provider, skill_name in PROVIDER_SKILLS.items()
+        if provider != "wegent"
+    }
+    external_skill_names.add("dingtalk-wikispace")
+    external_mcp_names = {
+        service[1]["server_name"]
+        for skill_name in external_skill_names
+        if (service := get_mcp_service_by_skill_name(skill_name))
+    }
+
+    request.external_knowledge_refs = []
+    request.skill_names = [
+        name for name in request.skill_names or [] if name not in external_skill_names
+    ]
+    request.preload_skills = _without_external_skills(
+        request.preload_skills,
+        external_skill_names,
+    )
+    request.user_selected_skills = _without_external_skills(
+        request.user_selected_skills,
+        external_skill_names,
+    )
+    request.skill_configs = [
+        config
+        for config in request.skill_configs or []
+        if not isinstance(config, dict)
+        or config.get("name") not in external_skill_names
+    ]
+    request.mcp_servers = _without_external_mcp_servers(
+        request.mcp_servers,
+        external_mcp_names,
+    )
+    for bot in request.bot or []:
+        _strip_external_bot_capabilities(
+            bot,
+            external_skill_names,
+            external_mcp_names,
+        )
+
+
+def _without_external_skills(
+    values: list[Any] | None,
+    external_skill_names: set[str],
+) -> list[Any]:
+    return [
+        value
+        for value in values or []
+        if _skill_name(value) not in external_skill_names
+    ]
+
+
+def _without_external_mcp_servers(
+    servers: list[Any] | None,
+    external_mcp_names: set[str],
+) -> list[Any]:
+    return [
+        server
+        for server in servers or []
+        if not isinstance(server, dict) or server.get("name") not in external_mcp_names
+    ]
+
+
+def _strip_external_bot_capabilities(
+    bot: Any,
+    external_skill_names: set[str],
+    external_mcp_names: set[str],
+) -> None:
+    if not isinstance(bot, dict):
+        return
+    bot["skills"] = [
+        name for name in bot.get("skills", []) if name not in external_skill_names
+    ]
+    bot["skill_refs"] = {
+        name: ref
+        for name, ref in (bot.get("skill_refs") or {}).items()
+        if name not in external_skill_names
+    }
+    bot["mcp_servers"] = _without_external_mcp_servers(
+        bot.get("mcp_servers"),
+        external_mcp_names,
+    )
+
+
+def _skill_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("name") or "")
+    return str(getattr(value, "name", ""))
+
+
 def apply_selected_knowledge_context(
     db: "Session",
     request: "ExecutionRequest",

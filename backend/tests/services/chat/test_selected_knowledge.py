@@ -16,6 +16,7 @@ from app.services.chat.selected_knowledge import (
     activate_provider_native_knowledge,
     apply_selected_knowledge_context,
     build_selected_knowledge_refs,
+    strip_external_knowledge_capabilities,
 )
 from app.services.execution.skill_mcp import extract_skill_mcp_servers
 from shared.models import ExecutionRequest, KnowledgeBaseScope
@@ -39,6 +40,62 @@ class _KnowledgeMetadataDB:
         if model is KnowledgeDocument:
             return _Query([SimpleNamespace(id=9, name="接口约定")])
         raise AssertionError(f"Unexpected model: {model}")
+
+
+def test_strip_external_knowledge_capabilities_filters_all_runtime_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(PROVIDER_SKILLS, "demo", "demo-knowledge")
+    request = ExecutionRequest(
+        external_knowledge_refs=[{"provider": "demo", "id": "kb-1"}],
+        skill_names=["demo-knowledge", "other"],
+        preload_skills=[{"name": "demo-knowledge"}, "other"],
+        user_selected_skills=["demo-knowledge", "other"],
+        skill_configs=[{"name": "demo-knowledge"}, {"name": "other"}],
+        mcp_servers=[
+            {"name": "demo-mcp", "url": "https://example.com/demo"},
+            {"name": "other-mcp", "url": "https://example.com/other"},
+        ],
+        bot=[
+            {
+                "skills": ["demo-knowledge", "other"],
+                "skill_refs": {
+                    "demo-knowledge": {"name": "demo-knowledge"},
+                    "other": {"name": "other"},
+                },
+                "mcp_servers": [
+                    {"name": "demo-mcp"},
+                    {"name": "other-mcp"},
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.services.chat.selected_knowledge.get_mcp_service_by_skill_name",
+        lambda skill_name: (
+            ({}, {"server_name": "demo-mcp"})
+            if skill_name == "demo-knowledge"
+            else None
+        ),
+    )
+
+    strip_external_knowledge_capabilities(request)
+
+    assert request.external_knowledge_refs == []
+    assert request.skill_names == ["other"]
+    assert request.preload_skills == ["other"]
+    assert request.user_selected_skills == ["other"]
+    assert request.skill_configs == [{"name": "other"}]
+    assert request.mcp_servers == [
+        {"name": "other-mcp", "url": "https://example.com/other"}
+    ]
+    assert request.bot == [
+        {
+            "skills": ["other"],
+            "skill_refs": {"other": {"name": "other"}},
+            "mcp_servers": [{"name": "other-mcp"}],
+        }
+    ]
 
 
 def test_apply_selected_knowledge_context_deduplicates_provider_skills(

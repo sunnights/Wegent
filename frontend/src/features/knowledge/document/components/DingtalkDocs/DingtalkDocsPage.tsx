@@ -178,15 +178,15 @@ export function DingtalkDocsPage({
       try {
         await dingtalkDocApi.importSnapshot(knowledgeBaseId, Array.from(selectedNodeIds))
         toast({
-          title: t('document.dingtalk.importSuccess', '导入已提交'),
-          description: t('document.dingtalk.importSuccessDetail', '索引完成后即可使用。'),
+          title: t('document.dingtalk.importSuccess'),
+          description: t('document.dingtalk.importSuccessDetail'),
         })
         setSelectedNodeIds(new Set())
         setIsImportDialogOpen(false)
       } catch (error) {
         console.error('Failed to import DingTalk snapshot:', error)
         toast({
-          title: t('document.dingtalk.importFailed', '导入失败'),
+          title: t('document.dingtalk.importFailed'),
           variant: 'destructive',
         })
       } finally {
@@ -203,13 +203,13 @@ export function DingtalkDocsPage({
         <div className="flex items-center gap-3">
           <FolderOpen className="w-5 h-5 text-primary" />
           <h2 className="text-lg font-semibold text-text-primary">
-            {t('document.sidebar.dingtalk', '钉钉文档')}
+            {t('document.sidebar.dingtalk')}
           </h2>
         </div>
         <div className="flex items-center gap-2">
           {activeSyncStatus?.last_synced_at && (
             <span className="text-xs text-text-muted">
-              {t('document.dingtalk.lastSynced', '上次同步')}:{' '}
+              {t('document.dingtalk.lastSynced')}:{' '}
               {formatDateTime(new Date(activeSyncStatus.last_synced_at).getTime())}
             </span>
           )}
@@ -223,7 +223,7 @@ export function DingtalkDocsPage({
               data-testid="dingtalk-import-button"
             >
               <Download className="w-3.5 h-3.5 mr-1" />
-              {t('document.dingtalk.importSelected', '导入所选')} ({selectedNodeIds.size})
+              {t('document.dingtalk.importSelected')} ({selectedNodeIds.size})
             </Button>
           )}
           <Button
@@ -239,12 +239,12 @@ export function DingtalkDocsPage({
             {isSyncing ? (
               <>
                 <Spinner size="sm" className="mr-1" />
-                {t('document.dingtalk.syncing', '同步中...')}
+                {t('document.dingtalk.syncing')}
               </>
             ) : (
               <>
                 <RefreshCw className="w-3.5 h-3.5 mr-1" />
-                {t('document.dingtalk.sync', '同步')}
+                {t('document.dingtalk.sync')}
               </>
             )}
           </Button>
@@ -260,17 +260,25 @@ export function DingtalkDocsPage({
         }}
         className="flex flex-col flex-1 min-h-0"
       >
-        <TabsList className="mx-6 mt-3 self-start rounded-md">
-          <TabsTrigger value="my-docs" data-testid="dingtalk-tab-my-docs">
+        <TabsList className="mx-6 mt-3 h-11 self-start rounded-md md:h-9">
+          <TabsTrigger
+            value="my-docs"
+            className="min-h-11 md:min-h-0"
+            data-testid="dingtalk-tab-my-docs"
+          >
             <FolderOpen className="w-3.5 h-3.5 mr-1.5" />
-            {t('document.dingtalk.myDocs', '我的文档')}
+            {t('document.dingtalk.myDocs')}
             {docTotalCount > 0 && (
               <span className="ml-1.5 text-xs text-text-muted">({docTotalCount})</span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="wikispace" data-testid="dingtalk-tab-wikispace">
+          <TabsTrigger
+            value="wikispace"
+            className="min-h-11 md:min-h-0"
+            data-testid="dingtalk-tab-wikispace"
+          >
             <BookOpen className="w-3.5 h-3.5 mr-1.5" />
-            {t('document.dingtalk.wikispace', '知识库')}
+            {t('document.dingtalk.wikispace')}
             {wikispaceTotalCount > 0 && (
               <span className="ml-1.5 text-xs text-text-muted">({wikispaceTotalCount})</span>
             )}
@@ -289,7 +297,7 @@ export function DingtalkDocsPage({
             <DingtalkEmptyState
               onSync={handleSyncDocs}
               isSyncing={isSyncingDocs}
-              hint={t('document.dingtalk.syncHint', '点击同步按钮从钉钉拉取文档列表')}
+              hint={t('document.dingtalk.syncHint')}
               t={t}
             />
           ) : (
@@ -315,7 +323,7 @@ export function DingtalkDocsPage({
             <DingtalkEmptyState
               onSync={handleSyncWikispace}
               isSyncing={isSyncingWikispace}
-              hint={t('document.dingtalk.wikispaceSyncHint', '点击同步按钮从钉钉拉取知识库')}
+              hint={t('document.dingtalk.wikispaceSyncHint')}
               t={t}
             />
           ) : (
@@ -356,19 +364,19 @@ function DingtalkEmptyState({
     <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
       <FolderOpen className="w-16 h-16 text-text-muted mb-4" />
       <h3 className="text-lg font-medium text-text-primary mb-2">
-        {t('document.dingtalk.emptyState', '暂无文档')}
+        {t('document.dingtalk.emptyState')}
       </h3>
       <p className="text-sm text-text-muted mb-4">{hint}</p>
       <Button variant="primary" onClick={onSync} disabled={isSyncing} className="h-11 min-w-[44px]">
         {isSyncing ? (
           <>
             <Spinner size="sm" className="mr-1" />
-            {t('document.dingtalk.syncing', '同步中...')}
+            {t('document.dingtalk.syncing')}
           </>
         ) : (
           <>
             <RefreshCw className="w-3.5 h-3.5 mr-1" />
-            {t('document.dingtalk.sync', '同步')}
+            {t('document.dingtalk.sync')}
           </>
         )}
       </Button>
@@ -382,22 +390,17 @@ function WikispaceNotConfigured({ t }: { t: TFunction }) {
     <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
       <BookOpen className="w-16 h-16 text-text-muted mb-4" />
       <h3 className="text-lg font-medium text-text-primary mb-2">
-        {t(
-          'document.dingtalk.wikispaceNotConfigured',
-          '同步需要同时配置钉钉知识库 MCP 和钉钉文档 MCP'
-        )}
+        {t('document.dingtalk.wikispaceNotConfigured')}
       </h3>
       <p className="text-sm text-text-muted mb-4">
-        {t(
-          'document.dingtalk.wikispaceConfigureHint',
-          '请前往设置配置钉钉知识库 MCP 和钉钉文档 MCP'
-        )}
+        {t('document.dingtalk.wikispaceConfigureHint')}
       </p>
       <Link
         href="/settings?section=integrations&tab=integrations"
-        className="inline-flex items-center gap-1.5 text-sm text-primary hover:text-primary/80 font-medium transition-colors"
+        className="inline-flex min-h-11 min-w-[44px] items-center justify-center gap-1.5 text-sm text-primary hover:text-primary/80 font-medium transition-colors md:min-h-0 md:min-w-0"
+        data-testid="dingtalk-wikispace-settings-link"
       >
-        {t('document.dingtalk.goToSettings', '前往设置')}
+        {t('document.dingtalk.goToSettings')}
         <ExternalLink className="w-3.5 h-3.5" />
       </Link>
     </div>
