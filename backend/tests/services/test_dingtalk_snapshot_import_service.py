@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.dingtalk_doc import DingtalkSyncedNode
@@ -180,9 +181,12 @@ def test_store_snapshot_creates_document_as_initiating_user() -> None:
             return_value=(attachment, None),
         ),
         patch(
-            "app.services.dingtalk_snapshot_import_service.knowledge_orchestrator.create_document_from_attachment",
+            "app.services.dingtalk_snapshot_import_service.KnowledgeService.create_document_record",
             return_value=SimpleNamespace(id=19),
         ) as create_document,
+        patch(
+            "app.services.dingtalk_snapshot_import_service.knowledge_orchestrator.reindex_document"
+        ) as reindex_document,
     ):
         result = DingTalkSnapshotImportService._store_snapshot(
             db=db,
@@ -192,10 +196,92 @@ def test_store_snapshot_creates_document_as_initiating_user() -> None:
             content="# Design",
         )
 
-    assert create_document.call_args.kwargs["user"] is user
+    assert create_document.call_args.kwargs["user_id"] == user.id
     assert create_document.call_args.kwargs["data"].attachment_id == 12
     mapping = db.add.call_args.args[0]
     assert mapping.external_resource_id == "docs:doc-4"
     assert mapping.source_url == node.doc_url
     assert mapping.document_id == 19
+    reindex_document.assert_called_once_with(
+        db=db,
+        user=user,
+        document_id=19,
+        trigger_summary=False,
+    )
     assert result.action == "created"
+
+
+@pytest.mark.asyncio
+async def test_import_nodes_recovers_from_concurrent_snapshot_creation() -> None:
+    db = MagicMock()
+    node = SimpleNamespace(
+        id=4,
+        source="docs",
+        dingtalk_node_id="doc-4",
+        doc_url="https://alidocs.dingtalk.com/i/nodes/doc-4",
+        name="Design",
+    )
+    winner_mapping = SimpleNamespace(document_id=23, source_url="old")
+    winner_document = SimpleNamespace(id=23, kind_id=8, name="Old", user_id=6)
+    db.query.return_value.filter.return_value.first.side_effect = [
+        None,
+        winner_mapping,
+        winner_document,
+    ]
+    db.commit.side_effect = [
+        IntegrityError("INSERT", {}, RuntimeError("duplicate resource")),
+        None,
+    ]
+    user = SimpleNamespace(id=7)
+    attachment = SimpleNamespace(id=12)
+
+    with (
+        patch.object(DingTalkSnapshotImportService, "_assert_target_writable"),
+        patch.object(
+            DingTalkSnapshotImportService,
+            "_resolve_document_nodes",
+            return_value=[node],
+        ),
+        patch.object(
+            DingTalkSnapshotImportService,
+            "_fetch_contents",
+            return_value={4: "# Design"},
+        ),
+        patch(
+            "app.services.dingtalk_snapshot_import_service.DingTalkDocService.get_user_dingtalk_mcp_url",
+            return_value="https://mcp.example.test",
+        ),
+        patch(
+            "app.services.dingtalk_snapshot_import_service.context_service.upload_attachment",
+            return_value=(attachment, None),
+        ),
+        patch(
+            "app.services.dingtalk_snapshot_import_service.KnowledgeService.create_document_record",
+            return_value=SimpleNamespace(id=19),
+        ),
+        patch(
+            "app.services.dingtalk_snapshot_import_service.knowledge_orchestrator.update_document_content"
+        ) as update_content,
+        patch(
+            "app.services.dingtalk_snapshot_import_service.knowledge_orchestrator.reindex_document"
+        ) as reindex_document,
+    ):
+        result = await DingTalkSnapshotImportService.import_nodes(
+            db=db,
+            user=user,
+            knowledge_base_id=8,
+            node_ids=[4],
+        )
+
+    assert result.created == 0
+    assert result.updated == 1
+    assert result.items[0].document_id == 23
+    db.rollback.assert_called_once()
+    update_content.assert_called_once_with(
+        db=db,
+        user=user,
+        document_id=23,
+        content="# Design",
+        trigger_reindex=True,
+    )
+    reindex_document.assert_not_called()

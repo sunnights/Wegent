@@ -11,6 +11,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.dingtalk_doc import DingtalkSyncedNode
@@ -221,6 +222,41 @@ class DingTalkSnapshotImportService:
         content: str,
     ) -> DingtalkSnapshotImportItem:
         external_resource_id = f"{node.source}:{node.dingtalk_node_id}"
+        mapping, document = cls._find_snapshot_document(
+            db,
+            knowledge_base_id,
+            external_resource_id,
+        )
+        if document is not None:
+            assert mapping is not None
+            return cls._update_snapshot(
+                db=db,
+                user=user,
+                node=node,
+                content=content,
+                mapping=mapping,
+                document=document,
+            )
+
+        if mapping is not None:
+            db.delete(mapping)
+            db.flush()
+
+        return cls._create_snapshot(
+            db=db,
+            user=user,
+            knowledge_base_id=knowledge_base_id,
+            external_resource_id=external_resource_id,
+            node=node,
+            content=content,
+        )
+
+    @staticmethod
+    def _find_snapshot_document(
+        db: Session,
+        knowledge_base_id: int,
+        external_resource_id: str,
+    ) -> tuple[ExternalKnowledgeSnapshot | None, KnowledgeDocument | None]:
         mapping = (
             db.query(ExternalKnowledgeSnapshot)
             .filter(
@@ -230,38 +266,76 @@ class DingTalkSnapshotImportService:
             )
             .first()
         )
-        document = None
-        if mapping is not None:
-            document = (
-                db.query(KnowledgeDocument)
-                .filter(
-                    KnowledgeDocument.id == mapping.document_id,
-                    KnowledgeDocument.kind_id == knowledge_base_id,
-                )
-                .first()
+        if mapping is None:
+            return None, None
+        document = (
+            db.query(KnowledgeDocument)
+            .filter(
+                KnowledgeDocument.id == mapping.document_id,
+                KnowledgeDocument.kind_id == knowledge_base_id,
             )
+            .first()
+        )
+        return mapping, document
 
-        if document is not None:
-            knowledge_orchestrator.update_document_content(
+    @classmethod
+    def _create_snapshot(
+        cls,
+        *,
+        db: Session,
+        user: User,
+        knowledge_base_id: int,
+        external_resource_id: str,
+        node: DingtalkSyncedNode,
+        content: str,
+    ) -> DingtalkSnapshotImportItem:
+        document = cls._persist_snapshot_document(
+            db=db,
+            user=user,
+            knowledge_base_id=knowledge_base_id,
+            external_resource_id=external_resource_id,
+            node=node,
+            content=content,
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            recovered = cls._recover_concurrent_snapshot(
                 db=db,
                 user=user,
-                document_id=document.id,
+                knowledge_base_id=knowledge_base_id,
+                external_resource_id=external_resource_id,
+                node=node,
                 content=content,
-                trigger_reindex=True,
             )
-            document.name = cls._document_name(node.name)
-            mapping.source_url = node.doc_url
-            db.commit()
-            return DingtalkSnapshotImportItem(
-                node_id=node.id,
-                document_id=document.id,
-                action="updated",
-            )
+            if recovered is None:
+                raise
+            return recovered
 
-        if mapping is not None:
-            db.delete(mapping)
-            db.flush()
+        knowledge_orchestrator.reindex_document(
+            db=db,
+            user=user,
+            document_id=document.id,
+            trigger_summary=False,
+        )
+        return DingtalkSnapshotImportItem(
+            node_id=node.id,
+            document_id=document.id,
+            action="created",
+        )
 
+    @classmethod
+    def _persist_snapshot_document(
+        cls,
+        *,
+        db: Session,
+        user: User,
+        knowledge_base_id: int,
+        external_resource_id: str,
+        node: DingtalkSyncedNode,
+        content: str,
+    ) -> KnowledgeDocument:
         document_name = cls._document_name(node.name)
         binary_content = content.encode("utf-8")
         attachment, _ = context_service.upload_attachment(
@@ -271,10 +345,10 @@ class DingTalkSnapshotImportService:
             binary_data=binary_content,
             subtask_id=0,
         )
-        response = knowledge_orchestrator.create_document_from_attachment(
+        document = KnowledgeService.create_document_record(
             db=db,
-            user=user,
             knowledge_base_id=knowledge_base_id,
+            user_id=user.id,
             data=KnowledgeDocumentCreate(
                 attachment_id=attachment.id,
                 name=document_name,
@@ -282,8 +356,6 @@ class DingTalkSnapshotImportService:
                 file_size=len(binary_content),
                 source_type=DocumentSourceType.TEXT,
             ),
-            trigger_indexing=True,
-            trigger_summary=False,
         )
         db.add(
             ExternalKnowledgeSnapshot(
@@ -291,14 +363,63 @@ class DingTalkSnapshotImportService:
                 provider=PROVIDER_DINGTALK,
                 external_resource_id=external_resource_id,
                 source_url=node.doc_url,
-                document_id=response.id,
+                document_id=document.id,
             )
         )
+        return document
+
+    @classmethod
+    def _recover_concurrent_snapshot(
+        cls,
+        *,
+        db: Session,
+        user: User,
+        knowledge_base_id: int,
+        external_resource_id: str,
+        node: DingtalkSyncedNode,
+        content: str,
+    ) -> DingtalkSnapshotImportItem | None:
+        mapping, document = cls._find_snapshot_document(
+            db,
+            knowledge_base_id,
+            external_resource_id,
+        )
+        if mapping is None or document is None:
+            return None
+        return cls._update_snapshot(
+            db=db,
+            user=user,
+            node=node,
+            content=content,
+            mapping=mapping,
+            document=document,
+        )
+
+    @classmethod
+    def _update_snapshot(
+        cls,
+        *,
+        db: Session,
+        user: User,
+        node: DingtalkSyncedNode,
+        content: str,
+        mapping: ExternalKnowledgeSnapshot,
+        document: KnowledgeDocument,
+    ) -> DingtalkSnapshotImportItem:
+        knowledge_orchestrator.update_document_content(
+            db=db,
+            user=user,
+            document_id=document.id,
+            content=content,
+            trigger_reindex=True,
+        )
+        document.name = cls._document_name(node.name)
+        mapping.source_url = node.doc_url
         db.commit()
         return DingtalkSnapshotImportItem(
             node_id=node.id,
-            document_id=response.id,
-            action="created",
+            document_id=document.id,
+            action="updated",
         )
 
     @staticmethod

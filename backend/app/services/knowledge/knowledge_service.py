@@ -1385,8 +1385,26 @@ class KnowledgeService:
         user_id: int,
         data: KnowledgeDocumentCreate,
     ) -> KnowledgeDocument:
+        """Create and commit a document in a knowledge base."""
+        document = KnowledgeService.create_document_record(
+            db=db,
+            knowledge_base_id=knowledge_base_id,
+            user_id=user_id,
+            data=data,
+        )
+        db.commit()
+        db.refresh(document)
+        return document
+
+    @staticmethod
+    def create_document_record(
+        db: Session,
+        knowledge_base_id: int,
+        user_id: int,
+        data: KnowledgeDocumentCreate,
+    ) -> KnowledgeDocument:
         """
-        Create a new document in a knowledge base.
+        Persist a document without committing the caller-owned transaction.
 
         Args:
             db: Database session
@@ -1469,8 +1487,6 @@ class KnowledgeService:
         # Update cached document count in knowledge base spec
         KnowledgeService._update_document_count_cache(db, knowledge_base_id)
 
-        db.commit()
-        db.refresh(document)
         return document
 
     @staticmethod

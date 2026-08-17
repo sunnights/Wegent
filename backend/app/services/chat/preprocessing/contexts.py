@@ -1637,9 +1637,17 @@ def _prepare_kb_tools_from_contexts(
     )
     scopes_by_kb = {scope.knowledge_base_id: scope for scope in task_scopes}
     scopes_by_kb.update({scope.knowledge_base_id: scope for scope in current_scopes})
-    knowledge_base_scopes = [
-        scopes_by_kb[kb_id] for kb_id in knowledge_base_ids if kb_id in scopes_by_kb
-    ]
+    knowledge_base_scopes = (
+        [
+            scopes_by_kb.get(
+                kb_id,
+                KnowledgeBaseScope(knowledge_base_id=kb_id),
+            )
+            for kb_id in knowledge_base_ids
+        ]
+        if scopes_by_kb
+        else []
+    )
     if knowledge_base_ids:
         logger.info(
             "[_prepare_kb_tools_from_contexts] Merged defaults=%s, task=%s, "

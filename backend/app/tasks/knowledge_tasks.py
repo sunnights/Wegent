@@ -15,7 +15,7 @@ These tasks are the unified async mechanism used by both REST API and MCP tools.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
@@ -121,11 +121,56 @@ def _enqueue_document_summary_task(
         )
 
 
+def _retry_indexing_failure_if_allowed(
+    task: Any,
+    *,
+    exc: Exception,
+    retry_count: int,
+    task_id: str,
+    document_id: int,
+    index_generation: int,
+) -> DocumentProcessingError:
+    """Queue a retry for a retryable active generation or return its final error."""
+    from app.services.knowledge.index_state_machine import (
+        mark_document_index_retry_queued,
+    )
+
+    processing_error = map_indexing_exception(
+        exc,
+        generation=index_generation,
+    )
+    if not processing_error.retryable or retry_count >= task.max_retries:
+        return processing_error
+
+    with SessionLocal() as retry_db:
+        retry_queued = mark_document_index_retry_queued(
+            db=retry_db,
+            document_id=document_id,
+            generation=index_generation,
+        )
+    if not retry_queued:
+        return processing_error
+
+    countdown = min(
+        settings.KNOWLEDGE_INDEX_RETRY_DELAY_SECONDS * (2**retry_count),
+        settings.KNOWLEDGE_INDEX_RETRY_MAX_DELAY_SECONDS,
+    )
+    logger.warning(
+        f"[Celery RAG Indexing] Retrying failed index: "
+        f"task_id={task_id}, document_id={document_id}, "
+        f"index_generation={index_generation}, "
+        f"retry={retry_count + 1}/{task.max_retries}, "
+        f"countdown={countdown}s",
+        exc_info=True,
+    )
+    raise task.retry(exc=exc, countdown=countdown)
+
+
 @celery_app.task(
     bind=True,
     name="app.tasks.knowledge_tasks.index_document",
-    max_retries=settings.KNOWLEDGE_INDEX_LOCK_MAX_RETRIES,
-    default_retry_delay=settings.KNOWLEDGE_INDEX_LOCK_RETRY_DELAY_SECONDS,
+    max_retries=settings.KNOWLEDGE_INDEX_MAX_RETRIES,
+    default_retry_delay=settings.KNOWLEDGE_INDEX_RETRY_DELAY_SECONDS,
 )
 def index_document_task(
     self,
@@ -212,7 +257,10 @@ def index_document_task(
         extend_interval_seconds=KNOWLEDGE_INDEX_LOCK_EXTEND_INTERVAL_SECONDS,
     ) as acquired:
         if not acquired:
-            if retry_count < self.max_retries:
+            if retry_count < min(
+                self.max_retries,
+                settings.KNOWLEDGE_INDEX_LOCK_MAX_RETRIES,
+            ):
                 logger.warning(
                     f"[Celery RAG Indexing] Lock held, scheduling retry: "
                     f"task_id={task_id}, document_id={document_id}, "
@@ -381,15 +429,21 @@ def index_document_task(
             return result
 
         except Exception as exc:
+            processing_error = _retry_indexing_failure_if_allowed(
+                self,
+                exc=exc,
+                retry_count=retry_count,
+                task_id=task_id,
+                document_id=document_id,
+                index_generation=index_generation,
+            )
+
             with SessionLocal() as finalize_db:
                 finalized = mark_document_index_failed(
                     db=finalize_db,
                     document_id=document_id,
                     generation=index_generation,
-                    error=map_indexing_exception(
-                        exc,
-                        generation=index_generation,
-                    ),
+                    error=processing_error,
                 )
 
             if not finalized:

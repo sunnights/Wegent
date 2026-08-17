@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.config import settings
-from app.models.knowledge import DocumentIndexStatus
+from app.models.knowledge import DocumentIndexStatus, KnowledgeDocument
 from app.tasks.knowledge_tasks import (
     _build_stale_processing_error,
     import_dingtalk_snapshot_task,
@@ -164,6 +164,108 @@ def test_index_document_task_skips_after_lock_retry_exhaustion(
     retry_mock.assert_not_called()
     assert result["status"] == "skipped"
     assert result["reason"] == "lock_retry_exhausted"
+
+
+def test_index_document_task_requeues_indexing_failure_before_retry_exhaustion(
+    test_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = KnowledgeDocument(
+        kind_id=1,
+        attachment_id=2,
+        name="Retryable",
+        file_extension="md",
+        file_size=10,
+        user_id=3,
+        source_type="text",
+        index_status=DocumentIndexStatus.QUEUED,
+        index_generation=5,
+    )
+    test_db.add(document)
+    test_db.commit()
+
+    retry_mock = MagicMock(side_effect=RuntimeError("retry-called"))
+    monkeypatch.setattr(index_document_task, "retry", retry_mock)
+
+    with _task_request_context(retries=0), ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.distributed_lock.acquire_watchdog_context",
+                return_value=_lock_context(True),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.indexing.run_document_indexing",
+                side_effect=RuntimeError("temporary indexing failure"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.SessionLocal",
+                return_value=nullcontext(test_db),
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="retry-called"):
+            index_document_task.run(**(_task_kwargs() | {"document_id": document.id}))
+
+    test_db.expire_all()
+    persisted = test_db.get(KnowledgeDocument, document.id)
+    assert persisted is not None
+    assert persisted.index_status == DocumentIndexStatus.QUEUED
+    retry_mock.assert_called_once()
+    assert (
+        retry_mock.call_args.kwargs["countdown"]
+        == settings.KNOWLEDGE_INDEX_RETRY_DELAY_SECONDS
+    )
+
+
+def test_index_document_task_marks_failed_after_retry_exhaustion(
+    test_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = KnowledgeDocument(
+        kind_id=1,
+        attachment_id=2,
+        name="Failed",
+        file_extension="md",
+        file_size=10,
+        user_id=3,
+        source_type="text",
+        index_status=DocumentIndexStatus.QUEUED,
+        index_generation=5,
+    )
+    test_db.add(document)
+    test_db.commit()
+
+    retry_mock = MagicMock()
+    monkeypatch.setattr(index_document_task, "retry", retry_mock)
+
+    with (
+        _task_request_context(retries=index_document_task.max_retries),
+        patch(
+            "app.tasks.knowledge_tasks.distributed_lock.acquire_watchdog_context",
+            return_value=_lock_context(True),
+        ),
+        patch(
+            "app.services.knowledge.indexing.run_document_indexing",
+            side_effect=RuntimeError("persistent indexing failure"),
+        ),
+        patch(
+            "app.tasks.knowledge_tasks.SessionLocal",
+            return_value=nullcontext(test_db),
+        ),
+        pytest.raises(RuntimeError, match="persistent indexing failure"),
+    ):
+        index_document_task.run(**(_task_kwargs() | {"document_id": document.id}))
+
+    test_db.expire_all()
+    persisted = test_db.get(KnowledgeDocument, document.id)
+    assert persisted is not None
+    assert persisted.index_status == DocumentIndexStatus.FAILED
+    assert persisted.processing_error_payload["code"] == "indexing_failed"
+    retry_mock.assert_not_called()
 
 
 def test_index_document_task_marks_skip_result_as_failed():

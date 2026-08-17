@@ -26,6 +26,7 @@ from app.models.subtask_context import SubtaskContext
 from app.models.task import TaskResource
 from app.services.knowledge import TaskKnowledgeBaseService
 from app.services.share import knowledge_share_service
+from shared.models.knowledge import KnowledgeBaseScope
 
 
 @pytest.mark.unit
@@ -546,7 +547,7 @@ class TestKBPriorityLogic:
             ),
             patch(
                 "app.services.chat.preprocessing.contexts._get_bound_knowledge_base_ids",
-                return_value=[],
+                return_value=[30],
             ),
             patch(
                 "app.services.chat.preprocessing.contexts._get_bound_knowledge_base_scopes",
@@ -575,11 +576,17 @@ class TestKBPriorityLogic:
             )
 
         call_kwargs = mock_scoped_tool.call_args.kwargs
-        assert call_kwargs["knowledge_base_ids"] == [10, 20]
-        assert len(call_kwargs["knowledge_base_scopes"]) == 1
-        assert call_kwargs["knowledge_base_scopes"][0].knowledge_base_id == 10
-        assert call_kwargs["knowledge_base_scopes"][0].document_ids == [101]
-        assert result.knowledge_base_ids == [10, 20]
+        assert call_kwargs["knowledge_base_ids"] == [10, 20, 30]
+        assert call_kwargs["knowledge_base_scopes"] == [
+            KnowledgeBaseScope(
+                knowledge_base_id=10,
+                scope_restricted=True,
+                document_ids=[101],
+            ),
+            KnowledgeBaseScope(knowledge_base_id=20),
+            KnowledgeBaseScope(knowledge_base_id=30),
+        ]
+        assert result.knowledge_base_ids == [10, 20, 30]
 
     def test_scoped_context_uses_scopes_without_legacy_document_filters(self, mock_db):
         """Scoped document IDs should only be represented by per-KB scopes."""

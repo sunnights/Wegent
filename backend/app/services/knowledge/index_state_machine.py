@@ -390,6 +390,48 @@ def mark_document_index_started(
     )
 
 
+@trace_sync(
+    span_name="knowledge.mark_document_index_retry_queued",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, generation: {
+        "knowledge.document_id": document_id,
+        "knowledge.index_generation": generation,
+    },
+)
+def mark_document_index_retry_queued(
+    db: Session,
+    document_id: int,
+    generation: int,
+) -> bool:
+    """Return the active indexing generation to queued before a task retry."""
+    document = (
+        db.query(KnowledgeDocument)
+        .filter(KnowledgeDocument.id == document_id)
+        .with_for_update()
+        .first()
+    )
+    if (
+        document is None
+        or document.index_generation != generation
+        or document.index_status != DocumentIndexStatus.INDEXING
+    ):
+        db.rollback()
+        return False
+
+    document.index_status = DocumentIndexStatus.QUEUED
+    document.clear_processing_error_payload()
+    document.updated_at = _utcnow()
+    db.commit()
+    _record_transition(
+        "knowledge.index.retry.queued",
+        document_id=document_id,
+        generation=generation,
+        reason="retry_scheduled",
+        previous_status=DocumentIndexStatus.INDEXING,
+    )
+    return True
+
+
 _INDEX_SUCCEEDED_ALLOWED_STATUSES = {
     DocumentIndexStatus.QUEUED,
     DocumentIndexStatus.INDEXING,
