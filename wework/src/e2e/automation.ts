@@ -656,6 +656,20 @@ function pressDesktopControlPointer(selector: string): string {
   return element.textContent?.trim() ?? ''
 }
 
+async function pressDesktopControlKey(selector: string, key: string): Promise<string> {
+  const element = findDesktopControlElements(selector)[0]
+  if (!element) throw new Error(`Unable to find selector "${selector}"`)
+  element.focus()
+  const keyboardEvent = parseDesktopControlKey(key)
+  for (const type of ['keydown', 'keyup']) {
+    element.dispatchEvent(
+      new KeyboardEvent(type, { ...keyboardEvent, bubbles: true, cancelable: true })
+    )
+  }
+  await waitForDesktopControlTick()
+  return element.textContent?.trim() ?? ''
+}
+
 let activeDesktopControlPointer: {
   element: HTMLElement
   options: MouseEventInit & PointerEventInit
@@ -1001,7 +1015,30 @@ async function executeDesktopControlCommand(command: DesktopControlCommand): Pro
           detail: JSON.parse(command.value ?? '{}'),
         })
       )
+      if (command.key) {
+        await waitForDesktopControlTick()
+        return pressDesktopControlKey(command.target ?? command.selector, command.key)
+      }
       return ''
+    case 'getSystemNotifications':
+      return JSON.stringify(
+        (
+          globalThis as typeof globalThis & {
+            __WEWORK_E2E_SYSTEM_NOTIFICATIONS__?: {
+              notifications: Array<{ title: string; body: string }>
+            }
+          }
+        ).__WEWORK_E2E_SYSTEM_NOTIFICATIONS__?.notifications ?? []
+      )
+    case 'clearSystemNotifications': {
+      const root = globalThis as typeof globalThis & {
+        __WEWORK_E2E_SYSTEM_NOTIFICATIONS__?: {
+          notifications: Array<{ title: string; body: string }>
+        }
+      }
+      root.__WEWORK_E2E_SYSTEM_NOTIFICATIONS__ = { notifications: [] }
+      return ''
+    }
     case 'reconcileLegacyRuntimeAssistantSnapshot': {
       const payload = JSON.parse(command.value ?? '{}') as {
         address: RuntimeTaskAddress
@@ -1094,6 +1131,12 @@ async function executeDesktopControlCommand(command: DesktopControlCommand): Pro
       return ''
     case 'getWindowFocusSnapshot':
       return getWindowFocusSnapshot()
+    case 'showSystemDragPanel': {
+      await invoke<void>('show_system_drag_panel_for_e2e')
+      return ''
+    }
+    case 'getSystemDragPanelVisibility':
+      return String(await invoke<boolean>('get_system_drag_panel_visibility_for_e2e'))
     case 'completeSystemDragDrop':
       await invoke('complete_system_drag_drop', {
         payload: JSON.parse(command.value ?? '{}'),
@@ -1132,6 +1175,21 @@ async function executeDesktopControlCommand(command: DesktopControlCommand): Pro
           ? findDesktopControlElements(command.selector).filter(desktopControlElementVisible).length
           : findDesktopControlElements(command.selector).length
       )
+    case 'sampleElementPresence': {
+      const durationMs = Number(command.value)
+      if (!Number.isFinite(durationMs) || durationMs <= 0) {
+        throw new Error('sampleElementPresence requires a finite positive durationMs')
+      }
+      const startedAt = performance.now()
+      let maxCount = 0
+      let samples = 0
+      while (performance.now() - startedAt < durationMs) {
+        maxCount = Math.max(maxCount, findDesktopControlElements(command.selector).length)
+        samples += 1
+        await waitForDesktopControlTick()
+      }
+      return JSON.stringify({ observed: maxCount > 0, maxCount, samples })
+    }
     case 'getElementMetrics':
       return desktopControlElementMetrics(command.selector)
     case 'startScrollStabilitySampling': {
@@ -1516,17 +1574,7 @@ async function executeDesktopControlCommand(command: DesktopControlCommand): Pro
     case 'pointerMove':
       return moveDesktopControlPointer(command)
     case 'press': {
-      const element = findDesktopControlElements(command.selector)[0]
-      if (!element) throw new Error(`Unable to find selector "${command.selector}"`)
-      element.focus()
-      const keyboardEvent = parseDesktopControlKey(command.key ?? '')
-      for (const type of ['keydown', 'keyup']) {
-        element.dispatchEvent(
-          new KeyboardEvent(type, { ...keyboardEvent, bubbles: true, cancelable: true })
-        )
-      }
-      await waitForDesktopControlTick()
-      return element.textContent?.trim() ?? ''
+      return pressDesktopControlKey(command.selector, command.key ?? '')
     }
     case 'select': {
       const element = findDesktopControlElements(command.selector)[0]

@@ -25,6 +25,8 @@ from app.models.delivery import (
     LoopItemCollaborator,
     ProjectAutomationRule,
     ProjectAutomationRun,
+    ProjectIncomingEvent,
+    ProjectIncomingHook,
 )
 from app.models.dingtalk_doc import DingtalkSyncedNode
 from app.models.external_knowledge_snapshot import ExternalKnowledgeSnapshot
@@ -82,6 +84,8 @@ __all__ = [
     "LoopItem",
     "LoopItemAttachment",
     "LoopItemCollaborator",
+    "ProjectIncomingEvent",
+    "ProjectIncomingHook",
     "ProjectAutomationRule",
     "ProjectAutomationRun",
     "Delivery",

@@ -138,9 +138,16 @@ def apply_selected_knowledge_context(
     db: "Session",
     request: "ExecutionRequest",
     task: "TaskResource",
+    *,
+    resolved_knowledge_base_names: dict[int, str] | None = None,
 ) -> list[str]:
     """Attach the selected-knowledge prompt and deterministic provider skills."""
-    refs = build_selected_knowledge_refs(db, request, task)
+    refs = build_selected_knowledge_refs(
+        db,
+        request,
+        task,
+        resolved_knowledge_base_names=resolved_knowledge_base_names,
+    )
     if not refs:
         request.selected_knowledge_prompt = ""
         request.provider_native_knowledge = False
@@ -251,9 +258,19 @@ def build_selected_knowledge_refs(
     db: "Session",
     request: "ExecutionRequest",
     task: "TaskResource",
+    *,
+    resolved_knowledge_base_names: dict[int, str] | None = None,
 ) -> list[SelectedKnowledgeRef]:
     """Normalize internal task scopes and external refs without querying content."""
-    refs = [*_build_wegent_refs(db, request, task), *_build_external_refs(request)]
+    refs = [
+        *_build_wegent_refs(
+            db,
+            request,
+            task,
+            resolved_knowledge_base_names=resolved_knowledge_base_names,
+        ),
+        *_build_external_refs(request),
+    ]
     return _merge_selected_knowledge_refs(refs)
 
 
@@ -268,10 +285,21 @@ def _merge_selected_knowledge_refs(
         if current is None:
             merged[key] = ref
             continue
+        knowledge_base_name = _prefer_knowledge_base_name(current, ref)
         if not current.resources:
+            if knowledge_base_name != current.knowledge_base_name:
+                merged[key] = SelectedKnowledgeRef(
+                    provider=current.provider,
+                    knowledge_base_id=current.knowledge_base_id,
+                    knowledge_base_name=knowledge_base_name,
+                )
             continue
         if not ref.resources:
-            merged[key] = ref
+            merged[key] = SelectedKnowledgeRef(
+                provider=ref.provider,
+                knowledge_base_id=ref.knowledge_base_id,
+                knowledge_base_name=knowledge_base_name,
+            )
             continue
 
         resources = [*current.resources, *ref.resources]
@@ -286,16 +314,28 @@ def _merge_selected_knowledge_refs(
         merged[key] = SelectedKnowledgeRef(
             provider=current.provider,
             knowledge_base_id=current.knowledge_base_id,
-            knowledge_base_name=current.knowledge_base_name,
+            knowledge_base_name=knowledge_base_name,
             resources=tuple(unique_resources),
         )
     return list(merged.values())
+
+
+def _prefer_knowledge_base_name(
+    current: SelectedKnowledgeRef,
+    incoming: SelectedKnowledgeRef,
+) -> str:
+    """Prefer a resolved display name over the knowledge-base ID fallback."""
+    if current.knowledge_base_name != current.knowledge_base_id:
+        return current.knowledge_base_name
+    return incoming.knowledge_base_name
 
 
 def _build_wegent_refs(
     db: "Session",
     request: "ExecutionRequest",
     task: "TaskResource",
+    *,
+    resolved_knowledge_base_names: dict[int, str] | None,
 ) -> list[SelectedKnowledgeRef]:
     selected_ids = set(_int_values(request.knowledge_base_ids))
     if not selected_ids:
@@ -313,12 +353,18 @@ def _build_wegent_refs(
         for ref in spec.get("knowledgeBaseScopes") or []
         if isinstance(ref, dict) and ref.get("id") is not None
     }
+    current_names = resolved_knowledge_base_names or {}
     prefer_request_scope = _is_knowledge_workbench_task(task_json)
 
     result: list[SelectedKnowledgeRef] = []
     for kb_id in sorted(selected_ids):
         scope = scope_refs.get(kb_id) or {}
-        kb_name = str(scope.get("name") or kb_refs.get(kb_id, {}).get("name") or kb_id)
+        kb_name = str(
+            current_names.get(kb_id)
+            or scope.get("name")
+            or kb_refs.get(kb_id, {}).get("name")
+            or kb_id
+        )
         scope_restricted, folder_ids, document_ids = _resolve_wegent_scope(
             request,
             kb_id,
