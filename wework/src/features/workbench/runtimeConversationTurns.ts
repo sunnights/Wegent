@@ -28,6 +28,7 @@ export function mergeRuntimeConversationTurns(
   const snapshotUserMessageIds = new Set(
     snapshotTurns.flatMap(runtimeConversationTurnClientUserMessageIds)
   )
+  const snapshotIndexByAssistantItemId = uniqueSnapshotIndexByAssistantItemId(snapshotTurns)
   const merged = snapshotTurns.map(snapshotTurn => {
     const localIndex =
       (snapshotTurn.id === null ? undefined : localIndexByTurnId.get(snapshotTurn.id)) ??
@@ -41,6 +42,18 @@ export function mergeRuntimeConversationTurns(
 
   localTurns.forEach((turn, index) => {
     if (emittedLocalIndexes.has(index)) return
+    const aliasSnapshotIndexes = new Set(
+      runtimeConversationTurnAssistantItemIds(turn)
+        .map(id => snapshotIndexByAssistantItemId.get(id))
+        .filter((snapshotIndex): snapshotIndex is number => snapshotIndex !== undefined)
+    )
+    if (aliasSnapshotIndexes.size === 1) {
+      const snapshotIndex = aliasSnapshotIndexes.values().next().value
+      if (snapshotIndex !== undefined) {
+        merged[snapshotIndex] = mergeRuntimeConversationTurn(turn, merged[snapshotIndex])
+        return
+      }
+    }
     if (
       runtimeConversationTurnClientUserMessageIds(turn).some(id => snapshotUserMessageIds.has(id))
     ) {
@@ -53,6 +66,25 @@ export function mergeRuntimeConversationTurns(
   return orderRuntimeConversationTurns(merged)
 }
 
+function uniqueSnapshotIndexByAssistantItemId(
+  turns: RuntimeConversationTurn[]
+): Map<string, number> {
+  const indexes = new Map<string, number>()
+  const duplicates = new Set<string>()
+  turns.forEach((turn, index) => {
+    runtimeConversationTurnAssistantItemIds(turn).forEach(id => {
+      const existing = indexes.get(id)
+      if (existing === undefined) {
+        indexes.set(id, index)
+      } else if (existing !== index) {
+        duplicates.add(id)
+      }
+    })
+  })
+  duplicates.forEach(id => indexes.delete(id))
+  return indexes
+}
+
 function runtimeConversationTurnClientUserMessageIds(turn: RuntimeConversationTurn): string[] {
   return Array.from(
     new Set([
@@ -60,6 +92,10 @@ function runtimeConversationTurnClientUserMessageIds(turn: RuntimeConversationTu
       ...turn.items.flatMap(item => (item.type === 'user_message' ? [item.id] : [])),
     ])
   )
+}
+
+function runtimeConversationTurnAssistantItemIds(turn: RuntimeConversationTurn): string[] {
+  return turn.items.flatMap(item => (item.type === 'user_message' ? [] : [item.id]))
 }
 
 export function reduceRuntimeConversationTurns(
@@ -812,8 +848,26 @@ function upsertBlocks(
           ? preserveProcessingBlockTiming(next[index].block, block)
           : block,
     }
-    next = index < 0 ? [...next, canonicalItem] : replaceAt(next, index, canonicalItem)
+    next =
+      index < 0
+        ? insertRuntimeBlockBeforeLaterGuidance(next, canonicalItem)
+        : replaceAt(next, index, canonicalItem)
   }
+  return next
+}
+
+function insertRuntimeBlockBeforeLaterGuidance(
+  items: RuntimeConversationItem[],
+  blockItem: Extract<RuntimeConversationItem, { type: 'block' }>
+): RuntimeConversationItem[] {
+  const guidanceIndex = items.findIndex(item => {
+    if (item.type !== 'user_message' || item.message.runtimeGuidance !== true) return false
+    const guidanceCreatedAt = Date.parse(item.message.createdAt ?? '')
+    return Number.isFinite(guidanceCreatedAt) && blockItem.block.createdAt <= guidanceCreatedAt
+  })
+  if (guidanceIndex < 0) return [...items, blockItem]
+  const next = [...items]
+  next.splice(guidanceIndex, 0, blockItem)
   return next
 }
 
