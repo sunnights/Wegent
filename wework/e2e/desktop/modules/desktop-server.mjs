@@ -217,6 +217,7 @@ import {
   VIEW_IMAGE_PROMPT,
   VISION_SIDECAR_COMPLETION_TEXT,
   VISION_SIDECAR_DESCRIPTION,
+  VISION_SIDECAR_MAIN_REQUEST_SCENARIO,
   VISION_SIDECAR_PROMPT,
   MULTIMODAL_VISION_COMPLETION_TEXT,
   MULTIMODAL_VISION_PROMPT,
@@ -228,6 +229,18 @@ import {
   randomUUID,
   withTimeout,
 } from './shared.mjs'
+
+const DESKTOP_CONTROL_COMMAND_INTERVAL_MS = 250
+const ELECTRON_OBSERVATION_ACTIONS = new Set([
+  'activeElement',
+  'getAttribute',
+  'getElementCount',
+  'getText',
+  'metrics',
+  'snapshot',
+  'text',
+  'waitFor',
+])
 
 class DesktopE2EServer {
   constructor(
@@ -260,10 +273,12 @@ class DesktopE2EServer {
     this.activeControlClientId = null
     this.controlClientsByWindow = new Map()
     this.controlWindowsByClient = new Map()
+    this.controlCommandAvailableAt = new Map()
     this.readyWaiters = []
     this.commandQueue = []
     this.commandResults = new Map()
     this.commandHistory = []
+    this.controlLongPolls = new Map()
     this.modelRequests = []
     this.catalogRequests = []
     this.httpRequests = []
@@ -277,7 +292,9 @@ class DesktopE2EServer {
     this.failedCloudModelRequests = 0
     this.failedCloudModelWaiter = null
     this.sitesPluginInstalled = false
+    this.sitesPluginDeviceId = null
     this.miniProgramPluginInstalled = false
+    this.miniProgramPluginDeviceId = null
     this.sitesConnectionBootstrapRequests = 0
     this.scenario = 'initial'
     this.modelStage = 'initial'
@@ -450,6 +467,11 @@ class DesktopE2EServer {
   async close() {
     for (const response of this.blockedCloudResponses) response.destroy()
     this.blockedCloudResponses.clear()
+    for (const { response, timeout } of this.controlLongPolls.values()) {
+      clearTimeout(timeout)
+      response.destroy()
+    }
+    this.controlLongPolls.clear()
     this.desktopScenario?.close?.()
     this.server.closeAllConnections?.()
     this.controlServer.closeAllConnections?.()
@@ -850,6 +872,14 @@ class DesktopE2EServer {
   }
 
   async commandForClient(clientId, action, selector, options = {}) {
+    const observesElectronState = ELECTRON_OBSERVATION_ACTIONS.has(action)
+    const availableAt = observesElectronState
+      ? 0
+      : (this.controlCommandAvailableAt.get(clientId) ?? 0)
+    const delayMs = Math.max(0, availableAt - Date.now())
+    if (delayMs > 0) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, delayMs))
+    }
     assert.ok(
       this.controlWindowsByClient.has(clientId),
       `Desktop control client ${clientId} is not registered`
@@ -863,9 +893,16 @@ class DesktopE2EServer {
       rejectDelivery = reject
     })
     const result = new Promise((resolvePromise, reject) => {
-      this.commandResults.set(id, { clientId, resolve: resolvePromise, reject })
+      this.commandResults.set(id, {
+        clientId,
+        resolve: resolvePromise,
+        reject,
+        resolveDelivery,
+        started: false,
+      })
     })
-    this.commandQueue.push({ clientId, command, rejectDelivery, resolveDelivery })
+    this.commandQueue.push({ clientId, command, rejectDelivery })
+    this.deliverPendingControlCommand(clientId)
     try {
       await withTimeout(
         this.guard(Promise.race([delivery, result])),
@@ -882,6 +919,49 @@ class DesktopE2EServer {
       this.commandResults.delete(id)
       throw error
     }
+  }
+
+  deliverQueuedControlCommand(clientId, response) {
+    const commandIndex = this.commandQueue.findIndex(item => item.clientId === clientId)
+    if (commandIndex < 0) return false
+
+    const { command } = this.commandQueue[commandIndex]
+    this.commandHistory.push({
+      ...command,
+      clientId,
+      deliveredAt: new Date().toISOString(),
+    })
+    json(response, 200, command)
+    return true
+  }
+
+  deliverPendingControlCommand(clientId) {
+    const pending = this.controlLongPolls.get(clientId)
+    if (!pending) return false
+    clearTimeout(pending.timeout)
+    this.controlLongPolls.delete(clientId)
+    return this.deliverQueuedControlCommand(clientId, pending.response)
+  }
+
+  waitForQueuedControlCommand(clientId, response) {
+    const previous = this.controlLongPolls.get(clientId)
+    if (previous) {
+      clearTimeout(previous.timeout)
+      previous.response.writeHead(204)
+      previous.response.end()
+    }
+    const timeout = setTimeout(() => {
+      if (this.controlLongPolls.get(clientId)?.response !== response) return
+      this.controlLongPolls.delete(clientId)
+      response.writeHead(204)
+      response.end()
+    }, 25_000)
+    this.controlLongPolls.set(clientId, { response, timeout })
+    response.once('close', () => {
+      if (this.controlLongPolls.get(clientId)?.response !== response) return
+      clearTimeout(timeout)
+      this.controlLongPolls.delete(clientId)
+    })
   }
 
   async handleControl(request, response) {
@@ -1125,8 +1205,12 @@ class DesktopE2EServer {
     if (request.method === 'GET' && url.pathname === '/api/plugins/installed') {
       json(response, 200, {
         items: [
-          ...(this.sitesPluginInstalled ? [installedSitesPlugin()] : []),
-          ...(this.miniProgramPluginInstalled ? [installedMiniProgramPlugin()] : []),
+          ...(this.sitesPluginInstalled
+            ? [installedSitesPlugin(this.sitesPluginDeviceId ?? 'local-device')]
+            : []),
+          ...(this.miniProgramPluginInstalled
+            ? [installedMiniProgramPlugin(this.miniProgramPluginDeviceId ?? 'local-device')]
+            : []),
         ],
       })
       return
@@ -1139,14 +1223,20 @@ class DesktopE2EServer {
       const body = await readRequestBody(request)
       const pluginName = builtinPluginMatch[1]
       const isSitesPlugin = pluginName === 'wegent-sites'
-      const installedPlugin = isSitesPlugin ? installedSitesPlugin() : installedMiniProgramPlugin()
+      const targetDeviceId =
+        typeof body.device_id === 'string' && body.device_id.trim() ? body.device_id.trim() : null
+      const installedPlugin = isSitesPlugin
+        ? installedSitesPlugin(targetDeviceId ?? 'local-device')
+        : installedMiniProgramPlugin(targetDeviceId ?? 'local-device')
       const installedPluginId = isSitesPlugin ? 601 : 602
       if (isSitesPlugin) {
         this.sitesPluginInstalled = true
+        this.sitesPluginDeviceId = targetDeviceId
       } else {
         this.miniProgramPluginInstalled = true
+        this.miniProgramPluginDeviceId = targetDeviceId
       }
-      if (!body.device_id) {
+      if (!targetDeviceId) {
         if (isSitesPlugin) {
           this.sitesConnectionBootstrapRequests += 1
         }
@@ -1156,17 +1246,11 @@ class DesktopE2EServer {
         })
         return
       }
-      if (body.device_id !== 'local-device') {
-        json(response, 422, {
-          detail: 'A matching target device is required for application plugin synchronization',
-        })
-        return
-      }
       json(response, 200, {
         plugin: installedPlugin,
         sync: {
           success: true,
-          device_id: 'local-device',
+          device_id: targetDeviceId,
           mode: 'merge',
           skills: [],
           plugins: [{ id: installedPluginId, name: pluginName, status: 'synced' }],
@@ -1177,7 +1261,7 @@ class DesktopE2EServer {
           skipped: 0,
           results: [
             {
-              device_id: 'local-device',
+              device_id: targetDeviceId,
               success: true,
               error: null,
               skills: [],
@@ -1408,7 +1492,14 @@ class DesktopE2EServer {
       this.controlClientsByWindow.set(ready.windowLabel, ready.clientId)
       this.controlWindowsByClient.set(ready.clientId, ready.windowLabel)
       if (previousClientId && previousClientId !== ready.clientId) {
+        const previousLongPoll = this.controlLongPolls.get(previousClientId)
+        if (previousLongPoll) {
+          clearTimeout(previousLongPoll.timeout)
+          previousLongPoll.response.destroy()
+          this.controlLongPolls.delete(previousClientId)
+        }
         this.controlWindowsByClient.delete(previousClientId)
+        this.controlCommandAvailableAt.delete(previousClientId)
         const replacementError = new Error(
           `Desktop control client ${previousClientId} for ${ready.windowLabel} was replaced by ${ready.clientId}`
         )
@@ -1447,16 +1538,9 @@ class DesktopE2EServer {
         response.end()
         return true
       }
-      const commandIndex = this.commandQueue.findIndex(item => item.clientId === clientId)
-      if (commandIndex >= 0) {
-        const [{ command, resolveDelivery }] = this.commandQueue.splice(commandIndex, 1)
-        this.commandHistory.push({
-          ...command,
-          clientId,
-          deliveredAt: new Date().toISOString(),
-        })
-        resolveDelivery()
-        json(response, 200, command)
+      if (this.deliverQueuedControlCommand(clientId, response)) return true
+      if (url.searchParams.get('wait') === '1') {
+        this.waitForQueuedControlCommand(clientId, response)
         return true
       }
       response.writeHead(204)
@@ -1469,6 +1553,28 @@ class DesktopE2EServer {
         response.writeHead(204)
         response.end()
       }, 50)
+      return true
+    }
+
+    if (request.method === 'POST' && url.pathname === '/started') {
+      const started = await readRequestBody(request)
+      const pending = this.commandResults.get(started.id)
+      if (!pending) {
+        json(response, 404, { error: `Unknown command ${started.id}` })
+        return true
+      }
+      if (started.clientId !== pending.clientId) {
+        json(response, 409, {
+          error: `Command ${started.id} belongs to a different desktop control client`,
+        })
+        return true
+      }
+      if (!pending.started) {
+        pending.started = true
+        this.commandQueue = this.commandQueue.filter(item => item.command.id !== started.id)
+        pending.resolveDelivery()
+      }
+      json(response, 200, { ok: true })
       return true
     }
 
@@ -1491,6 +1597,10 @@ class DesktopE2EServer {
         return true
       }
       this.commandResults.delete(result.id)
+      this.controlCommandAvailableAt.set(
+        result.clientId,
+        Date.now() + DESKTOP_CONTROL_COMMAND_INTERVAL_MS
+      )
       if (result.ok) {
         pending.resolve(result.value ?? '')
       } else {
@@ -1571,6 +1681,7 @@ class DesktopE2EServer {
           'The original image leaked to the text-only primary model'
         )
         this.visionSidecarRequests.push({ kind: 'main', body })
+        this.recordScenarioRequest(VISION_SIDECAR_MAIN_REQUEST_SCENARIO, modelRequest)
         const responseId = `vision-sidecar-main-${this.modelRequests.length}`
         this.writeSse(response, [
           responseCreated(responseId),

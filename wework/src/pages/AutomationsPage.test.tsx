@@ -23,7 +23,10 @@ const automation: Automation = {
 const automationApi = {
   listAutomations: vi.fn().mockResolvedValue({ items: [automation] }),
   listAutomationRuns: vi.fn().mockResolvedValue({ items: [] }),
+  updateAutomation: vi.fn(),
 }
+const setRuntimeTaskPinned = vi.fn().mockResolvedValue(undefined)
+let desktopSidebarProps: Record<string, unknown> | null = null
 
 const workbenchMock = {
   state: {
@@ -45,6 +48,7 @@ const workbenchMock = {
   },
   cloudWorkStatus: null,
   refreshWorkLists: vi.fn().mockResolvedValue(undefined),
+  setRuntimeTaskPinned,
 }
 
 vi.mock('@/features/workbench/useWorkbench', () => ({
@@ -60,7 +64,7 @@ vi.mock('@/hooks/useIsMobile', () => ({
 }))
 
 vi.mock('@/lib/runtime-environment', () => ({
-  isTauriRuntime: () => false,
+  isElectronRuntime: () => false,
 }))
 
 vi.mock('@/components/layout/useDesktopSidebarCollapsed', () => ({
@@ -71,7 +75,10 @@ vi.mock('@/components/layout/useDesktopSidebarCollapsed', () => ({
 }))
 
 vi.mock('@/components/layout/DesktopSidebar', () => ({
-  DesktopSidebar: () => <aside data-testid="desktop-sidebar" />,
+  DesktopSidebar: (props: Record<string, unknown>) => {
+    desktopSidebarProps = props
+    return <aside data-testid="desktop-sidebar" />
+  },
 }))
 
 vi.mock('@/components/layout/WorkbenchSearchDialog', () => ({
@@ -79,10 +86,13 @@ vi.mock('@/components/layout/WorkbenchSearchDialog', () => ({
 }))
 
 vi.mock('@/features/automations/AutomationDetailWorkspace', () => ({
-  AutomationDetailWorkspace: ({ onClose }: { onClose: () => void }) => (
+  AutomationDetailWorkspace: ({ onClose, onSave }: { onClose: () => void; onSave: () => void }) => (
     <section data-testid="automation-detail-panel">
       <button type="button" data-testid="automation-detail-close" onClick={onClose}>
         Close
+      </button>
+      <button type="button" data-testid="automation-detail-save" onClick={onSave}>
+        Save
       </button>
     </section>
   ),
@@ -93,6 +103,15 @@ describe('AutomationsPage', () => {
     vi.clearAllMocks()
     automationApi.listAutomations.mockResolvedValue({ items: [automation] })
     automationApi.listAutomationRuns.mockResolvedValue({ items: [] })
+    workbenchMock.state.defaultTeam = null
+    desktopSidebarProps = null
+  })
+
+  test('keeps runtime task pinning available from the automations route sidebar', async () => {
+    render(<AutomationsPage />)
+
+    expect(screen.getByTestId('desktop-sidebar')).toBeInTheDocument()
+    expect(desktopSidebarProps?.onSetRuntimeTaskPinned).toBe(setRuntimeTaskPinned)
   })
 
   test('keeps the detail panel closed after the user dismisses it', async () => {
@@ -114,6 +133,61 @@ describe('AutomationsPage', () => {
 
       expect(automationApi.listAutomations).toHaveBeenCalledTimes(2)
       expect(screen.queryByTestId('automation-detail-panel')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('preserves the selected cloud model for scheduled thread continuations', async () => {
+    vi.useFakeTimers()
+    const continuationAutomation: Automation = {
+      ...automation,
+      conversationMode: 'continue_thread',
+      taskPayload: {
+        deviceId: 'local-device',
+        modelId: 'public:desktop-e2e-public-upstream-model',
+        modelType: 'public',
+        modelOptions: {
+          reasoningEffort: 'medium',
+          weworkCloudModelNamespace: 'default',
+          weworkCloudModelResourceUserId: '0',
+        },
+      },
+      continuationPayload: {
+        address: {
+          deviceId: 'local-device',
+          taskId: 'automation-task',
+          workspacePath: '/workspace',
+        },
+        message: automation.prompt,
+      },
+    }
+    try {
+      workbenchMock.state.defaultTeam = { id: 1 }
+      automationApi.listAutomations.mockResolvedValue({ items: [continuationAutomation] })
+      automationApi.updateAutomation.mockResolvedValue({
+        automation: continuationAutomation,
+      })
+
+      render(<AutomationsPage />)
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      fireEvent.click(screen.getByTestId('automation-detail-save'))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+
+      expect(automationApi.updateAutomation).toHaveBeenCalledWith(
+        continuationAutomation.id,
+        expect.objectContaining({
+          continuationPayload: expect.objectContaining({
+            modelId: 'public:desktop-e2e-public-upstream-model',
+            modelType: 'public',
+            modelOptions: {
+              reasoningEffort: 'medium',
+              weworkCloudModelNamespace: 'default',
+              weworkCloudModelResourceUserId: '0',
+            },
+          }),
+        })
+      )
     } finally {
       vi.useRealTimers()
     }

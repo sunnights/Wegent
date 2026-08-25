@@ -99,6 +99,8 @@ interface ProjectWorkBarProps {
   onListBranches?: () => Promise<string[]>
   onCheckoutBranch?: (branchName: string) => Promise<void>
   onCreateBranch?: (branchName: string) => Promise<void>
+  onGenerateBranchName?: (sourceText: string) => Promise<string>
+  branchNameSource?: string
   worktreeBranch?: string | null
   onWorktreeBranchChange?: (branchName: string | null) => void
   className?: string
@@ -140,6 +142,8 @@ export function ProjectWorkBar({
   onListBranches,
   onCheckoutBranch,
   onCreateBranch,
+  onGenerateBranchName,
+  branchNameSource,
   worktreeBranch,
   onWorktreeBranchChange,
   className,
@@ -901,19 +905,23 @@ export function ProjectWorkBar({
                       </button>
                     </div>
                   )}
-                  <div>
-                    <button
-                      type="button"
-                      data-testid="no-project-option"
-                      onClick={() => handleSelectStandaloneDevice(selectedLocalStandaloneDeviceId)}
-                      className="flex h-8 w-full items-center gap-3 rounded-lg px-4 text-left text-sm font-medium leading-[18px] text-text-secondary hover:bg-muted"
-                    >
-                      <FolderX className="h-4 w-4 shrink-0" />
-                      <span className="min-w-0 flex-1">
-                        {t('workbench.no_project', '不使用项目')}
-                      </span>
-                    </button>
-                  </div>
+                  {showClearButton ? (
+                    <div>
+                      <button
+                        type="button"
+                        data-testid="no-project-option"
+                        onClick={() =>
+                          handleSelectStandaloneDevice(selectedLocalStandaloneDeviceId)
+                        }
+                        className="flex h-8 w-full items-center gap-3 rounded-lg px-4 text-left text-sm font-medium leading-[18px] text-text-secondary hover:bg-muted"
+                      >
+                        <FolderX className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1">
+                          {t('workbench.no_project', '不使用项目')}
+                        </span>
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1132,6 +1140,8 @@ export function ProjectWorkBar({
             onListBranches={onListBranches}
             onCheckoutBranch={onCheckoutBranch}
             onCreateBranch={onCreateBranch}
+            onGenerateBranchName={onGenerateBranchName}
+            branchNameSource={branchNameSource}
           />
         )}
       {currentProject &&
@@ -1148,6 +1158,16 @@ export function ProjectWorkBar({
             onSelectBranch={onWorktreeBranchChange}
           />
         )}
+      {currentProject && executionModeLocked && branchName && (
+        <div
+          data-testid="project-work-branch-readonly"
+          className="flex h-9 min-w-0 max-w-[18rem] items-center gap-2 rounded-full px-2 text-sm font-normal leading-[18px] text-text-secondary"
+          title={branchName}
+        >
+          <GitBranch className="h-4 w-4 shrink-0" />
+          <span className="truncate">{branchName}</span>
+        </div>
+      )}
       {endContext}
       {selectedWorkspaceIsRemote && selectedWorkspaceDeviceIp && (
         <div

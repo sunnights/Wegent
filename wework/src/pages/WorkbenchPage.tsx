@@ -13,23 +13,30 @@ import { DesktopWorkbenchLayout } from '@/components/layout/DesktopWorkbenchLayo
 import { MobileWorkbenchLayout } from '@/components/layout/MobileWorkbenchLayout'
 import { useWorkbench } from '@/features/workbench/useWorkbench'
 import { useIsMobile } from '@/hooks/useIsMobile'
-import { isTauriRuntime } from '@/lib/runtime-environment'
+import { isElectronRuntime } from '@/lib/runtime-environment'
 import { shouldUseMobileWorkbenchLayout } from '@/lib/workbench-layout-mode'
 import { EMPTY_RUNTIME_TASK_REMINDERS } from '@/features/workbench/runtimeTaskReminders'
-import { buildTrayMenuTaskGroups } from '@/tauri/trayMenuState'
-import { syncTrayMenuState } from '@/tauri/trayNavigation'
-import { buildTrayUsageTitle } from '@/tauri/trayUsageTitle'
+import { buildTrayMenuTaskGroups } from '@/desktop/trayMenuState'
+import { syncTrayMenuState } from '@/desktop/trayNavigation'
+import { buildTrayUsageTitle } from '@/desktop/trayUsageTitle'
 import { useRuntimeTaskRouteRestoration } from '@/features/workbench/useRuntimeTaskRouteRestoration'
 import { useRuntimeTaskLifecycleStoreSnapshot } from '@/features/workbench/runtimeTaskLifecycle'
 import { useOptionalCloudConnection } from '@/features/cloud-connection/useCloudConnection'
 
 interface WorkbenchPageProps {
   routeActive?: boolean
+  surfaceKind?: 'task' | 'board'
 }
 
-export function WorkbenchPage({ routeActive = true }: WorkbenchPageProps) {
-  const isMobileViewport = useIsMobile()
-  const isTauri = isTauriRuntime()
+export function WorkbenchPage({ routeActive = true, surfaceKind }: WorkbenchPageProps) {
+  if (surfaceKind === 'board') {
+    return <DesktopWorkbenchLayout routeActive={routeActive} surfaceKind="board" />
+  }
+  return <TaskWorkbenchPage routeActive={routeActive} surfaceKind={surfaceKind} />
+}
+
+function TaskWorkbenchPage({ routeActive = true, surfaceKind }: WorkbenchPageProps) {
+  const isDesktop = isElectronRuntime()
   const cloudConnection = useOptionalCloudConnection()
   const { state, runtimeTaskReminders } = useWorkbench()
   const lifecycle = useRuntimeTaskLifecycleStoreSnapshot()
@@ -44,6 +51,7 @@ export function WorkbenchPage({ routeActive = true }: WorkbenchPageProps) {
   const showTrayCodexUsage = trayUsageEnabled && codexUsage.status === 'available'
   const showTrayWegentUsage =
     trayWegentUsageEnabled && cloudConnection.isConnected && wegentUsage.status === 'available'
+  const taskSurfaceActive = routeActive
   const trayUsageTitle = buildTrayUsageTitle({
     codex: showTrayCodexUsage ? codexUsage.trayTitle : null,
     compactCodex: showTrayCodexUsage ? compactCodexTrayTitle(codexUsage) : null,
@@ -81,14 +89,15 @@ export function WorkbenchPage({ routeActive = true }: WorkbenchPageProps) {
   ])
 
   useEffect(() => {
+    if (!taskSurfaceActive) return
     syncTrayMenuState(trayMenuTaskGroups, undefined, {
       title: trayUsageTitle,
       tooltip: trayTooltip,
     })
-  }, [trayMenuTaskGroups, trayTooltip, trayUsageTitle])
+  }, [taskSurfaceActive, trayMenuTaskGroups, trayTooltip, trayUsageTitle])
 
   useEffect(() => {
-    if (!isTauri) {
+    if (!isDesktop || !taskSurfaceActive) {
       return
     }
 
@@ -113,10 +122,10 @@ export function WorkbenchPage({ routeActive = true }: WorkbenchPageProps) {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [isTauri])
+  }, [isDesktop, taskSurfaceActive])
 
   useEffect(() => {
-    if (!isTauri || !cloudConnection.isConnected) {
+    if (!isDesktop || !cloudConnection.isConnected || !taskSurfaceActive) {
       return
     }
 
@@ -150,13 +159,33 @@ export function WorkbenchPage({ routeActive = true }: WorkbenchPageProps) {
     cloudConnection.isConnected,
     cloudConnection.serviceKey,
     cloudConnection.token,
-    isTauri,
+    isDesktop,
+    taskSurfaceActive,
   ])
 
-  return shouldUseMobileWorkbenchLayout({ isMobileViewport, isTauri }) ? (
+  return (
+    <WorkbenchPageLayout
+      routeActive={routeActive}
+      surfaceKind={surfaceKind}
+      isDesktop={isDesktop}
+    />
+  )
+}
+
+interface WorkbenchPageLayoutProps extends WorkbenchPageProps {
+  isDesktop?: boolean
+}
+
+function WorkbenchPageLayout({
+  routeActive = true,
+  surfaceKind,
+  isDesktop = isElectronRuntime(),
+}: WorkbenchPageLayoutProps) {
+  const isMobileViewport = useIsMobile()
+  return shouldUseMobileWorkbenchLayout({ isMobileViewport, isDesktop }) ? (
     <MobileWorkbenchLayout />
   ) : (
-    <DesktopWorkbenchLayout routeActive={routeActive} />
+    <DesktopWorkbenchLayout routeActive={routeActive} surfaceKind={surfaceKind} />
   )
 }
 

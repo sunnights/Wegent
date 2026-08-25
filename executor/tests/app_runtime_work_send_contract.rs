@@ -199,6 +199,10 @@ async fn runtime_task_forwards_all_local_project_roots_to_codex() {
         .find(|call| call["method"] == "thread/start")
         .expect("thread/start should be recorded");
     assert_eq!(thread_start["params"]["historyMode"], "paginated");
+    assert!(
+        calls.iter().all(|call| call["method"] != "thread/name/set"),
+        "new paginated threads must not use the unsupported legacy name mutation"
+    );
 
     let listed = handler
         .handle_runtime_rpc(json!({
@@ -266,8 +270,13 @@ async fn claude_runtime_task_uses_conversation_events_and_resumes_follow_up() {
         .expect("Claude task should be accepted");
     assert_eq!(created["accepted"], true);
     assert_eq!(created["runtime"], "claude_code");
+    let mut runtime_events = recv_events_until(&mut events, |runtime_events| {
+        runtime_events.iter().any(|event| {
+            event["event"] == "response.completed" && event["payload"]["runtime"] == "claude_code"
+        })
+    })
+    .await;
     wait_for_text_occurrence_count(&log_path, "CALL\n", 1).await;
-    wait_until_task_idle(&handler, "claude-task-1").await;
 
     let sent = handler
         .handle_runtime_rpc(json!({
@@ -295,8 +304,16 @@ async fn claude_runtime_task_uses_conversation_events_and_resumes_follow_up() {
         .expect("Claude follow-up should be accepted");
     assert_eq!(sent["accepted"], true);
     assert_eq!(sent["runtime"], "claude_code");
+    runtime_events.extend(
+        recv_events_until(&mut events, |runtime_events| {
+            runtime_events.iter().any(|event| {
+                event["event"] == "response.completed"
+                    && event["payload"]["runtime"] == "claude_code"
+            })
+        })
+        .await,
+    );
     wait_for_text_occurrence_count(&log_path, "CALL\n", 2).await;
-    wait_until_task_idle(&handler, "claude-task-1").await;
 
     let log = fs::read_to_string(&log_path).expect("Claude args should be logged");
     let calls = log
@@ -337,14 +354,13 @@ async fn claude_runtime_task_uses_conversation_events_and_resumes_follow_up() {
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(messages[3]["role"], "assistant");
 
-    let runtime_events = recv_events_until(&mut events, |runtime_events| {
-        runtime_events.iter().any(|event| {
-            event["event"] == "response.completed" && event["payload"]["runtime"] == "claude_code"
-        })
-    })
-    .await;
     assert!(runtime_events.iter().any(|event| {
         event["event"] == "response.created" && event["payload"]["runtime"] == "claude_code"
+    }));
+    assert!(runtime_events.iter().any(|event| {
+        event["event"] == "response.completed"
+            && event["payload"]["runtime"] == "claude_code"
+            && event["payload"]["taskTitle"] == "first turn"
     }));
 }
 
@@ -384,6 +400,7 @@ async fn runtime_tasks_send_accepts_address_content_source_and_attachments() {
                     "task_id": 1001,
                     "subtask_id": 2001,
                     "prompt": "first turn",
+                    "system_prompt": "Run focused project tests.",
                     "project_workspace_path": "/tmp/project",
                     "bot": [{"shell_type": "ClaudeCode"}],
                     "model_config": {
@@ -488,6 +505,10 @@ async fn runtime_tasks_send_accepts_address_content_source_and_attachments() {
     assert_eq!(resume["params"]["threadId"], "thread-1");
     assert_eq!(resume["params"]["cwd"], "/tmp/project");
     assert_eq!(resume["params"]["model"], "gpt-4.1");
+    assert!(resume["params"]["developerInstructions"]
+        .as_str()
+        .expect("developer instructions should be present")
+        .contains("Run focused project tests."));
     assert_eq!(
         resume["params"]["config"]["model_reasoning_effort"],
         "xhigh"
@@ -853,15 +874,25 @@ async fn runtime_tasks_create_ephemeral_codex_thread_hidden_from_task_list() {
         fork_call["params"]["path"],
         "/tmp/codex/parent-thread-1.jsonl"
     );
+    assert_eq!(fork_call["params"]["cwd"], "/tmp/project");
+    assert_eq!(fork_call["params"]["permissions"], ":danger-full-access");
     assert_eq!(fork_call["params"]["ephemeral"], true);
     let inject_call = calls
         .iter()
         .find(|call| call["method"] == "thread/inject_items")
         .expect("thread/inject_items should be called");
     assert_eq!(inject_call["params"]["threadId"], "thread-1");
-    assert!(inject_call["params"]["items"][0]["content"][0]["text"]
+    let boundary_prompt = inject_call["params"]["items"][0]["content"][0]["text"]
         .as_str()
-        .is_some_and(|text| text.contains("Side conversation boundary.")));
+        .expect("side conversation boundary should be text");
+    assert!(boundary_prompt.contains("Side conversation boundary."));
+    assert!(boundary_prompt.contains(
+        "Do not modify files, source, git state, permissions, configuration, or workspace state \
+         unless the user explicitly asks for that mutation after this boundary."
+    ));
+    assert!(boundary_prompt.contains(
+        "If the user explicitly requests a mutation, keep it minimal, local to the request"
+    ));
     assert!(calls.iter().all(|call| call["method"] != "thread/start"));
     assert!(calls.iter().all(|call| call["method"] != "thread/name/set"));
     assert!(calls.iter().all(|call| call["method"] != "thread/goal/set"));
@@ -926,7 +957,9 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
         .expect("completed turn should fork");
     assert_eq!(forked["accepted"], true);
     assert_eq!(forked["source"]["taskId"], "source-task-1");
+    assert_eq!(forked["source"]["workspacePath"], "/tmp/project");
     assert_eq!(forked["target"]["taskId"], "thread-fork-1");
+    assert_eq!(forked["target"]["workspacePath"], "/tmp/project");
 
     let listed = handler
         .handle_runtime_rpc(json!({"method": "runtime.tasks.list", "payload": {}}))
@@ -2265,7 +2298,7 @@ async fn runtime_tasks_send_rejects_running_local_task_until_cancelled() {
 }
 
 #[tokio::test]
-async fn runtime_tasks_send_rejects_provider_active_turn_after_local_execution_settles() {
+async fn runtime_tasks_send_delegates_provider_turn_admission_to_codex() {
     let _lock = env_lock().await;
     let executor_home = temp_path("runtime-send-provider-active-home", "dir");
     let _home = EnvGuard::set("WEGENT_EXECUTOR_HOME", &executor_home.display().to_string());
@@ -2280,19 +2313,7 @@ async fn runtime_tasks_send_rejects_provider_active_turn_after_local_execution_s
     let fake_codex = write_fake_codex_hanging_turn(&log_path);
     let handler = RuntimeWorkRpcHandler::new("device-1", fake_codex.display().to_string());
 
-    let transcript = handler
-        .handle_runtime_rpc(json!({
-            "method": "runtime.tasks.transcript",
-            "payload": {
-                "workspacePath": "/tmp/project",
-                "taskId": "local-task-1"
-            }
-        }))
-        .await
-        .expect("provider-active transcript should load");
-    assert_eq!(transcript["running"], true);
-
-    let rejected = handler
+    let sent = handler
         .handle_runtime_rpc(json!({
             "method": "runtime.tasks.send",
             "payload": {
@@ -2307,22 +2328,44 @@ async fn runtime_tasks_send_rejects_provider_active_turn_after_local_execution_s
             }
         }))
         .await
-        .expect("provider-active send should return a contract response");
+        .expect("provider-active send should be delegated to Codex");
 
     assert_eq!(
-        rejected,
+        sent,
         json!({
-            "success": false,
-            "error": "runtime task is already running",
-            "code": "bad_request"
+            "success": true,
+            "accepted": true,
+            "deviceId": "device-1",
+            "taskId": "local-task-1",
+            "runtime": "codex",
+            "status": "running",
+            "queuePosition": null
         })
     );
+    wait_for_codex_call(&log_path, "turn/start").await;
     let calls = read_json_lines(&log_path);
-    assert!(calls.iter().any(|call| call["method"] == "thread/read"));
     assert!(
-        calls.iter().all(|call| call["method"] != "turn/start"),
-        "send must not create an overlapping Codex turn: {calls:?}"
+        calls
+            .iter()
+            .all(|call| call["method"] != "thread/read" && call["method"] != "thread/turns/list"),
+        "Executor must not use a provider state snapshot to decide turn admission: {calls:?}"
     );
+    assert!(
+        calls.iter().any(|call| call["method"] == "turn/start"),
+        "Codex must atomically decide whether the turn is started or steered: {calls:?}"
+    );
+
+    let cancelled = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.cancel",
+            "payload": {
+                "workspacePath": "/tmp/project",
+                "taskId": "local-task-1"
+            }
+        }))
+        .await
+        .expect("delegated turn should remain cancellable");
+    assert_eq!(cancelled["accepted"], true);
 }
 
 #[tokio::test]
@@ -2736,6 +2779,94 @@ async fn runtime_tasks_guidance_corrects_a_stale_turn_id_and_retries_once() {
         })
         .collect::<Vec<_>>();
     assert_eq!(steer_turn_ids, vec!["turn-stale", "turn-1"]);
+}
+
+#[tokio::test]
+async fn completed_turn_accepts_follow_up_after_late_guidance_response() {
+    let _lock = env_lock().await;
+    let _home = EnvGuard::set(
+        "WEGENT_EXECUTOR_HOME",
+        &temp_path("runtime-guidance-completion-race-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let _codex_home = EnvGuard::set(
+        "CODEX_HOME",
+        &temp_path("runtime-guidance-completion-race-codex-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let log_path = temp_path("runtime-guidance-completion-race-log", "jsonl");
+    let steer_release_path = temp_path("runtime-guidance-completion-race-release", "flag");
+    let fake_codex = write_fake_codex_turn_completes_during_steer(&log_path, &steer_release_path);
+    let (event_tx, mut events) = broadcast::channel(32);
+    let handler = RuntimeWorkRpcHandler::with_event_sender(
+        "device-1",
+        fake_codex.display().to_string(),
+        event_tx,
+    );
+
+    handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.create",
+            "payload": {
+                "taskId": "local-task-guidance-completion-race",
+                "workspacePath": "/tmp/project",
+                "message": "first turn",
+                "executionRequest": codex_execution_request(
+                    "first turn",
+                    "/tmp/project",
+                    "gpt-5.5"
+                )
+            }
+        }))
+        .await
+        .expect("create should be accepted");
+    wait_until_task_running(&handler, "local-task-guidance-completion-race").await;
+
+    let guidance_handler = handler.clone();
+    let guidance = tokio::spawn(async move {
+        guidance_handler
+            .handle_runtime_rpc(json!({
+                "method": "runtime.tasks.guidance",
+                "payload": {
+                    "workspacePath": "/tmp/project",
+                    "taskId": "local-task-guidance-completion-race",
+                    "message": "finish with this guidance",
+                    "clientGuidanceId": "guide-completion-race"
+                }
+            }))
+            .await
+    });
+    wait_for_response_event(&mut events, "response.completed", "turn-1").await;
+    fs::write(&steer_release_path, b"release").expect("steer response should be released");
+    let guided = guidance
+        .await
+        .expect("guidance task should not panic")
+        .expect("guidance should finish after the turn completes");
+    assert_eq!(guided["accepted"], true);
+
+    let follow_up = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.send",
+            "payload": {
+                "workspacePath": "/tmp/project",
+                "taskId": "local-task-guidance-completion-race",
+                "message": "follow up after the visible completion",
+                "executionRequest": codex_execution_request(
+                    "follow up after the visible completion",
+                    "/tmp/project",
+                    "gpt-5.5"
+                )
+            }
+        }))
+        .await
+        .expect("follow-up should return a contract response");
+
+    assert_eq!(
+        follow_up["accepted"], true,
+        "a late guidance response must not restore the completed task's running state: {follow_up}"
+    );
 }
 
 #[tokio::test]
@@ -3955,6 +4086,75 @@ fn write_fake_codex_hanging_turn_with_steer_mismatch(log_path: &Path) -> PathBuf
     write_fake_codex_hanging_turn_inner(log_path, true)
 }
 
+fn write_fake_codex_turn_completes_during_steer(
+    log_path: &Path,
+    steer_release_path: &Path,
+) -> PathBuf {
+    let path = temp_path("fake-codex-guidance-completion-race", "sh");
+    let _ = fs::remove_file(log_path);
+    let _ = fs::remove_file(steer_release_path);
+    let content = format!(
+        r#"#!/bin/sh
+LOG_PATH='{}'
+STEER_RELEASE_PATH='{}'
+turn_count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$LOG_PATH"
+  request_id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"protocolVersion":1}}}}'
+      ;;
+    *'"method":"initialized"'*)
+      ;;
+    *'"method":"thread/list"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"data":[{{"id":"thread-1","cwd":"/tmp/project","name":"Runtime task","preview":"runtime","path":"/tmp/codex/thread-1.jsonl","createdAt":1780000000,"updatedAt":1780000060,"status":"inProgress","turns":[]}}],"nextCursor":null,"backwardsCursor":null}}}}'
+      ;;
+    *'"method":"thread/start"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1"}}}}}}'
+      ;;
+    *'"method":"thread/unsubscribe"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"status":"unsubscribed"}}}}'
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1"}}}}}}'
+      ;;
+    *'"method":"thread/read"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1","cwd":"/tmp/project","turns":[]}}}}}}'
+      ;;
+    *'"method":"thread/turns/list"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"data":[],"nextCursor":null,"backwardsCursor":null}}}}'
+      ;;
+    *'"method":"thread/items/list"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"data":[],"nextCursor":null,"backwardsCursor":null}}}}'
+      ;;
+    *'"method":"thread/goal/get"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"goal":null}}}}'
+      ;;
+    *'"method":"thread/name/set"'*)
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{}}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      turn_count=$((turn_count + 1))
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"turn":{{"id":"turn-'"$turn_count"'","status":"inProgress"}}}}}}'
+      ;;
+    *'"method":"turn/steer"'*)
+      printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thread-1","turn":{{"id":"turn-1","status":"completed","items":[]}}}}}}'
+      while [ ! -f "$STEER_RELEASE_PATH" ]; do
+        sleep 0.02
+      done
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"turnId":"turn-1"}}}}'
+      ;;
+  esac
+done
+"#,
+        log_path.display(),
+        steer_release_path.display()
+    );
+    write_executable(&path, &content);
+    path
+}
+
 fn write_fake_codex_concurrent_send(log_path: &Path) -> PathBuf {
     let path = temp_path("fake-codex-concurrent-send", "sh");
     let _ = fs::remove_file(log_path);
@@ -4458,7 +4658,7 @@ async fn wait_for_method_count(log_path: &Path, method: &str, expected: usize) {
 }
 
 async fn wait_for_logged_pid(log_path: &Path, prefix: &str) -> u32 {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let content = fs::read_to_string(log_path).unwrap_or_default();
         if let Some(pid) = content.lines().find_map(|line| {

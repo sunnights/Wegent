@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -7,33 +8,42 @@ import {
   RuntimeTaskLifecycleStore,
 } from '@/features/workbench/runtimeTaskLifecycle'
 import { LOCAL_PLUGIN_SKILLS_CHANGED_EVENT } from '@/features/plugins/pluginTrial'
-import { updateAppPreferences } from '@/tauri/appPreferences'
+import { updateAppPreferences } from '@/desktop/appPreferences'
 import type { InstalledPlugin } from '@/types/api'
 import './i18n'
 import App from './App'
+
+const desktopHostMocks = vi.hoisted(() => {
+  const preferences: Record<string, unknown> = {}
+  return {
+    preferences,
+    invoke: vi.fn(
+      async (capability: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+        if (capability === 'preferences.get') return { ...preferences }
+        if (capability === 'preferences.update') {
+          Object.assign(preferences, params.patch)
+          return { ...preferences }
+        }
+        if (capability === 'browser.events') return { events: [], nextCursor: 0 }
+        if (capability === 'plugins.list') return []
+        if (capability === 'smartApps.list') return []
+        if (capability === 'executor.plugins.personal.list') return { items: [] }
+        return {}
+      }
+    ),
+  }
+})
+
+vi.mock('@/api/dsh/desktopHost', () => ({
+  invokeDesktopHost: desktopHostMocks.invoke,
+}))
 
 const localCodexPluginMocks = vi.hoisted(() => ({
   listInstalledPlugins: vi.fn(),
   listSkills: vi.fn(),
 }))
-
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({
-    label: 'main',
-    startDragging: vi.fn(),
-    minimize: vi.fn(),
-    toggleMaximize: vi.fn(),
-    close: vi.fn(),
-    isMaximized: vi.fn().mockResolvedValue(false),
-    innerSize: vi.fn().mockResolvedValue({
-      width: 1280,
-      height: 720,
-      toLogical: vi.fn().mockReturnValue({ width: 1280, height: 720 }),
-    }),
-    scaleFactor: vi.fn().mockResolvedValue(1),
-    onResized: vi.fn().mockResolvedValue(vi.fn()),
-    onScaleChanged: vi.fn().mockResolvedValue(vi.fn()),
-  }),
+const workbenchProviderMocks = vi.hoisted(() => ({
+  mounts: vi.fn(),
 }))
 
 const localPathMocks = vi.hoisted(() => ({
@@ -45,15 +55,25 @@ vi.mock('@/lib/local-terminal', async importOriginal => {
   return {
     ...actual,
     localPathExists: localPathMocks.exists,
+    listLocalHarnesses: vi.fn().mockResolvedValue([]),
+    listLocalHarnessSessions: vi.fn().mockResolvedValue([]),
   }
 })
 
-vi.mock('@/tauri/localExecutor', () => ({
+vi.mock('@/desktop/localExecutor', () => ({
   ensureLocalExecutorStarted: vi
     .fn()
     .mockResolvedValue({ running: true, ready: true, deviceId: 'local-device' }),
   getInitializedBundledPluginMarketplace: vi.fn().mockReturnValue(null),
-  requestLocalExecutor: vi.fn().mockResolvedValue({}),
+  requestLocalExecutor: vi.fn(async (capability: string) => {
+    if (capability === 'executor.plugins.personal.list') {
+      return { marketplacePath: '', plugins: [] }
+    }
+    if (capability === 'executor.plugins.store.list') {
+      return { storePath: '', plugins: [] }
+    }
+    return {}
+  }),
   subscribeLocalExecutorEvents: vi.fn().mockResolvedValue(vi.fn()),
   connectLocalExecutorToBackend: vi
     .fn()
@@ -95,6 +115,7 @@ const mockViewport = vi.hoisted(() => ({
 }))
 
 const workbenchValue: WorkbenchContextValue = {
+  services: {},
   state: {
     user: { id: 1, user_name: 'alice', email: 'alice@example.com' },
     defaultTeam: null,
@@ -502,10 +523,15 @@ vi.mock('@/features/workbench/WorkbenchProvider', () => ({
   WorkbenchProvider: ({
     children,
     onStartupReadyChange,
+    prewarmComposerApps,
   }: {
     children: React.ReactNode
     onStartupReadyChange?: (ready: boolean) => void
+    prewarmComposerApps?: boolean
   }) => {
+    useEffect(() => {
+      workbenchProviderMocks.mounts(prewarmComposerApps)
+    }, [prewarmComposerApps])
     queueMicrotask(() => onStartupReadyChange?.(true))
     return <>{children}</>
   },
@@ -861,7 +887,9 @@ function mockSystemSkillsFetch() {
 
 describe('App plugins route', () => {
   beforeEach(() => {
-    delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    for (const key of Object.keys(desktopHostMocks.preferences)) {
+      delete desktopHostMocks.preferences[key]
+    }
     localStorage.clear()
     sessionStorage.clear()
     vi.stubEnv('DEV', false)
@@ -870,6 +898,11 @@ describe('App plugins route', () => {
       configurable: true,
       value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
     })
+    window.__WEWORK_RUNTIME_CONFIG__ = {
+      desktopHost: 'electron',
+      runtimeMode: 'backend',
+    }
+    desktopHostMocks.invoke.mockClear()
     workbenchValue.state.runtimeWork = null
     workbenchValue.state.currentRuntimeTask = null
     workbenchValue.state.devices = [
@@ -887,8 +920,9 @@ describe('App plugins route', () => {
     workbenchValue.state.standaloneDeviceId = 'local-device'
     vi.mocked(workbenchValue.openRuntimeTask).mockReset().mockResolvedValue(undefined)
     vi.mocked(workbenchValue.startNewSkillChat).mockReset().mockResolvedValue(false)
-    localCodexPluginMocks.listInstalledPlugins.mockReset().mockResolvedValue({ items: [] })
+    localCodexPluginMocks.listInstalledPlugins.mockReset().mockResolvedValue([])
     localCodexPluginMocks.listSkills.mockReset().mockResolvedValue([])
+    workbenchProviderMocks.mounts.mockClear()
     localPathMocks.exists.mockReset().mockResolvedValue(false)
     mockSystemSkillsFetch()
   })
@@ -896,6 +930,16 @@ describe('App plugins route', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
     vi.unstubAllGlobals()
+  })
+
+  test('mounts only the active task workbench during startup', async () => {
+    window.history.pushState({}, '', '/')
+
+    renderApp()
+
+    await screen.findByTestId('app-shell')
+    await waitFor(() => expect(workbenchProviderMocks.mounts).toHaveBeenCalledTimes(1))
+    expect(workbenchProviderMocks.mounts).toHaveBeenCalledWith(true)
   })
 
   test('opens the plugins page from the desktop sidebar', async () => {
@@ -913,13 +957,10 @@ describe('App plugins route', () => {
   })
 
   test('shows Sites as unavailable instead of calling a relative API in disconnected local mode', async () => {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      configurable: true,
-      value: {},
-    })
     window.__WEWORK_RUNTIME_CONFIG__ = {
       ...window.__WEWORK_RUNTIME_CONFIG__,
       runtimeMode: 'local-first',
+      desktopHost: 'electron',
     }
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValue({
@@ -942,13 +983,10 @@ describe('App plugins route', () => {
   })
 
   test('loads Sites from the authenticated cloud Backend in local mode', async () => {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      configurable: true,
-      value: {},
-    })
     window.__WEWORK_RUNTIME_CONFIG__ = {
       ...window.__WEWORK_RUNTIME_CONFIG__,
       runtimeMode: 'local-first',
+      desktopHost: 'electron',
     }
     localStorage.setItem(
       'wework.cloudConnection',
@@ -1095,7 +1133,7 @@ describe('App plugins route', () => {
       }
       throw new Error(`Unexpected request: ${url}`)
     })
-    window.history.pushState({}, '', '/sites')
+    window.history.pushState({}, '', '/sites?app_type=web')
 
     renderApp()
     await updateAppPreferences({ experimentalFeaturesEnabled: true })
@@ -1612,13 +1650,10 @@ describe('App plugins route', () => {
   })
 
   test('requires a cloud connection before installing Sites in local-first mode', async () => {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      configurable: true,
-      value: {},
-    })
     window.__WEWORK_RUNTIME_CONFIG__ = {
       ...window.__WEWORK_RUNTIME_CONFIG__,
       runtimeMode: 'local-first',
+      desktopHost: 'electron',
     }
     cacheApplicationTypes()
     window.history.pushState({}, '', '/sites')
@@ -1706,7 +1741,7 @@ describe('App plugins route', () => {
       'macos-titlebar-drag-region'
     )
 
-    expect(pluginsDragRegion).toHaveAttribute('data-tauri-drag-region')
+    expect(pluginsDragRegion).toHaveClass('electron-titlebar-drag-region')
     expect(screen.getByTestId('plugins-topbar-drag-region')).toContainElement(pluginsDragRegion)
     expect(screen.getByTestId('runtime-search-button')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '插件' })).toBeInTheDocument()
@@ -1729,18 +1764,14 @@ describe('App plugins route', () => {
       within(screen.getByTestId('desktop-sidebar')).getByTestId('collapse-sidebar-button')
     )
 
-    expect(screen.getByTestId('expand-sidebar-button')).toBeInTheDocument()
+    expect(screen.getByTestId('auxiliary-expand-sidebar-button')).toBeInTheDocument()
     expect(screen.getByTestId('plugins-page-content')).toHaveClass('md:pl-6')
 
-    await userEvent.click(screen.getByTestId('expand-sidebar-button'))
+    await userEvent.click(screen.getByTestId('auxiliary-expand-sidebar-button'))
     expect(await screen.findByTestId('plugins-button')).toBeInTheDocument()
   })
 
-  test('uses the global Chrome titlebar on collapsed plugin routes in Tauri', async () => {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      configurable: true,
-      value: {},
-    })
+  test('uses the global Chrome titlebar on collapsed plugin routes in Electron', async () => {
     localStorage.setItem('wework.desktop.sidebar.collapsed', 'true')
     window.history.pushState({}, '', '/plugins')
 
@@ -1811,10 +1842,71 @@ describe('App plugins route', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/plugins/manage'))
     expect(screen.getByTestId('plugins-button')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '管理插件' })).toBeInTheDocument()
-    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('plugin-management-page-content')).queryByRole('tab')
+    ).not.toBeInTheDocument()
     expect(await screen.findByText('还没有安装插件')).toBeInTheDocument()
     expect(screen.getByTestId('plugin-management-browse-marketplace-button')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('供应商 Token')).not.toBeInTheDocument()
+  })
+
+  test('opens Smart apps beside Sites and Mini Programs in Applications', async () => {
+    window.history.pushState({}, '', '/sites')
+
+    renderApp()
+    await updateAppPreferences({ experimentalFeaturesEnabled: true })
+
+    await userEvent.click(await screen.findByTestId('applications-tab-smart-app'))
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/sites')
+      expect(window.location.search).toBe('?app_type=smart_app')
+    })
+    expect(screen.getByTestId('applications-tab-web')).toHaveTextContent('站点')
+    expect(screen.getByTestId('applications-tab-miniapp')).toHaveTextContent('小程序')
+    expect(screen.getByTestId('applications-tab-smart-app')).toHaveTextContent('智能工作台')
+    expect(screen.getByTestId('smart-apps-marketplace-page')).toBeInTheDocument()
+    expect(screen.getByTestId('smart-apps-section-marketplace')).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+  })
+
+  test('returns to the Smart apps marketplace after visiting My workbench and Mini Programs', async () => {
+    window.history.pushState({}, '', '/sites')
+
+    renderApp()
+    await updateAppPreferences({ experimentalFeaturesEnabled: true })
+
+    await userEvent.click(await screen.findByTestId('applications-tab-smart-app'))
+    await userEvent.click(await screen.findByTestId('smart-apps-section-owned'))
+    expect(await screen.findByTestId('smart-apps-owned-page')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId('applications-tab-miniapp'))
+    expect(window.location.search).toBe('?app_type=miniapp')
+
+    await userEvent.click(screen.getByTestId('applications-tab-smart-app'))
+
+    expect(await screen.findByTestId('smart-apps-marketplace-page')).toBeInTheDocument()
+    expect(screen.getByTestId('smart-apps-section-marketplace')).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(window.location.search).toBe('?app_type=smart_app')
+  })
+
+  test('hides Smart apps and exits its Applications view while experiments are disabled', async () => {
+    window.history.pushState({}, '', '/sites?app_type=smart_app')
+
+    renderApp()
+
+    expect(await screen.findByTestId('sites-workspace')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/sites')
+      expect(window.location.search).toBe('')
+    })
+    expect(screen.queryByTestId('applications-tab-smart-app')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('smart-apps-marketplace-page')).not.toBeInTheDocument()
   })
 
   test('renders plugin management on direct /plugins/manage visit', async () => {
@@ -1842,7 +1934,9 @@ describe('App plugins route', () => {
     expect(await screen.findByRole('heading', { name: '管理插件' })).toBeInTheDocument()
     expect(screen.queryByText('Custom Docs MCP')).not.toBeInTheDocument()
     expect(screen.queryByText('wehot')).not.toBeInTheDocument()
-    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('plugin-management-page-content')).queryByRole('tab')
+    ).not.toBeInTheDocument()
   })
 
   test('refreshes composer plugin candidates after toggling an installed plugin', async () => {

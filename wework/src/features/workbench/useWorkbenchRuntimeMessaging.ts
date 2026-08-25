@@ -18,8 +18,8 @@ import {
   probeProjectWorktreeAvailability,
   worktreeWorkspaceDeviceId,
 } from '@/lib/worktree-availability'
-import { notifyMainRuntimeWorkChanged } from '@/tauri/runtimeWorkSync'
-import type { AppPreferences } from '@/tauri/appPreferences'
+import { notifyMainRuntimeWorkChanged } from '@/desktop/runtimeWorkSync'
+import type { AppPreferences } from '@/desktop/appPreferences'
 import { useAppPreferencesState } from '@/features/app-preferences/useAppPreferencesState'
 import {
   findWorkbenchDevice,
@@ -87,6 +87,7 @@ import {
   resolveAutomaticModel,
   selectedModelExecutionFields,
 } from './runtimeModelSelection'
+import { getDesktopE2ERuntimeConfig } from '@/e2e/runtime-config'
 import type { WorkbenchServices } from './workbenchServices'
 import { track } from '@/telemetry/client'
 import type { ExecutionTarget } from '@/telemetry/events'
@@ -294,8 +295,15 @@ export function friendlyTitleForTask(
   ephemeral?: boolean
 ): RuntimeTaskFriendlyTitleConfig | null {
   if (ephemeral || preferences?.friendlyTaskTitlesEnabled !== true) return null
+  return titleModelForGeneration(preferences, models, executionModel)
+}
 
-  const configuredModel = preferences.friendlyTaskTitleModel
+export function titleModelForGeneration(
+  preferences: Pick<AppPreferences, 'friendlyTaskTitleModel'> | undefined,
+  models: UnifiedModel[],
+  executionModel: Pick<RuntimeSendRequest, 'modelId' | 'modelType' | 'modelOptions'>
+): RuntimeTaskFriendlyTitleConfig | null {
+  const configuredModel = preferences?.friendlyTaskTitleModel
   const configuredModelIsAvailable =
     configuredModel &&
     models.some(
@@ -695,14 +703,17 @@ export function useWorkbenchRuntimeMessaging({
       projectOverride?: ProjectWithTasks | null,
       includeSelectedSkills = !isOptionsLocked,
       selectedSkillsOverride?: SkillRef[],
-      deviceOverride?: string | null
+      deviceOverride?: string | null,
+      deviceWorkspaceIdOverride?: number | null
     ): { payload: ChatSendPayload; activeDeviceId?: string } | null => {
       if (!state.defaultTeam) return null
       const activeProject = projectOverride === undefined ? state.currentProject : projectOverride
       const selectedProjectWorkspace = findProjectDeviceWorkspace(
         state.runtimeWork,
         activeProject?.id,
-        state.selectedDeviceWorkspaceId
+        deviceWorkspaceIdOverride === undefined
+          ? state.selectedDeviceWorkspaceId
+          : deviceWorkspaceIdOverride
       )
       const selectedProjectDeviceId = worktreeWorkspaceDeviceId(selectedProjectWorkspace)
       const activeDeviceId =
@@ -808,10 +819,12 @@ export function useWorkbenchRuntimeMessaging({
       options?: Pick<
         SendCurrentInputOptions,
         | 'clientUserMessageId'
+        | 'optimisticUserMessage'
         | 'initialGoal'
         | 'initialSupervisor'
         | 'onError'
         | 'onRuntimeTaskOptimisticOpen'
+        | 'prepareRuntimeTask'
         | 'additionalContext'
         | 'runtime'
         | 'runtimeExecutablePath'
@@ -822,6 +835,7 @@ export function useWorkbenchRuntimeMessaging({
         deliveryId?: string
         cloudProjectId?: string
         origin?: RuntimeTaskCreateRequest['origin']
+        deviceWorkspaceId?: number | null
         ephemeral?: boolean
         openInMainPane?: boolean
         refreshWorkListsOnResolve?: boolean
@@ -864,16 +878,19 @@ export function useWorkbenchRuntimeMessaging({
           : null
       const taskSeed = createRuntimeTaskId(runtime)
       const taskId = createRuntimeTaskIdFromSeed(taskSeed)
+      const clientUserMessageId = options?.optimisticUserMessage?.id ?? options?.clientUserMessageId
       logRuntimeTaskLaunchTiming('prepared-send-entered', launchStartedAt, {
         taskId,
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId: clientUserMessageId ?? null,
         projectId,
         runtime,
       })
       const selectedProjectWorkspace = findProjectDeviceWorkspace(
         state.runtimeWork,
         projectId,
-        state.selectedDeviceWorkspaceId
+        options?.deviceWorkspaceId === undefined
+          ? state.selectedDeviceWorkspaceId
+          : options.deviceWorkspaceId
       )
       const selectedProjectDeviceId = worktreeWorkspaceDeviceId(selectedProjectWorkspace)
       const selectedRuntimeProject = projectId
@@ -937,7 +954,7 @@ export function useWorkbenchRuntimeMessaging({
           try {
             logRuntimeTaskLaunchTiming('standalone-workspace-started', launchStartedAt, {
               taskId,
-              clientUserMessageId: options?.clientUserMessageId ?? null,
+              clientUserMessageId: clientUserMessageId ?? null,
               deviceId: activeDeviceId,
             })
             workspacePath = await createConversationWorkspace(
@@ -948,13 +965,13 @@ export function useWorkbenchRuntimeMessaging({
             )
             logRuntimeTaskLaunchTiming('standalone-workspace-resolved', launchStartedAt, {
               taskId,
-              clientUserMessageId: options?.clientUserMessageId ?? null,
+              clientUserMessageId: clientUserMessageId ?? null,
               deviceId: activeDeviceId,
             })
           } catch (error) {
             logRuntimeTaskLaunchTiming('standalone-workspace-failed', launchStartedAt, {
               taskId,
-              clientUserMessageId: options?.clientUserMessageId ?? null,
+              clientUserMessageId: clientUserMessageId ?? null,
               deviceId: activeDeviceId,
               error: runtimeLaunchErrorName(error),
             })
@@ -1093,9 +1110,7 @@ export function useWorkbenchRuntimeMessaging({
           ? { runtimePermissionMode: options.runtimePermissionMode }
           : {}),
         message: payload.message,
-        ...(options?.clientUserMessageId
-          ? { clientUserMessageId: options.clientUserMessageId }
-          : {}),
+        ...(clientUserMessageId ? { clientUserMessageId } : {}),
         title: buildRuntimeTaskTitle(displayMessage, payload.title),
         modelId: executionModel.modelId,
         modelType: executionModel.modelType ?? null,
@@ -1123,6 +1138,10 @@ export function useWorkbenchRuntimeMessaging({
               runtimeProjectKey: selectedRuntimeProject.key,
               runtimeProjectName: selectedRuntimeProject.name,
               runtimeWorkspaceRoots,
+              ...(selectedRuntimeProject.aiSettings?.instructions?.trim()
+                ? { projectInstructions: selectedRuntimeProject.aiSettings.instructions.trim() }
+                : {}),
+              projectPlugins: selectedRuntimeProject.aiSettings?.plugins ?? [],
             }
           : {}),
         ...(options?.ephemeral ? { ephemeral: true } : {}),
@@ -1154,6 +1173,15 @@ export function useWorkbenchRuntimeMessaging({
         workspacePath: requestedWorktree ? undefined : sourceWorkspacePath,
         ...(createRuntimeHandle ? { runtimeHandle: createRuntimeHandle } : {}),
       }
+      const seedOptimisticUserMessage = (address: RuntimeTaskAddress) => {
+        if (!options?.optimisticUserMessage) {
+          return
+        }
+        applyRuntimeConversationAction(address, {
+          type: 'user_added',
+          message: options.optimisticUserMessage,
+        })
+      }
       modelSelection.setSelectionForScope?.(
         getRuntimeTaskChatScopeKey(optimisticAddress),
         selectedModel,
@@ -1176,6 +1204,14 @@ export function useWorkbenchRuntimeMessaging({
       const runtimeProject = projectId
         ? (state.projects.find(project => project.id === projectId) ?? state.currentProject)
         : null
+      let rollbackPreparedRuntimeTask: (() => void | Promise<void>) | void
+      try {
+        rollbackPreparedRuntimeTask = await options?.prepareRuntimeTask?.(optimisticAddress)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '任务绑定失败'
+        reportError(message, options)
+        return false
+      }
 
       debugRuntimeCreateFlow('create-optimistic-open', {
         taskId,
@@ -1193,14 +1229,16 @@ export function useWorkbenchRuntimeMessaging({
       }
       logRuntimeTaskLaunchTiming('runtime-create-started', launchStartedAt, {
         taskId,
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId: clientUserMessageId ?? null,
         deviceId: optimisticAddress.deviceId,
       })
       // Start the primary request before optimistic navigation mounts task readers.
       // Presentation work must never leave a visible pending task without a runtime request.
       const createResponsePromise = (async () => {
         const worktreeCreationDelayMs = Number(
-          import.meta.env.VITE_WEWORK_E2E_WORKTREE_CREATION_DELAY_MS ?? 0
+          getDesktopE2ERuntimeConfig().worktreeCreationDelayMs ??
+            import.meta.env.VITE_WEWORK_E2E_WORKTREE_CREATION_DELAY_MS ??
+            0
         )
         if (
           payload.execution?.workspace?.source === 'git_worktree' &&
@@ -1219,22 +1257,23 @@ export function useWorkbenchRuntimeMessaging({
       void createResponsePromise.catch(() => undefined)
       logRuntimeTaskLaunchTiming('optimistic-open-started', launchStartedAt, {
         taskId,
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId: clientUserMessageId ?? null,
         deviceId: optimisticAddress.deviceId,
       })
+      seedOptimisticUserMessage(optimisticAddress)
       await options?.onRuntimeTaskOptimisticOpen?.(optimisticAddress)
       if (options?.openInMainPane !== false) {
         runtimeTasks.openRuntimeTaskView(optimisticAddress, runtimeProject, { navigate: true })
       }
       logRuntimeTaskLaunchTiming('optimistic-open-dispatched', launchStartedAt, {
         taskId,
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId: clientUserMessageId ?? null,
         deviceId: optimisticAddress.deviceId,
         openedInMainPane: options?.openInMainPane !== false,
       })
       logRuntimeTaskLaunchPaintTiming(launchStartedAt, {
         taskId,
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId: clientUserMessageId ?? null,
         deviceId: optimisticAddress.deviceId,
       })
       if (optimisticWorkspace && optimisticWorkspacePath && !options?.ephemeral) {
@@ -1260,7 +1299,7 @@ export function useWorkbenchRuntimeMessaging({
         const response = await createResponsePromise
         logRuntimeTaskLaunchTiming('runtime-create-resolved', launchStartedAt, {
           taskId,
-          clientUserMessageId: options?.clientUserMessageId ?? null,
+          clientUserMessageId: clientUserMessageId ?? null,
           deviceId: response.deviceId || optimisticAddress.deviceId,
           accepted: response.accepted,
         })
@@ -1342,7 +1381,8 @@ export function useWorkbenchRuntimeMessaging({
             previousAddress: runtimeAddressLog(optimisticAddress),
             finalAddress: runtimeAddressLog(address),
           })
-          options?.onRuntimeTaskOptimisticOpen?.(address, {
+          seedOptimisticUserMessage(address)
+          await options?.onRuntimeTaskOptimisticOpen?.(address, {
             previousAddress: optimisticAddress,
           })
         }
@@ -1399,11 +1439,21 @@ export function useWorkbenchRuntimeMessaging({
       } catch (error) {
         logRuntimeTaskLaunchTiming('runtime-create-failed', launchStartedAt, {
           taskId,
-          clientUserMessageId: options?.clientUserMessageId ?? null,
+          clientUserMessageId: clientUserMessageId ?? null,
           deviceId: optimisticAddress.deviceId,
           error: runtimeLaunchErrorName(error),
         })
         const message = error instanceof Error ? error.message : '发送失败'
+        if (rollbackPreparedRuntimeTask) {
+          try {
+            await rollbackPreparedRuntimeTask()
+          } catch (rollbackError) {
+            console.error('[Wework] Failed to roll back prepared Runtime task context', {
+              address: runtimeAddressLog(optimisticAddress),
+              error: rollbackError,
+            })
+          }
+        }
         lifecycleStore.sendRejected(optimisticAddress)
         if (optimisticWorkspace && optimisticWorkspacePath && !options?.ephemeral) {
           dispatch({
@@ -1459,7 +1509,8 @@ export function useWorkbenchRuntimeMessaging({
     async (inputOverride?: string, options?: SendCurrentInputOptions) => {
       const launchStartedAt = runtimeLaunchNowMs()
       logRuntimeTaskLaunchTiming('send-current-entered', launchStartedAt, {
-        clientUserMessageId: options?.clientUserMessageId ?? null,
+        clientUserMessageId:
+          options?.optimisticUserMessage?.id ?? options?.clientUserMessageId ?? null,
         forceNewTask: options?.forceNewTask === true,
         hasCurrentRuntimeTask: Boolean(state.currentRuntimeTask),
       })
@@ -1593,6 +1644,7 @@ export function useWorkbenchRuntimeMessaging({
           onError: options?.onError,
           onRuntimeTaskOptimisticOpen: options?.onRuntimeTaskOptimisticOpen,
           clientUserMessageId: options?.clientUserMessageId,
+          optimisticUserMessage: options?.optimisticUserMessage,
           additionalContext: options?.additionalContext,
           cloudProjectId: options?.cloudProjectId,
           ...(options?.runtime ? { runtime: options.runtime } : {}),
@@ -1705,6 +1757,7 @@ export function useWorkbenchRuntimeMessaging({
       }
 
       return sendPreparedRuntimeMessage(message, prepared.payload, prepared.activeDeviceId, {
+        optimisticUserMessage: options?.optimisticUserMessage,
         onError: options?.onError,
         onRuntimeTaskOptimisticOpen: options?.onRuntimeTaskOptimisticOpen,
         ephemeral: true,
@@ -1753,7 +1806,8 @@ export function useWorkbenchRuntimeMessaging({
         options.project,
         undefined,
         undefined,
-        options.deviceId
+        options.deviceId,
+        options.deviceWorkspaceId
       )
       if (!prepared) {
         reportSendBlocked(
@@ -1796,15 +1850,18 @@ export function useWorkbenchRuntimeMessaging({
         : options.modelSelection
       return sendPreparedRuntimeMessage(message, payload, prepared.activeDeviceId, {
         ...(options.runtime ? { runtime: options.runtime } : {}),
+        optimisticUserMessage: options.optimisticUserMessage,
         initialGoal: options.initialGoal,
         initialSupervisor: options.initialSupervisor,
         collaborationMode: options.collaborationMode,
         deliveryId: options.deliveryId,
         cloudProjectId: options.cloudProjectId,
         origin: options.origin,
+        deviceWorkspaceId: options.deviceWorkspaceId,
         modelSelection: explicitModelSelection,
         additionalContext: options.additionalContext,
         onError: options.onError,
+        prepareRuntimeTask: options.prepareRuntimeTask,
         onRuntimeTaskOptimisticOpen: options.onRuntimeTaskOptimisticOpen,
         openInMainPane: false,
       })

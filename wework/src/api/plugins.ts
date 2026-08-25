@@ -9,6 +9,8 @@ import type {
   PluginDeleteImpactResponse,
   PluginDeleteRequest,
   PluginDeleteResponse,
+  PluginDeviceReportItem,
+  PluginDeviceReportResponse,
   PluginDeviceSyncResponse,
   PluginMarketplaceInstallResponse,
   PluginMarketplaceCapabilities,
@@ -19,8 +21,6 @@ import type {
   PluginSubmissionItem,
 } from '@/types/api'
 import type { HttpClient } from './http'
-import { shouldUseTauriFetch } from './http'
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 
 export interface PluginShareUserSearchItem {
   id: number
@@ -49,6 +49,14 @@ export function createPluginApi(client: HttpClient) {
     },
     syncInstalledPluginsToDevice(deviceId: string): Promise<PluginDeviceSyncResponse> {
       return client.post(`/plugins/installed/sync-device${deviceQuery(deviceId)}`)
+    },
+    reportInstalledPluginsOnDevice(
+      deviceId: string,
+      plugins: PluginDeviceReportItem[]
+    ): Promise<PluginDeviceReportResponse> {
+      return client.post(`/plugins/installed/report-device${deviceQuery(deviceId)}`, {
+        plugins,
+      })
     },
     autoUpdateInstalledPlugins(): Promise<PluginAutoUpdateBatchResponse> {
       return client.post('/plugins/installed/auto-update-batch')
@@ -171,9 +179,7 @@ export function createPluginApi(client: HttpClient) {
         }
       )
       try {
-        const uploadTransport = shouldUseTauriFetch()
-          ? tauriFetch
-          : globalThis.fetch.bind(globalThis)
+        const uploadTransport = globalThis.fetch.bind(globalThis)
         const upload = await uploadTransport(initialized.uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/zip' },

@@ -7,9 +7,11 @@ import { arch, platform } from 'node:process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import JSZip from 'jszip'
 
 const require = createRequire(import.meta.url)
+const weworkRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const packageJson = require.resolve('dingtalk-workspace-cli/package.json')
 const packageRoot = dirname(packageJson)
 const rustHostTarget = () => {
@@ -25,9 +27,7 @@ const detectedTarget =
         'linux-arm64': 'aarch64-unknown-linux-gnu',
         'win32-x64': 'x86_64-pc-windows-msvc',
       }[`${platform}-${arch}`]
-const target =
-  process.env.WEWORK_DWS_TARGET?.trim() ||
-  detectedTarget
+const target = process.env.WEWORK_DWS_TARGET?.trim() || detectedTarget
 
 if (!target) {
   throw new Error(
@@ -88,8 +88,9 @@ try {
   }
   const source = await findBinary(temporaryDirectory)
   if (!source) throw new Error(`DWS binary is missing from ${archiveName}`)
-  const destination = resolve(
-    'src-tauri',
+  const destination = join(
+    weworkRoot,
+    'resources',
     'binaries',
     `dws-${target}${isWindowsTarget ? '.exe' : ''}`
   )

@@ -145,6 +145,7 @@ async function verifySystemDragPanelLayout(control) {
         text: 'System drag Popout Window verification',
         paths: [],
       }),
+      timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
     })
   )
   try {
@@ -343,6 +344,9 @@ async function verifySideChatAttachmentIsolation({
   await control.awaitScenarioRequestCount('side_chat_attachment', 1)
   await control.command('waitFor', `${sideChatSelector} [data-testid="message-assistant"]`, {
     text: SIDE_CHAT_COMPLETION_TEXT,
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  })
+  await control.command('waitFor', `${sideChatSelector} [data-testid="message-image-preview"]`, {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
   })
   const sideAfterSend = JSON.parse(await control.command('snapshot', sideChatSelector))

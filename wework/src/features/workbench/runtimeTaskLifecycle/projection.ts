@@ -1,4 +1,61 @@
-import type { RuntimeTaskSummary } from '@/types/api'
+import type { RuntimeTaskSummary, RuntimeTranscriptResponse } from '@/types/api'
+import type { RuntimePaneTranscript } from '@/types/workbench'
+import {
+  runtimeMessagesToWorkbenchMessages,
+  runtimeTranscriptTurnsToConversationTurns,
+} from '../runtimePaneMessages'
+
+export type RuntimeTaskBoardState = 'attention' | 'queued' | 'active' | 'completed'
+
+export function projectRuntimePaneTranscript(
+  transcript: RuntimeTranscriptResponse
+): RuntimePaneTranscript {
+  return {
+    running: transcript.running,
+    messages: runtimeMessagesToWorkbenchMessages(transcript.messages ?? []),
+    turns: runtimeTranscriptTurnsToConversationTurns(transcript.turns ?? []),
+    contextUsage: transcript.contextUsage ?? null,
+    turnNavigation: transcript.turnNavigation ?? [],
+    fullContent: transcript.fullContent === true,
+    rangeStart: transcript.rangeStart ?? null,
+    rangeEnd: transcript.rangeEnd ?? null,
+    hasMoreBefore: Boolean(transcript.hasMoreBefore),
+    beforeCursor: transcript.beforeCursor ?? null,
+    hasMoreAfter: Boolean(transcript.hasMoreAfter),
+    afterCursor: transcript.afterCursor ?? null,
+  }
+}
+
+export function isRuntimePaneTranscriptConfirmedIdle(transcript: RuntimePaneTranscript): boolean {
+  if (transcript.running !== false) return false
+  return !transcript.turns.some(turn => isRuntimeTurnRunningStatus(turn.status))
+}
+
+export function runtimeTaskBoardState(task: RuntimeTaskSummary): RuntimeTaskBoardState {
+  const normalizedTask = normalizeRuntimeTaskSummary(task)
+  const status = normalizedTask.status?.trim().toLowerCase()
+  const turnStatus = normalizedTask.turnStatus?.trim().toLowerCase()
+  if (
+    status === 'failed' ||
+    status === 'error' ||
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    turnStatus === 'failed' ||
+    turnStatus === 'interrupted'
+  ) {
+    return 'attention'
+  }
+  if (
+    normalizedTask.running === true ||
+    isRuntimeTaskConfirmedActive(normalizedTask) ||
+    isRuntimeTaskOptimisticallyActive(normalizedTask)
+  ) {
+    return 'active'
+  }
+  if (isRuntimeTaskQueued(normalizedTask)) return 'queued'
+  if (isRuntimeTaskAuthoritativeCompletion(normalizedTask)) return 'completed'
+  return 'attention'
+}
 
 export function normalizeRuntimeTaskSummary(task: RuntimeTaskSummary): RuntimeTaskSummary {
   if (!isRuntimeTaskAuthoritativeCompletion(task)) return task
@@ -89,6 +146,15 @@ export function isRuntimeTaskConfirmedActive(task: RuntimeTaskSummary): boolean 
   )
 }
 
+export function isRuntimeTaskExecutionRunning(task: RuntimeTaskSummary): boolean {
+  const normalizedTask = normalizeRuntimeTaskSummary(task)
+  return (
+    normalizedTask.optimistic !== true &&
+    normalizedTask.running === true &&
+    normalizedTask.completedAt == null
+  )
+}
+
 function isRuntimeTaskOptimisticallyActive(task: RuntimeTaskSummary): boolean {
   return (
     task.optimistic === true &&
@@ -106,6 +172,16 @@ function isRuntimeTaskQueued(task: RuntimeTaskSummary): boolean {
 function isRuntimeTaskRunningStatus(status: string | null | undefined): boolean {
   const normalized = status?.replace(/[_-]/g, '').trim().toLowerCase()
   return normalized === 'active' || normalized === 'inprogress' || normalized === 'running'
+}
+
+function isRuntimeTurnRunningStatus(status: string | null | undefined): boolean {
+  const normalized = status?.replace(/[_-]/g, '').trim().toLowerCase()
+  return (
+    normalized === 'active' ||
+    normalized === 'inprogress' ||
+    normalized === 'pending' ||
+    normalized === 'streaming'
+  )
 }
 
 function runtimeTaskProjectionTime(task: RuntimeTaskSummary): number {

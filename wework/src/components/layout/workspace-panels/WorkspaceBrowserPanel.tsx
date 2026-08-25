@@ -49,11 +49,14 @@ import {
   resolveEmbeddedBrowserAgentApproval,
   setEmbeddedBrowserAgentControlPaused,
   setEmbeddedBrowserBounds,
+  setEmbeddedBrowserDeviceMetrics,
+  setEmbeddedBrowserZoom,
   type EmbeddedBrowserAgentStateEvent,
   type EmbeddedBrowserDataKind,
   type EmbeddedBrowserBounds,
   type EmbeddedBrowserDownloadEvent,
   type EmbeddedBrowserInvalidTlsCertificateEvent,
+  type EmbeddedBrowserNavigationError,
   type EmbeddedBrowserOcclusionChange,
   type EmbeddedBrowserOpenRequest,
 } from '@/lib/embedded-browser'
@@ -65,6 +68,28 @@ import { openExternalUrl } from '@/lib/external-links'
 import { fileManagerRevealLabel } from '@/lib/file-manager'
 import { revealLocalFile } from '@/lib/local-terminal'
 import { normalizeBrowserUrl } from '@/lib/browser-url'
+import { navigateTo } from '@/lib/navigation'
+import { BROWSER_ZOOM_DEFAULT_PERCENT, zoomPercentToScaleFactor } from '@/lib/browser-zoom'
+import {
+  clampDeviceDimension,
+  computeDeviceViewportPlacement,
+  defaultBrowserDeviceToolbarState,
+  matchDevicePresetId,
+  resizeDeviceDimensions,
+  resolveDevicePreset,
+  BROWSER_DEVICE_MIN_HEIGHT,
+  BROWSER_DEVICE_MIN_WIDTH,
+  type BrowserDeviceResizeEdge,
+  type BrowserDeviceToolbarState,
+} from '@/lib/browser-device-toolbar'
+import {
+  clearEmbeddedBrowserFind,
+  searchEmbeddedBrowserPage,
+  stepEmbeddedBrowserFind,
+  type BrowserFindState,
+} from './browser-find/browser-find-store'
+import { BrowserFindBar } from './browser-find/BrowserFindBar'
+import { BrowserDeviceToolbar } from './BrowserDeviceToolbar'
 import {
   embeddedBrowserOverlayMutationAffectsVisibility,
   hasEmbeddedBrowserOverlayConflict,
@@ -83,14 +108,16 @@ import type {
   PageAnnotationDto,
 } from '@/types/browser-annotation'
 import { browserSnapshotToContexts } from '@/lib/browser-annotation-context'
+import { isElectronRuntime } from '@/lib/runtime-environment'
+import { ElectronEmbeddedBrowserView } from './ElectronEmbeddedBrowserView'
 
-const EMBEDDED_BROWSER_READY_TIMEOUT_MS = 800
 const EMBEDDED_BROWSER_STATE_INTERVAL_MS = 1000
+const BROWSER_ANNOTATION_STATE_INTERVAL_MS = 100
 const EMBEDDED_BROWSER_BOUNDS_DEBOUNCE_MS = 80
 const EMBEDDED_BROWSER_VISIBLE_HOST_TIMEOUT_MS = 12_000
 const EMBEDDED_BROWSER_VISIBLE_HOST_INTERVAL_MS = 50
 const EMBEDDED_BROWSER_POST_OPEN_SYNC_DELAYS_MS = [0, 120, 300, 600]
-const BROWSER_CLEAR_STARTED_NOTICE_MIN_MS = 350
+const BROWSER_CLEAR_STARTED_NOTICE_MIN_MS = 600
 const BROWSER_ANNOTATION_LOG_PREFIX = '[Wework][BrowserAnnotation]'
 const BROWSER_ANNOTATION_CLEANUP_SCRIPT = `(() => {
   try { window.__WEWORK_BROWSER_ANNOTATION__?.destroy?.(); } catch (_) {}
@@ -148,6 +175,7 @@ function browserOcclusionReducer(
 
 export interface WorkspaceBrowserPanelProps {
   active: boolean
+  hideToolbar?: boolean
   label?: string
   browserTabId?: string
   openRequest?: EmbeddedBrowserOpenRequest | null
@@ -163,6 +191,7 @@ export interface WorkspaceBrowserPanelProps {
   onNativeLabelChange?: (nativeLabel: string | null) => void
   onDownloadActivityChange?: (hasActiveDownload: boolean) => void
   onFaviconChange?: (faviconUrl: string | null) => void
+  onLoadingChange?: (isLoading: boolean) => void
   onTitleChange?: (title: string | null) => void
 }
 
@@ -302,6 +331,7 @@ function observeElementIfPresent(observer: ResizeObserver, element: Element | nu
 
 export function WorkspaceBrowserTabPanel({
   active,
+  hideToolbar = false,
   label = 'workspace-browser',
   browserTabId = label,
   openRequest,
@@ -314,15 +344,19 @@ export function WorkspaceBrowserTabPanel({
   onNativeLabelChange,
   onDownloadActivityChange,
   onFaviconChange,
+  onLoadingChange,
   onTitleChange,
 }: WorkspaceBrowserPanelProps) {
   const { t } = useTranslation('common')
   const appearance = useOptionalAppearance()?.appearance ?? defaultAppearance
+  const electronRuntime = isElectronRuntime()
   const browserHostRef = useRef<HTMLDivElement | null>(null)
   const nativeBrowserOpenRef = useRef(false)
   const nativeBrowserOpeningRef = useRef(false)
   const currentUrlRef = useRef<string | null>(null)
+  const pendingNavigationUrlRef = useRef<string | null>(null)
   const activePageUrlRef = useRef<string | null>(null)
+  const addressInputRef = useRef<HTMLInputElement | null>(null)
   const addressEditingRef = useRef(false)
   const annotationModeRef = useRef(false)
   const annotationCleanupPromiseRef = useRef<Promise<void> | null>(null)
@@ -365,6 +399,9 @@ export function WorkspaceBrowserTabPanel({
   const [pageUrl, setPageUrl] = useState<string | null>(null)
   const [status, setStatus] = useState<BrowserStatus>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [navigationError, setNavigationError] = useState<EmbeddedBrowserNavigationError | null>(
+    null
+  )
   const [annotationMode, setAnnotationMode] = useState(false)
   const [annotations, setAnnotations] = useState<PageAnnotationDto[]>([])
   const [, setAnnotationScope] = useState<BrowserAnnotationScope | null>(null)
@@ -386,6 +423,28 @@ export function WorkspaceBrowserTabPanel({
   const [agentState, setAgentState] = useState<BrowserAgentState | null>(null)
   const [invalidTlsCertificate, setInvalidTlsCertificate] =
     useState<EmbeddedBrowserInvalidTlsCertificateEvent | null>(null)
+  const deviceFitScaleRef = useRef(1)
+  const browserBoundsSyncGenerationRef = useRef(0)
+  const [zoomPercent, setZoomPercent] = useState(BROWSER_ZOOM_DEFAULT_PERCENT)
+  const zoomPercentRef = useRef(BROWSER_ZOOM_DEFAULT_PERCENT)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findResult, setFindResult] = useState<BrowserFindState | null>(null)
+  const [findUnavailable, setFindUnavailable] = useState(false)
+  const findRequestSequenceRef = useRef(0)
+  const findPageUrlRef = useRef<string | null>(null)
+  const [deviceToolbar, setDeviceToolbar] = useState<BrowserDeviceToolbarState>(
+    defaultBrowserDeviceToolbarState
+  )
+  const deviceToolbarRef = useRef(deviceToolbar)
+  const [deviceVisualRect, setDeviceVisualRect] = useState<{
+    x: number
+    y: number
+    width: number
+    height: number
+    hostWidth: number
+    hostHeight: number
+  } | null>(null)
   const embeddedBrowserAvailable = canUseEmbeddedBrowser()
   const activePageUrl = pageUrl ?? currentUrl
   const internalDesktopPage = Boolean(
@@ -397,6 +456,22 @@ export function WorkspaceBrowserTabPanel({
   const pendingCommentContextCount = Math.max(codeCommentCount, codeCommentContexts.length)
   const hasQueuedTweaks = annotations.some(annotation => annotation.adjustments.length > 0)
   const originalViewEnabled = annotationMode && hasQueuedTweaks && originalViewHeld
+
+  useEffect(() => {
+    onLoadingChange?.(status === 'loading')
+  }, [onLoadingChange, status])
+
+  const applyNativePageStatus = useCallback(
+    (pageState: {
+      isLoading: boolean
+      navigationError?: EmbeddedBrowserNavigationError | null
+    }) => {
+      const nextNavigationError = pageState.navigationError ?? null
+      setNavigationError(nextNavigationError)
+      setStatus(nextNavigationError ? 'error' : pageState.isLoading ? 'loading' : 'ready')
+    },
+    []
+  )
 
   const applyDownloadEvent = useCallback((download: EmbeddedBrowserDownloadEvent) => {
     setDownloads(current => {
@@ -563,7 +638,7 @@ export function WorkspaceBrowserTabPanel({
   useEffect(() => {
     const listener = listenEmbeddedBrowserCloseRequests(event => {
       if (!activeRef.current || event.label !== currentLabelRef.current) return
-      if (nativeLabelRef.current && event.nativeLabel !== nativeLabelRef.current) {
+      if (event.nativeLabel !== nativeLabelRef.current) {
         console.info(
           '[Wework] Embedded browser close ignored',
           JSON.stringify({
@@ -585,6 +660,7 @@ export function WorkspaceBrowserTabPanel({
       onNativeLabelChange?.(null)
       onDownloadActivityChange?.(false)
       currentUrlRef.current = null
+      pendingNavigationUrlRef.current = null
       activePageUrlRef.current = null
       annotationModeRef.current = false
       pageStateRequestGenerationRef.current += 1
@@ -634,10 +710,14 @@ export function WorkspaceBrowserTabPanel({
 
   const updatePageUrl = useCallback(
     (url: string | null) => {
+      const pendingNavigationUrl = pendingNavigationUrlRef.current
+      if (pendingNavigationUrl && url && url !== pendingNavigationUrl) return
       activePageUrlRef.current = url
       setPageUrl(url)
       if (url) {
-        if (!addressEditingRef.current) setAddress(url)
+        if (!addressEditingRef.current && document.activeElement !== addressInputRef.current) {
+          setAddress(url)
+        }
         onTitleChange?.(getFallbackBrowserTitle(url))
         onFaviconChange?.(getFallbackFaviconUrl(url))
         return
@@ -651,7 +731,10 @@ export function WorkspaceBrowserTabPanel({
 
   useEffect(() => {
     const listener = listenEmbeddedBrowserPageStateChanges(pageState => {
-      if (!activeRef.current || pageState.nativeLabel !== nativeLabelRef.current) return
+      if (pageState.label && pageState.label !== currentLabelRef.current) return
+      if (nativeLabelRef.current && pageState.nativeLabel !== nativeLabelRef.current) return
+      applyNativePageStatus(pageState)
+      if (pageState.isLoading) return
       setInvalidTlsCertificate(pageState.invalidTlsCertificate ?? null)
       const nextUrl = pageState.url || currentUrlRef.current
       if (
@@ -669,12 +752,14 @@ export function WorkspaceBrowserTabPanel({
         setOriginalViewHeld(false)
         void evalEmbeddedBrowser('window.__WEWORK_BROWSER_ANNOTATION__?.suspend?.() ?? true', label)
       }
+      if (nextUrl && pendingNavigationUrlRef.current === nextUrl) {
+        pendingNavigationUrlRef.current = null
+      }
       updatePageUrl(nextUrl)
       if (nextUrl) {
         onTitleChange?.(pageState.title || getFallbackBrowserTitle(nextUrl))
         onFaviconChange?.(getFallbackFaviconUrl(nextUrl))
       }
-      setStatus('ready')
     })
     if (!listener) return undefined
     let disposed = false
@@ -694,10 +779,13 @@ export function WorkspaceBrowserTabPanel({
       disposed = true
       unlisten?.()
     }
-  }, [label, onFaviconChange, onTitleChange, updatePageUrl])
+  }, [applyNativePageStatus, label, onFaviconChange, onTitleChange, updatePageUrl])
 
   const syncEmbeddedBrowserBounds = useCallback(
     async (visible = active) => {
+      const generation = browserBoundsSyncGenerationRef.current + 1
+      browserBoundsSyncGenerationRef.current = generation
+      const isCurrent = () => browserBoundsSyncGenerationRef.current === generation
       if (
         !embeddedBrowserAvailable ||
         !nativeBrowserOpenRef.current ||
@@ -707,23 +795,84 @@ export function WorkspaceBrowserTabPanel({
       }
       const host = browserHostRef.current
       if (!host) {
-        if (!visible) {
+        if (!visible && isCurrent()) {
           await setEmbeddedBrowserBounds({ x: 0, y: 0, width: 1, height: 1 }, false, label)
         }
         return
       }
       const bounds = getElementBounds(host)
       if (!bounds) {
-        if (!visible) {
+        if (!visible && isCurrent()) {
           await setEmbeddedBrowserBounds({ x: 0, y: 0, width: 1, height: 1 }, false, label)
         }
         return
       }
       const nativeVisible =
-        visible && (!embeddedBrowserOccludedRef.current || !occlusionSnapshotReadyRef.current)
-      await setEmbeddedBrowserBounds(bounds, nativeVisible, label)
+        visible &&
+        !navigationError &&
+        (electronRuntime ||
+          !embeddedBrowserOccludedRef.current ||
+          !occlusionSnapshotReadyRef.current)
+      const deviceState = deviceToolbarRef.current
+      const placement = deviceState.isEnabled
+        ? computeDeviceViewportPlacement(bounds, deviceState, zoomPercentRef.current)
+        : null
+      const nativeZoomScale = placement ? 1 : zoomPercentToScaleFactor(zoomPercentRef.current)
+      if (placement) {
+        deviceFitScaleRef.current = placement.fitScale
+        const hostRect = host.getBoundingClientRect()
+        const nextVisualRect = {
+          x: placement.visualRect.x - hostRect.left,
+          y: placement.visualRect.y - hostRect.top,
+          width: placement.visualRect.width,
+          height: placement.visualRect.height,
+          hostWidth: hostRect.width,
+          hostHeight: hostRect.height,
+        }
+        setDeviceVisualRect(current =>
+          current &&
+          current.x === nextVisualRect.x &&
+          current.y === nextVisualRect.y &&
+          current.width === nextVisualRect.width &&
+          current.height === nextVisualRect.height &&
+          current.hostWidth === nextVisualRect.hostWidth &&
+          current.hostHeight === nextVisualRect.hostHeight
+            ? current
+            : nextVisualRect
+        )
+        if (!isCurrent()) return
+        await setEmbeddedBrowserBounds(placement.webviewBounds, nativeVisible, label)
+        if (!isCurrent()) return
+      } else {
+        deviceFitScaleRef.current = 1
+        setDeviceVisualRect(current => (current === null ? current : null))
+        if (!isCurrent()) return
+        await setEmbeddedBrowserDeviceMetrics(null, label)
+        if (!isCurrent()) return
+        await setEmbeddedBrowserBounds(bounds, nativeVisible, label)
+        if (!isCurrent()) return
+      }
+      // Regular pages use Electron zoom. Device mode keeps Electron zoom at 1
+      // because setZoomFactor changes the emulated CSS viewport; CDP metrics
+      // applies the combined fit and page zoom through its image scale instead.
+      await setEmbeddedBrowserZoom(nativeZoomScale, label).catch(error => {
+        console.error('Failed to apply embedded browser zoom:', error)
+      })
+      if (!isCurrent()) return
+      // Electron applies zoom to the CSS viewport. Reassert device metrics
+      // after zoom so window.innerWidth/innerHeight remain the selected preset.
+      if (placement) {
+        await setEmbeddedBrowserDeviceMetrics(
+          {
+            width: deviceState.width,
+            height: deviceState.height,
+            scale: placement.scale,
+          },
+          label
+        )
+      }
     },
-    [active, embeddedBrowserAvailable, label]
+    [active, electronRuntime, embeddedBrowserAvailable, label, navigationError]
   )
 
   const hideEmbeddedBrowser = useCallback(async () => {
@@ -1016,6 +1165,7 @@ export function WorkspaceBrowserTabPanel({
         return false
       }
       adoptNativeLabel(pageState.nativeLabel, label)
+      applyNativePageStatus(pageState)
       setInvalidTlsCertificate(pageState.invalidTlsCertificate ?? null)
       const nextUrl = pageState.url || currentUrlRef.current
       if (
@@ -1025,6 +1175,9 @@ export function WorkspaceBrowserTabPanel({
       ) {
         logBrowserAnnotation('exit annotation mode for internal desktop page', { label })
         exitAnnotationMode()
+      }
+      if (!pageState.isLoading && nextUrl && pendingNavigationUrlRef.current === nextUrl) {
+        pendingNavigationUrlRef.current = null
       }
       updatePageUrl(nextUrl)
       if (nextUrl) {
@@ -1042,6 +1195,7 @@ export function WorkspaceBrowserTabPanel({
   }, [
     embeddedBrowserAvailable,
     adoptNativeLabel,
+    applyNativePageStatus,
     exitAnnotationMode,
     label,
     onFaviconChange,
@@ -1061,7 +1215,6 @@ export function WorkspaceBrowserTabPanel({
     }
     if (nativeBrowserOpeningRef.current) return
 
-    let readyTimer: number | null = null
     const requestId = activeOpenRequestIdRef.current
     const openingLabel = label
     const openingUrl = currentUrl
@@ -1109,8 +1262,9 @@ export function WorkspaceBrowserTabPanel({
           setInvalidTlsCertificate(pageState.invalidTlsCertificate ?? null)
           nativeBrowserOpenRef.current = true
           updatePageUrl(pageState.url || openingUrl)
+          pendingNavigationUrlRef.current = null
           schedulePostOpenBoundsSync(activeRef.current)
-          setStatus('ready')
+          applyNativePageStatus(pageState)
           return true
         } catch {
           // No existing browser state to recover yet.
@@ -1139,10 +1293,6 @@ export function WorkspaceBrowserTabPanel({
           url: openingUrl,
           visible,
         })
-        readyTimer = window.setTimeout(() => {
-          if (!isAbandoned()) setStatus('ready')
-        }, EMBEDDED_BROWSER_READY_TIMEOUT_MS)
-
         logBrowserOpenDiagnostic('native_open_started', {
           active,
           label: openingLabel,
@@ -1181,10 +1331,10 @@ export function WorkspaceBrowserTabPanel({
           activeOpenRequestIdRef.current = null
         }
         updatePageUrl(requestId ? openingUrl : pageState.url || openingUrl)
+        if (!requestId) pendingNavigationUrlRef.current = null
         await revealHiddenBrowser(visible)
         schedulePostOpenBoundsSync(activeRef.current)
-        if (readyTimer !== null) window.clearTimeout(readyTimer)
-        setStatus('ready')
+        applyNativePageStatus(pageState)
         logBrowserOpenDiagnostic('native_open_succeeded', {
           active,
           label: openingLabel,
@@ -1215,13 +1365,11 @@ export function WorkspaceBrowserTabPanel({
           url: openingUrl,
         })
         if (!abandoned) {
-          if (readyTimer !== null) window.clearTimeout(readyTimer)
           if (await recoverBrowserFromPageState()) return
           setStatus('error')
           setError(t('workbench.browser_open_failed'))
         }
       } finally {
-        if (readyTimer !== null) window.clearTimeout(readyTimer)
         nativeBrowserOpeningRef.current = false
       }
     }
@@ -1230,6 +1378,7 @@ export function WorkspaceBrowserTabPanel({
   }, [
     active,
     adoptNativeLabel,
+    applyNativePageStatus,
     browserOpenAttempt,
     currentUrl,
     embeddedBrowserAvailable,
@@ -1254,10 +1403,11 @@ export function WorkspaceBrowserTabPanel({
         nativeBrowserOpenRef.current = true
         setCurrentUrl(pageState.url)
         updatePageUrl(pageState.url)
+        pendingNavigationUrlRef.current = null
         if (pageState.title) {
           onTitleChange?.(pageState.title)
         }
-        setStatus('ready')
+        applyNativePageStatus(pageState)
         schedulePostOpenBoundsSync(active)
         if (!annotationModeRef.current) {
           void suspendAnnotationLayer(label)
@@ -1275,6 +1425,7 @@ export function WorkspaceBrowserTabPanel({
   }, [
     active,
     adoptNativeLabel,
+    applyNativePageStatus,
     currentUrl,
     embeddedBrowserAvailable,
     label,
@@ -1467,7 +1618,7 @@ export function WorkspaceBrowserTabPanel({
 
     const intervalId = window.setInterval(() => {
       void consumeAnnotations()
-    }, 500)
+    }, BROWSER_ANNOTATION_STATE_INTERVAL_MS)
     void consumeAnnotations()
 
     return () => {
@@ -1488,18 +1639,32 @@ export function WorkspaceBrowserTabPanel({
   ])
 
   const holdOriginalView = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    event.currentTarget.setPointerCapture?.(event.pointerId)
+    if (event.nativeEvent.isTrusted) {
+      try {
+        event.currentTarget.setPointerCapture?.(event.pointerId)
+      } catch {
+        // The native pointer may already have been released.
+      }
+    }
     setOriginalViewHeld(true)
   }, [])
   const releaseOriginalView = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+    } catch {
+      // The pointer may already have been released by the native host.
     }
     setOriginalViewHeld(false)
   }, [])
   const cancelOriginalView = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+    } catch {
+      // The pointer may already have been released by the native host.
     }
     setOriginalViewHeld(false)
   }, [])
@@ -1658,12 +1823,16 @@ export function WorkspaceBrowserTabPanel({
   useLayoutEffect(() => {
     embeddedBrowserOccludedRef.current = embeddedBrowserOccluded
     occlusionSnapshotGenerationRef.current = browserOcclusion.generation
-    occlusionSnapshotReadyRef.current = !embeddedBrowserOccluded
-  }, [browserOcclusion.generation, embeddedBrowserOccluded])
+    occlusionSnapshotReadyRef.current = electronRuntime || !embeddedBrowserOccluded
+  }, [browserOcclusion.generation, electronRuntime, embeddedBrowserOccluded])
 
   const syncOcclusionState = useCallback(
     async (generation: number) => {
       if (!mountedRef.current) return
+      if (electronRuntime) {
+        await syncEmbeddedBrowserBounds(active)
+        return
+      }
       if (!activeRef.current || !embeddedBrowserOccludedRef.current) {
         await syncEmbeddedBrowserBounds(active)
         return
@@ -1721,7 +1890,7 @@ export function WorkspaceBrowserTabPanel({
         }
       }
     },
-    [active, label, syncEmbeddedBrowserBounds]
+    [active, electronRuntime, label, syncEmbeddedBrowserBounds]
   )
 
   useEffect(() => {
@@ -1754,26 +1923,25 @@ export function WorkspaceBrowserTabPanel({
 
   const runBrowserCommand = useCallback(
     async (command: () => Promise<void>) => {
-      if (!currentUrl) return
       try {
         await command()
-        if (!(await refreshPageState())) return
-        setStatus('ready')
+        await refreshPageState()
       } catch (error) {
         console.error('Failed to control embedded browser:', error)
         setStatus('error')
         setError(t('workbench.browser_control_failed'))
       }
     },
-    [currentUrl, refreshPageState, t]
+    [refreshPageState, t]
   )
 
   const reloadCurrentUrl = useCallback(
     (url: string) => {
-      if (!embeddedBrowserAvailable || !nativeBrowserOpenRef.current) {
+      setNavigationError(null)
+      if (!embeddedBrowserAvailable) {
         setCurrentUrl(null)
         window.setTimeout(() => setCurrentUrl(url), 0)
-        setStatus(embeddedBrowserAvailable ? 'loading' : 'ready')
+        setStatus('ready')
         return
       }
 
@@ -1785,6 +1953,8 @@ export function WorkspaceBrowserTabPanel({
         return
       }
 
+      setStatus('loading')
+      setError(null)
       void runBrowserCommand(() => reloadEmbeddedBrowser(label))
     },
     [embeddedBrowserAvailable, label, runBrowserCommand]
@@ -1792,7 +1962,7 @@ export function WorkspaceBrowserTabPanel({
 
   const openBrowserUrl = useCallback(
     (rawUrl: string) => {
-      const nextUrl = normalizeBrowserUrl(rawUrl, window.location.href)
+      const nextUrl = normalizeBrowserUrl(rawUrl)
       if (!nextUrl) {
         setStatus('error')
         setError(t('workbench.browser_invalid_url'))
@@ -1801,11 +1971,13 @@ export function WorkspaceBrowserTabPanel({
 
       setAddress(nextUrl)
       setError(null)
+      setNavigationError(null)
       setLocalFilePreviewToast(null)
       setInvalidTlsCertificate(certificate =>
         certificate && haveSameOrigin(certificate.url, nextUrl) ? certificate : null
       )
       pageStateRequestGenerationRef.current += 1
+      pendingNavigationUrlRef.current = nextUrl
 
       if (annotationMode && nextUrl !== activePageUrl) {
         exitAnnotationMode()
@@ -1813,6 +1985,7 @@ export function WorkspaceBrowserTabPanel({
 
       if (nextUrl === activePageUrl) {
         updatePageUrl(nextUrl)
+        pendingNavigationUrlRef.current = null
         reloadCurrentUrl(nextUrl)
         return
       }
@@ -1821,8 +1994,10 @@ export function WorkspaceBrowserTabPanel({
 
       if (embeddedBrowserAvailable && nativeBrowserOpenRef.current) {
         setStatus('loading')
-        void runBrowserCommand(() => navigateEmbeddedBrowser(nextUrl, label)).then(() => {
+        void runBrowserCommand(() => navigateEmbeddedBrowser(nextUrl, label)).then(async () => {
+          pendingNavigationUrlRef.current = null
           setCurrentUrl(nextUrl)
+          await refreshPageState()
           track('browser_navigation_completed', { runtime: 'embedded' })
         })
         return
@@ -1830,6 +2005,7 @@ export function WorkspaceBrowserTabPanel({
 
       setCurrentUrl(nextUrl)
       setStatus(embeddedBrowserAvailable ? 'loading' : 'ready')
+      if (!embeddedBrowserAvailable) pendingNavigationUrlRef.current = null
       track('browser_navigation_completed', { runtime: 'fallback' })
     },
     [
@@ -1838,6 +2014,7 @@ export function WorkspaceBrowserTabPanel({
       embeddedBrowserAvailable,
       exitAnnotationMode,
       label,
+      refreshPageState,
       reloadCurrentUrl,
       runBrowserCommand,
       t,
@@ -1857,7 +2034,10 @@ export function WorkspaceBrowserTabPanel({
     }
     if (handledOpenRequestIdRef.current === openRequest.id) return
     handledOpenRequestIdRef.current = openRequest.id
-    activeOpenRequestIdRef.current = openRequest.id
+    // Only agent (bridge) opens defer the initial navigation to the bridge and
+    // therefore create the host with about:blank. User, popup, and restore
+    // requests bind the target URL directly during host creation.
+    activeOpenRequestIdRef.current = openRequest.source === 'agent' ? openRequest.id : null
     logBrowserOpenDiagnostic('request_consumed', {
       active,
       label,
@@ -1866,14 +2046,23 @@ export function WorkspaceBrowserTabPanel({
       url: openRequest.url,
     })
     openBrowserUrl(openRequest.url)
-  }, [active, label, openBrowserUrl, openRequest?.id, openRequest?.label, openRequest?.url])
+  }, [
+    active,
+    label,
+    openBrowserUrl,
+    openRequest?.id,
+    openRequest?.label,
+    openRequest?.source,
+    openRequest?.url,
+  ])
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    addressEditingRef.current = false
     const urlInput = event.currentTarget.elements.namedItem('url') as HTMLInputElement | null
+    const submittedAddress = urlInput?.value ?? address
+    openBrowserUrl(submittedAddress)
+    addressEditingRef.current = false
     urlInput?.blur()
-    openBrowserUrl(address)
   }
 
   const handleReload = () => {
@@ -1995,10 +2184,234 @@ export function WorkspaceBrowserTabPanel({
   const clearLocalFilePreviewToast = useCallback(() => setLocalFilePreviewToast(null), [])
   const clearClearDataNotice = useCallback(() => setClearDataNotice(null), [])
 
+  // --- Find in page (JS injection; wry has no native find API) ---
+
+  const canUsePageFind = Boolean(activePageUrl) && !internalDesktopPage
+
+  const runFindSearch = useCallback(
+    (query: string) => {
+      const request = ++findRequestSequenceRef.current
+      if (!query) {
+        setFindResult(null)
+        setFindUnavailable(false)
+        void clearEmbeddedBrowserFind(label)
+        return
+      }
+      void searchEmbeddedBrowserPage(query, label)
+        .then(state => {
+          if (findRequestSequenceRef.current !== request) return
+          setFindResult(state)
+          setFindUnavailable(state === null)
+        })
+        .catch(() => {
+          if (findRequestSequenceRef.current !== request) return
+          setFindResult(null)
+          setFindUnavailable(true)
+        })
+    },
+    [label]
+  )
+
+  const openFindBar = useCallback(() => {
+    setFindOpen(true)
+    if (!nativeBrowserOpenRef.current) return
+    // Mirror Codex: prefill the find query with the current page selection.
+    void evalEmbeddedBrowserJson<string | null>(
+      'window.getSelection()?.toString()?.trim() || null',
+      label
+    )
+      .then(selection => {
+        if (typeof selection === 'string' && selection && !/[\r\n]/.test(selection)) {
+          setFindQuery(selection)
+        }
+      })
+      .catch(() => undefined)
+  }, [label])
+
+  const closeFindBar = useCallback(() => {
+    findRequestSequenceRef.current += 1
+    setFindOpen(false)
+    setFindQuery('')
+    setFindResult(null)
+    setFindUnavailable(false)
+    void clearEmbeddedBrowserFind(label)
+  }, [label])
+
+  const stepFind = useCallback(
+    (direction: 1 | -1) => {
+      if (!findQuery) return
+      void stepEmbeddedBrowserFind(direction, label)
+        .then(state => {
+          if (state) setFindResult(state)
+        })
+        .catch(() => undefined)
+    },
+    [findQuery, label]
+  )
+
+  useEffect(() => {
+    if (!findOpen) return
+    const timer = window.setTimeout(() => runFindSearch(findQuery), 150)
+    return () => window.clearTimeout(timer)
+  }, [findOpen, findQuery, runFindSearch])
+
+  // Re-run the active search after a navigation or reload replaces the page.
+  useEffect(() => {
+    if (!findOpen) {
+      findPageUrlRef.current = activePageUrl
+      return
+    }
+    if (status !== 'ready') return
+    if (findPageUrlRef.current === activePageUrl) return
+    findPageUrlRef.current = activePageUrl
+    if (!findQuery) return
+    const timer = window.setTimeout(() => runFindSearch(findQuery), 150)
+    return () => window.clearTimeout(timer)
+  }, [activePageUrl, findOpen, findQuery, runFindSearch, status])
+
+  // --- Device toolbar (viewport emulation via bounds + fit scale) ---
+
+  const changeBrowserZoom = useCallback(
+    (nextPercent: number) => {
+      zoomPercentRef.current = nextPercent
+      setZoomPercent(nextPercent)
+      // The bounds sync applies the correct combined zoom (page zoom alone,
+      // or folded into the device viewport fit scale).
+      scheduleEmbeddedBrowserBoundsSync(activeRef.current)
+    },
+    [scheduleEmbeddedBrowserBoundsSync]
+  )
+
+  // Re-apply the complete browser viewport after the webview reloads or is
+  // recreated. Device mode must restore bounds, zoom, and CDP metrics as one
+  // ordered operation; restoring zoom alone changes the emulated CSS viewport.
+  useEffect(() => {
+    if (status !== 'ready') return
+    if (zoomPercentRef.current === BROWSER_ZOOM_DEFAULT_PERCENT && deviceFitScaleRef.current === 1)
+      return
+    if (!embeddedBrowserAvailable || !nativeBrowserOpenRef.current) return
+    scheduleEmbeddedBrowserBoundsSync(activeRef.current)
+  }, [status, embeddedBrowserAvailable, scheduleEmbeddedBrowserBoundsSync])
+
+  const updateDeviceToolbar = useCallback(
+    (patch: Partial<BrowserDeviceToolbarState>) => {
+      setDeviceToolbar(current => {
+        const next = { ...current, ...patch }
+        deviceToolbarRef.current = next
+        return next
+      })
+      scheduleEmbeddedBrowserBoundsSync(activeRef.current)
+    },
+    [scheduleEmbeddedBrowserBoundsSync]
+  )
+
+  const toggleDeviceToolbar = useCallback(() => {
+    updateDeviceToolbar({ isEnabled: !deviceToolbarRef.current.isEnabled })
+  }, [updateDeviceToolbar])
+
+  const handleDevicePresetChange = useCallback(
+    (presetId: string) => {
+      const preset = resolveDevicePreset(presetId)
+      if (!preset) return
+      // Codex resets the page zoom when the preset changes.
+      zoomPercentRef.current = BROWSER_ZOOM_DEFAULT_PERCENT
+      setZoomPercent(BROWSER_ZOOM_DEFAULT_PERCENT)
+      updateDeviceToolbar({ presetId, width: preset.width, height: preset.height })
+    },
+    [updateDeviceToolbar]
+  )
+
+  const handleDeviceDimensionsChange = useCallback(
+    (width: number, height: number) => {
+      const nextWidth = clampDeviceDimension(width, BROWSER_DEVICE_MIN_WIDTH)
+      const nextHeight = clampDeviceDimension(height, BROWSER_DEVICE_MIN_HEIGHT)
+      updateDeviceToolbar({
+        width: nextWidth,
+        height: nextHeight,
+        presetId: matchDevicePresetId(nextWidth, nextHeight),
+      })
+    },
+    [updateDeviceToolbar]
+  )
+
+  const handleDeviceRotate = useCallback(() => {
+    const current = deviceToolbarRef.current
+    updateDeviceToolbar({ width: current.height, height: current.width })
+  }, [updateDeviceToolbar])
+
+  const deviceResizeStateRef = useRef<{
+    pointerId: number
+    edge: BrowserDeviceResizeEdge
+    startX: number
+    startY: number
+    startWidth: number
+    startHeight: number
+  } | null>(null)
+
+  const handleDeviceResizeStart = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const edge = event.currentTarget.dataset.edge as BrowserDeviceResizeEdge
+    if (!edge) return
+    event.preventDefault()
+    event.stopPropagation()
+    const current = deviceToolbarRef.current
+    deviceResizeStateRef.current = {
+      pointerId: event.pointerId,
+      edge,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: current.width,
+      startHeight: current.height,
+    }
+    if (event.nativeEvent.isTrusted) {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }
+  }, [])
+
+  const handleDeviceResizeMove = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const drag = deviceResizeStateRef.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+      const next = resizeDeviceDimensions(
+        drag.edge,
+        drag.startWidth,
+        drag.startHeight,
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+        deviceFitScaleRef.current
+      )
+      handleDeviceDimensionsChange(next.width, next.height)
+    },
+    [handleDeviceDimensionsChange]
+  )
+
+  const handleDeviceResizeEnd = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const drag = deviceResizeStateRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    deviceResizeStateRef.current = null
+    if (event.nativeEvent.isTrusted && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }, [])
+
+  // --- Toolbar keyboard shortcuts (Cmd/Ctrl+F) ---
+
+  const handleBrowserKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (event.key.toLowerCase() !== 'f') return
+      if (canUsePageFind && embeddedBrowserAvailable) {
+        event.preventDefault()
+        openFindBar()
+      }
+    },
+    [canUsePageFind, embeddedBrowserAvailable, openFindBar]
+  )
+
   return (
     <div
       data-testid="workspace-browser-panel"
       data-embedded-browser-label={label}
+      onKeyDown={handleBrowserKeyDown}
       className={cn(
         'flex h-full min-h-0 w-full flex-col bg-background text-text-primary',
         !active && 'hidden'
@@ -2072,8 +2485,8 @@ export function WorkspaceBrowserTabPanel({
             </span>
           ) : null}
         </div>
-      ) : (
-        <div className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2">
+      ) : hideToolbar ? null : (
+        <div className="relative flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2">
           <BrowserToolbarButton
             testId="workspace-browser-back-button"
             label={t('workbench.browser_back')}
@@ -2100,6 +2513,7 @@ export function WorkspaceBrowserTabPanel({
           </BrowserToolbarButton>
           <form onSubmit={handleSubmit} className="min-w-0 flex-1">
             <input
+              ref={addressInputRef}
               name="url"
               data-testid="workspace-browser-url-input"
               value={address}
@@ -2156,8 +2570,39 @@ export function WorkspaceBrowserTabPanel({
               testId="workspace-browser-more-button"
               icon={EllipsisVertical}
               placement="bottom-end"
+              width={240}
+              itemClassName="min-h-9 px-2"
               triggerClassName="flex h-8 min-w-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-text-secondary transition-colors hover:bg-muted hover:text-text-primary"
               items={[
+                {
+                  label: t('workbench.browser_find_in_page'),
+                  testId: 'workspace-browser-find-item',
+                  disabled: !canUsePageFind,
+                  onSelect: openFindBar,
+                },
+                {
+                  label: '',
+                  testId: 'workspace-browser-more-separator-find',
+                  separator: true,
+                },
+                {
+                  label: deviceToolbar.isEnabled
+                    ? t('workbench.browser_device_toolbar_hide')
+                    : t('workbench.browser_device_toolbar_show'),
+                  testId: 'workspace-browser-device-toolbar-item',
+                  disabled: !activePageUrl || internalDesktopPage,
+                  onSelect: toggleDeviceToolbar,
+                },
+                {
+                  label: '',
+                  testId: 'workspace-browser-more-separator-actions',
+                  separator: true,
+                },
+                {
+                  label: t('workbench.browser_history'),
+                  testId: 'workspace-browser-history-item',
+                  onSelect: () => navigateTo('/settings/browser/history'),
+                },
                 {
                   label: t('workbench.browser_clear_data'),
                   testId: 'workspace-browser-clear-data-item',
@@ -2177,11 +2622,42 @@ export function WorkspaceBrowserTabPanel({
                     },
                   ],
                 },
+                {
+                  label: '',
+                  testId: 'workspace-browser-more-separator-data',
+                  separator: true,
+                },
+                {
+                  label: t('workbench.browser_settings'),
+                  testId: 'workspace-browser-settings-item',
+                  onSelect: () => navigateTo('/settings/browser'),
+                },
               ]}
             />
           ) : null}
         </div>
       )}
+      {findOpen && (!annotationMode || internalDesktopPage) ? (
+        <BrowserFindBar
+          query={findQuery}
+          result={findResult}
+          unavailable={findUnavailable}
+          onQueryChange={setFindQuery}
+          onStep={stepFind}
+          onClose={closeFindBar}
+        />
+      ) : null}
+      {deviceToolbar.isEnabled && (!annotationMode || internalDesktopPage) ? (
+        <BrowserDeviceToolbar
+          state={deviceToolbar}
+          zoomPercent={zoomPercent}
+          onPresetChange={handleDevicePresetChange}
+          onDimensionsChange={handleDeviceDimensionsChange}
+          onRotate={handleDeviceRotate}
+          onZoomPercentChange={changeBrowserZoom}
+          onClose={toggleDeviceToolbar}
+        />
+      ) : null}
       <ConfirmDialog
         open={discardDialogOpen}
         title={t('workbench.browser_annotation_discard_title')}
@@ -2436,21 +2912,59 @@ export function WorkspaceBrowserTabPanel({
           <div
             ref={browserHostRef}
             data-testid="workspace-browser-native-view"
-            className="relative h-full min-h-0 w-full bg-background"
+            className={cn(
+              'relative h-full min-h-0 w-full overflow-hidden',
+              deviceToolbar.isEnabled ? 'bg-neutral-700' : 'bg-background'
+            )}
             aria-label={t('workbench.browser')}
           >
-            {active &&
-            embeddedBrowserOccluded &&
-            occlusionSnapshot?.generation === browserOcclusion.generation ? (
+            {electronRuntime ? (
+              <ElectronEmbeddedBrowserView
+                active={active}
+                interactionBlocked={embeddedBrowserOccluded || Boolean(navigationError)}
+                label={label}
+                visualRect={deviceVisualRect}
+              />
+            ) : active &&
+              embeddedBrowserOccluded &&
+              occlusionSnapshot?.generation === browserOcclusion.generation ? (
               <img
                 data-testid="workspace-browser-occlusion-snapshot"
                 src={occlusionSnapshot.url}
                 alt=""
                 onLoad={() => handleOcclusionSnapshotLoad(occlusionSnapshot.generation)}
-                className="pointer-events-none absolute inset-0 h-full w-full bg-background object-fill"
+                style={
+                  deviceVisualRect
+                    ? {
+                        left: deviceVisualRect.x,
+                        top: deviceVisualRect.y,
+                        width: deviceVisualRect.width,
+                        height: deviceVisualRect.height,
+                      }
+                    : undefined
+                }
+                className={cn(
+                  'pointer-events-none absolute bg-background object-fill',
+                  deviceVisualRect ? '' : 'inset-0 h-full w-full'
+                )}
               />
             ) : null}
-            {status === 'loading' && (
+            {navigationError ? (
+              <div
+                data-testid="workspace-browser-navigation-error"
+                role="alert"
+                className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center"
+              >
+                <CircleAlert className="mb-4 h-7 w-7 text-text-muted" />
+                <p className="text-sm font-medium text-text-primary">
+                  {t('workbench.browser_navigation_failed_title')}
+                </p>
+                <p className="mt-2 max-w-md text-sm leading-[18px] text-text-secondary">
+                  {t('workbench.browser_navigation_failed_desc')}
+                </p>
+              </div>
+            ) : null}
+            {status === 'loading' && !navigationError && (
               <div
                 data-testid="workspace-browser-loading"
                 className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/40"
@@ -2458,6 +2972,78 @@ export function WorkspaceBrowserTabPanel({
                 <Loader2 className="h-5 w-5 animate-spin text-text-secondary" />
               </div>
             )}
+            {deviceToolbar.isEnabled && deviceVisualRect
+              ? [
+                  { edge: 'left' as const, cursor: 'ew-resize' },
+                  { edge: 'right' as const, cursor: 'ew-resize' },
+                  { edge: 'bottom' as const, cursor: 'ns-resize' },
+                  { edge: 'bottom-left' as const, cursor: 'nesw-resize' },
+                  { edge: 'bottom-right' as const, cursor: 'nwse-resize' },
+                ].map(handle => {
+                  const rect = deviceVisualRect
+                  // Handles sit 20px outside the device viewport, as in Codex.
+                  const thickness = 20
+                  const style =
+                    handle.edge === 'left'
+                      ? {
+                          left: rect.x - thickness,
+                          top: rect.y,
+                          width: thickness,
+                          height: rect.height,
+                        }
+                      : handle.edge === 'right'
+                        ? {
+                            left: rect.x + rect.width,
+                            top: rect.y,
+                            width: thickness,
+                            height: rect.height,
+                          }
+                        : handle.edge === 'bottom'
+                          ? {
+                              left: rect.x - thickness,
+                              top: rect.y + rect.height,
+                              width: rect.width + thickness * 2,
+                              height: thickness,
+                            }
+                          : handle.edge === 'bottom-left'
+                            ? {
+                                left: rect.x - thickness,
+                                top: rect.y + rect.height,
+                                width: thickness,
+                                height: thickness,
+                              }
+                            : {
+                                left: rect.x + rect.width,
+                                top: rect.y + rect.height,
+                                width: thickness,
+                                height: thickness,
+                              }
+                  const left = 'left' in style ? (style.left ?? 0) : 0
+                  const top = 'top' in style ? (style.top ?? 0) : 0
+                  if (
+                    left < 0 ||
+                    top < 0 ||
+                    left + style.width > rect.hostWidth ||
+                    top + style.height > rect.hostHeight
+                  ) {
+                    return null
+                  }
+                  return (
+                    <div
+                      key={handle.edge}
+                      data-testid={`workspace-browser-device-resize-${handle.edge}`}
+                      data-edge={handle.edge}
+                      aria-hidden="true"
+                      className="absolute z-30"
+                      style={{ ...style, cursor: handle.cursor, touchAction: 'none' }}
+                      onPointerDown={handleDeviceResizeStart}
+                      onPointerMove={handleDeviceResizeMove}
+                      onPointerUp={handleDeviceResizeEnd}
+                      onPointerCancel={handleDeviceResizeEnd}
+                    />
+                  )
+                })
+              : null}
           </div>
         )}
         {error && (

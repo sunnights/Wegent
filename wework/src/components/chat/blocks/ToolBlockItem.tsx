@@ -2,15 +2,20 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { ChevronDown, Clock3, Copy, CopyCheck, FileDiff, Search, Wrench } from 'lucide-react'
 import { useTranslation } from '@/hooks/useTranslation'
+import { readElectronLocalFile } from '@/lib/electron-local-file'
 import { terminalOutputToText } from '@/lib/terminal-text'
 import { navigateTo } from '@/lib/navigation'
+import { isElectronRuntime } from '@/lib/runtime-environment'
 import { track } from '@/telemetry/client'
 import type { TurnFileChangeItem, TurnFileChangesSummary } from '@/types/api'
 import type { ProcessingBlock, ToolBlock } from '@/types/workbench'
 import type { WorkspaceFileOpenOptions } from '@/types/workspace-files'
 import { AssistantMarkdown } from '../AssistantMarkdown'
 import { AssistantPlanCard, type AssistantPlanOpenRequest } from '../AssistantPlanCard'
-import { resolveDirectMarkdownImageSrc } from '../assistantMarkdownLinks'
+import {
+  localPathFromMarkdownImageSrc,
+  resolveDirectMarkdownImageSrc,
+} from '../assistantMarkdownLinks'
 import { parseUnifiedDiff } from '../parseUnifiedDiff'
 import {
   getToolActivityFilePaths,
@@ -34,6 +39,7 @@ import { getWebSearchActivityItems } from './webSearchActivity'
 import { usePersistentProcessingExpansion } from './processingExpansionState'
 
 const INLINE_DIFF_MAX_LINES = 96
+const RECONNECTING_DISPLAY_DELAY_MS = 10_000
 
 interface ToolBlockItemProps {
   block: ProcessingBlock
@@ -69,6 +75,14 @@ export function ToolBlockItem({
   const { t } = useTranslation('chat')
   const [userExpanded, setUserExpanded] = usePersistentProcessingExpansion(stateKey)
   const isRunning = block.status !== 'done' && block.status !== 'error'
+  const reconnectingBlockId =
+    block.type === 'tool' && block.toolName === 'runtime_reconnecting' && isRunning
+      ? block.id
+      : null
+  const showReconnectingStatus = useDelayedBlockVisibility(
+    reconnectingBlockId,
+    RECONNECTING_DISPLAY_DELAY_MS
+  )
   const duration = useToolDuration(
     durationStartedAt ?? block.createdAt,
     durationEndAt ?? block.completedAt,
@@ -108,6 +122,7 @@ export function ToolBlockItem({
   }
 
   if (block.toolName === 'runtime_reconnecting') {
+    if (!showReconnectingStatus) return null
     const isChatGPTModel = block.toolInput?.model_kind === 'codex-official'
     if (isChatGPTModel) {
       return (
@@ -578,6 +593,21 @@ function useToolDuration(startedAt: number, fallbackEndAt: number | undefined, i
   const endedAt = isRunning ? now : (fallbackEndAt ?? completedAt ?? anchoredStartedAt)
   if (!isRunning && completedAt === null && fallbackEndAt === undefined) return ''
   return `${(Math.max(0, endedAt - durationStartedAt) / 1000).toFixed(1)}s`
+}
+
+function useDelayedBlockVisibility(blockId: string | null, delayMs: number): boolean {
+  const [visibleBlockId, setVisibleBlockId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!blockId) return
+    const timer = window.setTimeout(() => setVisibleBlockId(blockId), delayMs)
+    return () => {
+      window.clearTimeout(timer)
+      setVisibleBlockId(null)
+    }
+  }, [blockId, delayMs])
+
+  return blockId !== null && visibleBlockId === blockId
 }
 
 function fileChangeRowLabel(
@@ -1315,7 +1345,7 @@ function stringifyToolValue(value: unknown): string {
 function ImageViewBlockDetail({ block }: { block: ToolBlock }) {
   const { t } = useTranslation('chat')
   const source = getImageViewSource(block)
-  const resolvedSource = source ? resolveDirectMarkdownImageSrc(source) : null
+  const resolvedSource = useResolvedImageViewSource(source)
 
   if (!resolvedSource) return null
 
@@ -1332,6 +1362,42 @@ function ImageViewBlockDetail({ block }: { block: ToolBlock }) {
       />
     </div>
   )
+}
+
+function useResolvedImageViewSource(source?: string): string | null {
+  const electronLocalPath = useMemo(() => {
+    if (!source || !isElectronRuntime()) return null
+    const path = localPathFromMarkdownImageSrc(source)
+    return path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path) ? path : null
+  }, [source])
+  const [electronImage, setElectronImage] = useState<{
+    path: string
+    url: string
+  } | null>(null)
+
+  useEffect(() => {
+    if (!electronLocalPath) return undefined
+
+    let active = true
+    let objectUrl: string | null = null
+    void readElectronLocalFile(electronLocalPath)
+      .then(bytes => {
+        objectUrl = URL.createObjectURL(new Blob([bytes]))
+        if (active) setElectronImage({ path: electronLocalPath, url: objectUrl })
+        else URL.revokeObjectURL(objectUrl)
+      })
+      .catch(() => undefined)
+
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [electronLocalPath])
+
+  if (electronLocalPath) {
+    return electronImage?.path === electronLocalPath ? electronImage.url : null
+  }
+  return source ? resolveDirectMarkdownImageSrc(source) : null
 }
 
 function getImageViewSource(block: ToolBlock): string | undefined {

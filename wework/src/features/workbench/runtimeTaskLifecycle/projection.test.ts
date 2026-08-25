@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'vitest'
 import type { RuntimeTaskSummary } from '@/types/api'
 import {
+  isRuntimePaneTranscriptConfirmedIdle,
+  isRuntimeTaskExecutionRunning,
   normalizeRuntimeTaskSummary,
+  projectRuntimePaneTranscript,
   runtimeTaskReconciliationSnapshot,
   shouldReplaceRuntimeTaskProjection,
 } from './projection'
@@ -17,6 +20,52 @@ function task(overrides: Partial<RuntimeTaskSummary> = {}): RuntimeTaskSummary {
 }
 
 describe('runtimeTaskProjection', () => {
+  test('confirms idle only when runtime and every turn are terminal', () => {
+    const transcript = projectRuntimePaneTranscript({
+      running: false,
+      messages: [],
+      turns: [
+        {
+          id: 'turn-1',
+          status: 'completed',
+          items: [],
+        },
+      ],
+    })
+
+    expect(isRuntimePaneTranscriptConfirmedIdle(transcript)).toBe(true)
+  })
+
+  test.each(['running', 'in_progress', 'pending', 'streaming'])(
+    'keeps transcript active while a %s runtime turn remains',
+    status => {
+      const transcript = projectRuntimePaneTranscript({
+        running: false,
+        messages: [],
+        turns: [
+          {
+            id: 'turn-1',
+            status,
+            items: [],
+          },
+        ],
+      })
+
+      expect(transcript.turns[0]?.status).toBe('streaming')
+      expect(isRuntimePaneTranscriptConfirmedIdle(transcript)).toBe(false)
+    }
+  )
+
+  test('keeps transcript active while the runtime is running', () => {
+    const transcript = projectRuntimePaneTranscript({
+      running: true,
+      messages: [],
+      turns: [],
+    })
+
+    expect(isRuntimePaneTranscriptConfirmedIdle(transcript)).toBe(false)
+  })
+
   test('derives reconciliation truth through the lifecycle vocabulary', () => {
     expect(
       runtimeTaskReconciliationSnapshot(
@@ -36,6 +85,14 @@ describe('runtimeTaskProjection', () => {
       running: true,
       turnStatus: 'inProgress',
     })
+  })
+
+  test('recognizes executor-reported running tasks before turn status catches up', () => {
+    expect(isRuntimeTaskExecutionRunning(task({ running: true }))).toBe(true)
+    expect(isRuntimeTaskExecutionRunning(task({ running: true, optimistic: true }))).toBe(false)
+    expect(
+      isRuntimeTaskExecutionRunning(task({ running: true, completedAt: 1_786_676_400_000 }))
+    ).toBe(false)
   })
 
   test('normalizes completed executor state into one terminal projection', () => {

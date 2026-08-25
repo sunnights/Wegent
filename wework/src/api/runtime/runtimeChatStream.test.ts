@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { LocalExecutorEvent } from '@/tauri/localExecutor'
+import type { LocalExecutorEvent } from '@/desktop/localExecutor'
 import { createRuntimeChatStream, setRuntimeChatStreamDebugEnabled } from './runtimeChatStream'
 
 describe('createRuntimeChatStream', () => {
@@ -73,6 +73,25 @@ describe('createRuntimeChatStream', () => {
       itemTitle: '准备周报',
       assignerName: 'Alice',
     })
+  })
+
+  test('delivers executor lag notifications for lifecycle reconciliation', async () => {
+    let listener!: (event: LocalExecutorEvent) => void
+    subscribe.mockImplementation(async handler => {
+      listener = handler
+      return vi.fn()
+    })
+    const onRuntimeEventLagged = vi.fn()
+    const stream = createRuntimeChatStream({ subscribe, request })
+
+    stream.subscribe({ onRuntimeEventLagged })
+    await Promise.resolve()
+    listener({
+      event: 'executor.event_lagged',
+      payload: { skipped: 7 },
+    })
+
+    expect(onRuntimeEventLagged).toHaveBeenCalledWith({ skipped: 7 })
   })
 
   test('delivers task-plan events to the global subscription only', async () => {

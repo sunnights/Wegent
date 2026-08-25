@@ -27,7 +27,6 @@ import {
   captureVerificationScreenshot,
   normalizeComposerText,
   waitForAttribute,
-  waitForWorkbenchDebugState,
 } from './workspace-flows.mjs'
 
 async function waitForTelemetrySilence(control, options = {}) {
@@ -190,7 +189,8 @@ async function declineInitialTelemetryConsent(control) {
   )
 }
 
-async function ensureExperimentalFeaturesEnabled(control) {
+async function setExperimentalFeaturesEnabled(control, enabled) {
+  if (control.experimentalFeaturesEnabled === enabled) return
   const settingsButtonCount = Number(
     await control.command('getElementCount', '[data-testid="settings-button"]', {
       visible: true,
@@ -198,8 +198,9 @@ async function ensureExperimentalFeaturesEnabled(control) {
   )
   if (settingsButtonCount === 0) {
     await control.command('setAppPreferences', 'body', {
-      value: JSON.stringify({ experimentalFeaturesEnabled: true }),
+      value: JSON.stringify({ experimentalFeaturesEnabled: enabled }),
     })
+    control.experimentalFeaturesEnabled = enabled
     return
   }
 
@@ -210,18 +211,28 @@ async function ensureExperimentalFeaturesEnabled(control) {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
   })
   if (
-    (await control.command('getAttribute', toggleSelector, { value: 'aria-checked' })) !== 'true'
+    (await control.command('getAttribute', toggleSelector, { value: 'aria-checked' })) !==
+    String(enabled)
   ) {
     await control.command('click', toggleSelector)
     await waitForAttribute(
       control,
       toggleSelector,
       'aria-checked',
-      'true',
-      'Enabling experimental features was not persisted'
+      String(enabled),
+      `${enabled ? 'Enabling' : 'Disabling'} experimental features was not persisted`
     )
   }
+  control.experimentalFeaturesEnabled = enabled
   await control.command('click', '[data-testid="settings-back-button"]')
+}
+
+async function ensureExperimentalFeaturesEnabled(control) {
+  await setExperimentalFeaturesEnabled(control, true)
+}
+
+async function ensureExperimentalFeaturesDisabled(control) {
+  await setExperimentalFeaturesEnabled(control, false)
 }
 
 async function verifyAutomationLifecycle(control, executorHome, homePath) {
@@ -500,19 +511,27 @@ async function verifyAutomationLifecycle(control, executorHome, homePath) {
       'click',
       '[data-testid="automation-conversation-mode-option-continue_thread"]'
     )
+    await control.command('waitFor', '[data-testid="automation-target-task-select"]', {
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    })
     await control.command('click', '[data-testid="automation-target-task-select"]')
-    await waitForSnapshot(
+    const targetTaskSnapshot = await waitForSnapshot(
       control,
       snapshot =>
-        snapshot.testIds.includes(
-          `automation-target-task-select-option-local-device:${manualTaskId}`
-        ),
+        snapshot.testIds.filter(
+          testId =>
+            testId.startsWith('automation-target-task-select-option-') &&
+            testId.endsWith(`:${manualTaskId}`)
+        ).length === 1,
       'The existing-task selector did not list the pinned local task'
     )
-    await control.command(
-      'click',
-      `[data-testid="automation-target-task-select-option-local-device:${manualTaskId}"]`
+    const targetTaskOption = targetTaskSnapshot.testIds.find(
+      testId =>
+        testId.startsWith('automation-target-task-select-option-') &&
+        testId.endsWith(`:${manualTaskId}`)
     )
+    assert.ok(targetTaskOption, 'The existing-task selector did not expose a unique pinned task')
+    await control.command('click', `[data-testid="${targetTaskOption}"]`)
     await control.command('click', '[data-testid="automation-repeat-menu"]')
     await control.command('click', '[data-testid="automation-repeat-menu-option-one_time"]')
     const scheduledFor = new Date(Date.now() + 5_000)
@@ -791,38 +810,73 @@ function applicationInstallRequestCount(control, pathname) {
   ).length
 }
 
-async function captureApplicationChatIdentity(control) {
-  const snapshot = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
-  return {
-    currentProjectId: snapshot.workbench?.currentProject?.id ?? null,
-    currentRuntimeTaskId: snapshot.workbench?.currentRuntimeTask?.taskId ?? null,
-    scopeKey: snapshot.workbench?.composer?.scopeKey,
-    standaloneChatKey: snapshot.workbench?.composer?.standaloneChatKey,
+function resolvedDraftInputLength(snapshot) {
+  const composerLength = snapshot.workbench?.composer?.currentInputLength
+  const paneLength = snapshot.pane?.inputLength
+  if (composerLength === 0 && typeof paneLength === 'number' && paneLength > 0) {
+    return paneLength
   }
+  return composerLength ?? paneLength ?? null
+}
+
+async function captureApplicationChatIdentity(control) {
+  const startedAt = Date.now()
+  let candidateProjectId = null
+  let candidateSince = null
+  let hasCandidate = false
+  let lastSnapshot = null
+  while (Date.now() - startedAt < DEFAULT_STEP_TIMEOUT_MS) {
+    const snapshot = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
+    lastSnapshot = snapshot
+    const currentProjectId = snapshot.workbench?.currentProject?.id ?? null
+    if (snapshot.workbench?.isBootstrapping === false) {
+      if (!hasCandidate || currentProjectId !== candidateProjectId) {
+        candidateProjectId = currentProjectId
+        candidateSince = Date.now()
+        hasCandidate = true
+      } else if (
+        candidateSince !== null &&
+        Date.now() - candidateSince >= COMPOSER_READY_STABILITY_MS
+      ) {
+        return { currentProjectId }
+      }
+    } else {
+      candidateSince = null
+      hasCandidate = false
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  throw new Error(
+    `The application chat identity did not stabilize: ${JSON.stringify(lastSnapshot)}`
+  )
 }
 
 async function assertFreshApplicationDraft(control, { before, canonical, visible, message }) {
   await control.command('waitFor', ACTIVE_COMPOSER_SELECTOR, {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
-  await waitForWorkbenchDebugState(
-    control,
-    snapshot =>
-      snapshot.workbench?.composer?.standaloneChatKey === before.standaloneChatKey + 1 &&
-      snapshot.workbench?.composer?.scopeKey !== before.scopeKey &&
-      snapshot.workbench?.composer?.currentInputLength === canonical.length &&
-      snapshot.workbench?.currentRuntimeTask === null &&
-      (snapshot.workbench?.currentProject?.id ?? null) === before.currentProjectId,
-    message
-  )
   const startedAt = Date.now()
   let actual = ''
+  let lastSnapshot = null
   while (Date.now() - startedAt < DEFAULT_STEP_TIMEOUT_MS) {
-    actual = normalizeComposerText(await control.command('getText', ACTIVE_COMPOSER_SELECTOR))
-    if (actual === visible) return
+    const snapshot = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
+    lastSnapshot = snapshot
+    actual = normalizeComposerText(
+      await control.command('getText', ACTIVE_COMPOSER_SELECTOR, { visible: true })
+    )
+    if (
+      actual === visible &&
+      resolvedDraftInputLength(snapshot) === canonical.length &&
+      (snapshot.workbench?.currentRuntimeTask?.taskId ??
+        snapshot.pane?.currentRuntimeTask?.taskId ??
+        null) === null &&
+      (snapshot.workbench?.currentProject?.id ?? null) === before.currentProjectId
+    ) {
+      return
+    }
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
   }
-  assert.equal(actual, visible, message)
+  throw new Error(`${message}: ${JSON.stringify({ before, actual, snapshot: lastSnapshot })}`)
 }
 
 async function assertPluginComposerChip(control, pluginName) {
@@ -901,7 +955,7 @@ function sitesMarketplacePlugin(installed) {
   }
 }
 
-function installedSitesPlugin() {
+function installedSitesPlugin(deviceId = 'local-device') {
   const marketplacePlugin = sitesMarketplacePlugin(true)
   return {
     apiVersion: 'agent.wecode.io/v1',
@@ -938,7 +992,7 @@ function installedSitesPlugin() {
     },
     status: {
       state: 'Available',
-      devices: [{ deviceId: 'local-device', state: 'installed' }],
+      devices: [{ deviceId, state: 'installed' }],
     },
   }
 }
@@ -985,7 +1039,7 @@ function miniProgramMarketplacePlugin(installed) {
   }
 }
 
-function installedMiniProgramPlugin() {
+function installedMiniProgramPlugin(deviceId = 'local-device') {
   const marketplacePlugin = miniProgramMarketplacePlugin(true)
   return {
     apiVersion: 'agent.wecode.io/v1',
@@ -1022,7 +1076,7 @@ function installedMiniProgramPlugin() {
     },
     status: {
       state: 'Available',
-      devices: [{ deviceId: 'local-device', state: 'installed' }],
+      devices: [{ deviceId, state: 'installed' }],
     },
   }
 }
@@ -1033,6 +1087,7 @@ export {
   verifyTelemetryRemainsDisabled,
   verifyInitialTelemetryConsent,
   declineInitialTelemetryConsent,
+  ensureExperimentalFeaturesDisabled,
   ensureExperimentalFeaturesEnabled,
   verifyAutomationLifecycle,
   verifyCloudAutomationLifecycle,

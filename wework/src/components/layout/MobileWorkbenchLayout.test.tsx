@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useMemo, useState, type ReactNode } from 'react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -17,6 +17,14 @@ import {
   RuntimeTaskLifecycleStore,
 } from '@/features/workbench/runtimeTaskLifecycle'
 import '@/i18n'
+
+vi.mock('@/api/dsh/desktopHost', () => ({
+  invokeDesktopHost: vi.fn(async (capability: string, params: Record<string, unknown> = {}) => {
+    if (capability === 'preferences.get') return {}
+    if (capability === 'preferences.update') return params.patch ?? {}
+    return {}
+  }),
+}))
 
 const paneSessionMockRef = vi.hoisted(() => ({
   current: undefined as unknown,
@@ -1203,7 +1211,7 @@ describe('MobileWorkbenchLayout', () => {
     expect(screen.getByTestId('model-selector-button')).toHaveTextContent('kimi-for-coding')
   })
 
-  test('opens continue-in-im dialog from the active runtime task header button', async () => {
+  test('automatically continues to the only private IM session from the mobile header', async () => {
     const onListImPrivateSessions = vi.fn().mockResolvedValue({
       total: 1,
       items: [
@@ -1222,6 +1230,7 @@ describe('MobileWorkbenchLayout', () => {
         },
       ],
     })
+    const onBindRuntimeTaskToImSessions = vi.fn().mockResolvedValue(undefined)
 
     renderAtMobileWidth(
       <MobileWorkbenchLayout
@@ -1246,6 +1255,7 @@ describe('MobileWorkbenchLayout', () => {
         onInputChange={vi.fn()}
         onSend={vi.fn()}
         onListImPrivateSessions={onListImPrivateSessions}
+        onBindRuntimeTaskToImSessions={onBindRuntimeTaskToImSessions}
       />
     )
 
@@ -1253,8 +1263,18 @@ describe('MobileWorkbenchLayout', () => {
 
     expect(screen.getByTestId('mobile-continue-in-im-button')).toHaveClass('h-11', 'min-w-[44px]')
     expect(onListImPrivateSessions).toHaveBeenCalledTimes(1)
-    expect(await screen.findByRole('dialog')).toBeInTheDocument()
-    expect(await screen.findByTestId('continue-im-session-session-1')).toHaveTextContent('Alice')
+    await waitFor(() =>
+      expect(onBindRuntimeTaskToImSessions).toHaveBeenCalledWith(
+        {
+          deviceId: 'device-1',
+          workspacePath: '/workspace/project-alpha',
+          taskId: 'runtime-1',
+        },
+        ['session-1']
+      )
+    )
+    expect(await screen.findByTestId('transient-notice')).toHaveTextContent('已发送到私聊')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   test('hides continue-in-im action without a mobile runtime task', () => {
@@ -1307,6 +1327,7 @@ describe('MobileWorkbenchLayout', () => {
       .fn()
       .mockReturnValueOnce(firstRequest.promise)
       .mockReturnValueOnce(secondRequest.promise)
+    const onBindRuntimeTaskToImSessions = vi.fn().mockResolvedValue(undefined)
 
     renderAtMobileWidth(
       <MobileWorkbenchLayout
@@ -1331,6 +1352,7 @@ describe('MobileWorkbenchLayout', () => {
         onInputChange={vi.fn()}
         onSend={vi.fn()}
         onListImPrivateSessions={onListImPrivateSessions}
+        onBindRuntimeTaskToImSessions={onBindRuntimeTaskToImSessions}
       />
     )
 
@@ -1357,34 +1379,49 @@ describe('MobileWorkbenchLayout', () => {
       ],
     })
 
-    expect(await screen.findByTestId('continue-im-session-session-2')).toHaveTextContent(
-      'Fresh session'
-    )
-
-    firstRequest.resolve({
-      total: 1,
-      items: [
+    await waitFor(() =>
+      expect(onBindRuntimeTaskToImSessions).toHaveBeenCalledWith(
         {
-          session_key: 'session-1',
-          channel_type: 'wecom',
-          channel_label: 'WeCom',
-          channel_id: 101,
-          conversation_id: 'conversation-1',
-          sender_id: 'sender-1',
-          display_name: 'Stale session',
-          mode: 'chat',
-          state: 'idle',
-          active_task_id: null,
-          last_seen_at: '2026-06-20T00:00:00.000Z',
+          deviceId: 'device-1',
+          workspacePath: '/workspace/project-alpha',
+          taskId: 'runtime-1',
         },
-      ],
+        ['session-2']
+      )
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await act(async () => {
+      firstRequest.resolve({
+        total: 1,
+        items: [
+          {
+            session_key: 'session-1',
+            channel_type: 'wecom',
+            channel_label: 'WeCom',
+            channel_id: 101,
+            conversation_id: 'conversation-1',
+            sender_id: 'sender-1',
+            display_name: 'Stale session',
+            mode: 'chat',
+            state: 'idle',
+            active_task_id: null,
+            last_seen_at: '2026-06-20T00:00:00.000Z',
+          },
+        ],
+      })
+      await firstRequest.promise
     })
 
-    await waitFor(() => expect(screen.queryByText('Stale session')).not.toBeInTheDocument())
-    expect(screen.getByText('Fresh session')).toBeInTheDocument()
+    expect(onBindRuntimeTaskToImSessions).toHaveBeenCalledTimes(1)
+    expect(onBindRuntimeTaskToImSessions).not.toHaveBeenCalledWith(expect.anything(), ['session-1'])
   })
 
-  test('shows a failure notice when mobile bind handler is missing', async () => {
+  test('keeps the mobile dialog open for manual retry when automatic binding fails', async () => {
+    const onBindRuntimeTaskToImSessions = vi
+      .fn()
+      .mockRejectedValue(new Error('Missing bind handler'))
+
     renderAtMobileWidth(
       <MobileWorkbenchLayout
         state={{
@@ -1425,18 +1462,21 @@ describe('MobileWorkbenchLayout', () => {
             },
           ],
         })}
+        onBindRuntimeTaskToImSessions={onBindRuntimeTaskToImSessions}
       />
     )
 
     await userEvent.click(screen.getByTestId('mobile-continue-in-im-button'))
-    expect(await screen.findByTestId('continue-im-session-session-1')).toHaveAttribute(
+    expect(await screen.findByTestId('transient-notice')).toHaveTextContent('继续到私聊失败')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('continue-im-session-session-1')).toHaveAttribute(
       'aria-pressed',
       'true'
     )
-    await userEvent.click(screen.getByTestId('continue-im-submit-button'))
+    expect(onBindRuntimeTaskToImSessions).toHaveBeenCalledTimes(1)
 
-    expect(await screen.findByTestId('transient-notice')).toHaveTextContent('继续到私聊失败')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('continue-im-submit-button'))
+    await waitFor(() => expect(onBindRuntimeTaskToImSessions).toHaveBeenCalledTimes(2))
   })
 
   test('opens project creation as a mobile bottom sheet from the drawer', async () => {

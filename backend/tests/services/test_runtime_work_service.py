@@ -4377,7 +4377,7 @@ def test_build_runtime_send_execution_request_uses_complete_create_request(
     assert "terminal output" in execution_request.prompt
 
 
-def test_build_runtime_send_execution_request_preserves_selected_model(
+def test_build_runtime_send_execution_request_preserves_selected_model_and_catalog(
     test_db,
     test_user,
     monkeypatch,
@@ -4396,7 +4396,7 @@ def test_build_runtime_send_execution_request_preserves_selected_model(
         test_db,
         0,
         name="selected-gpt",
-        api_model_id="gpt-5.6-luna",
+        api_model_id="deepseek-v4-pro",
     )
     monkeypatch.setattr(
         runtime_work_service.settings,
@@ -4423,7 +4423,6 @@ def test_build_runtime_send_execution_request_preserves_selected_model(
                 "weworkCloudModelNamespace": "default",
                 "weworkCloudModelResourceUserId": "0",
                 "weworkCloudModelContextWindow": "1048576",
-                "weworkCloudModelCodexCatalogModelId": "wework-gpt-5.6-sol",
             },
         ),
     )
@@ -4441,7 +4440,8 @@ def test_build_runtime_send_execution_request_preserves_selected_model(
     }
     assert execution_request.model_config["model_context_window"] == 1048576
     assert (
-        execution_request.model_config["codex_catalog_model_id"] == "wework-gpt-5.6-sol"
+        execution_request.model_config["codex_catalog_model_id"]
+        == "wework-deepseek-v4-pro"
     )
     assert execution_request.runtime_permission_profile == ":workspace"
     assert execution_request.to_dict()["runtime_permission_profile"] == ":workspace"
@@ -4542,15 +4542,11 @@ async def test_bind_runtime_task_to_im_sessions_persists_selected_model(
         "bind_active_runtime_task",
         bind_active_runtime_task,
     )
-    monkeypatch.setattr(
-        runtime_work_service,
-        "_runtime_task_title_for_address",
-        AsyncMock(return_value="Runtime task"),
-    )
+    send_task_switched = AsyncMock(return_value={"sent": 1})
     monkeypatch.setattr(
         runtime_work_service.im_notification_dispatcher,
         "send_task_switched",
-        AsyncMock(return_value={"sent": 1}),
+        send_task_switched,
     )
 
     response = await runtime_work_service.bind_runtime_task_to_im_sessions(
@@ -4563,6 +4559,7 @@ async def test_bind_runtime_task_to_im_sessions_persists_selected_model(
                     "workspacePath": "/repo/Wegent",
                     "taskId": "codex-1",
                 },
+                "taskTitle": "用户可见任务标题",
                 "sessionKeys": ["session-a"],
                 "modelSelection": {
                     "modelName": "selected-gpt",
@@ -4574,6 +4571,11 @@ async def test_bind_runtime_task_to_im_sessions_persists_selected_model(
     )
 
     assert response.bound_session_keys == ["session-a"]
+    send_task_switched.assert_awaited_once_with(
+        test_db,
+        [session],
+        "用户可见任务标题",
+    )
     assert bind_active_runtime_task.await_args.kwargs["runtime_task"] == {
         "deviceId": "device-1",
         "workspacePath": "/repo/Wegent",

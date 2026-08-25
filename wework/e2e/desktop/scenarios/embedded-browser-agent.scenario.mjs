@@ -4,6 +4,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { ensureExperimentalFeaturesEnabled } from '../modules/preferences-automation-flows.mjs'
+
 const ACTIVE_WORKBENCH_SELECTOR =
   '[data-testid="desktop-workbench-main"][data-active-workbench-pane="true"]'
 const BROWSER_INPUT_SELECTOR = `${ACTIVE_WORKBENCH_SELECTOR} [data-testid="workspace-browser-url-input"]`
@@ -62,6 +64,7 @@ const ANNOTATION_COMMENT = 'Make this target more prominent'
 const ANNOTATION_NAVIGATION_COMMENT = 'This comment must not survive navigation'
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoDir = resolve(scriptDir, '..', '..', '..', '..')
+let desktopScenarioExecutorBinary = null
 
 async function readBrowserPanelLabel(control, scopeSelector, timeoutMs) {
   const selector = `${scopeSelector} ${WORKBENCH_BROWSER_LABEL_SELECTOR}`
@@ -293,9 +296,6 @@ async function waitForVisibleSingleElement(control, selector, timeoutMs, message
     appShellHeight: await control.command('getInlineStyle', '[data-testid="app-shell"]', {
       value: 'height',
     }),
-    tauriViewportHeight: await control.command('getAttribute', '[data-testid="app-shell"]', {
-      value: 'data-tauri-viewport-height',
-    }),
     routeHost: JSON.parse(
       await control.command('getElementMetrics', '[data-testid="app-route-host"]')
     ),
@@ -354,6 +354,7 @@ async function waitForRuntimeTaskId(control, timeoutMs) {
 
 async function withBrowserMcp(identity, label, callback) {
   const executorPath =
+    desktopScenarioExecutorBinary ||
     process.env.WEWORK_E2E_EXECUTOR_BIN ||
     join(
       repoDir,
@@ -470,6 +471,9 @@ export function createDesktopScenario({ executorHome, resultDir, uiTimeoutMs }) 
   let cacheResourceRequests = 0
 
   return {
+    setExecutorBinary(path) {
+      desktopScenarioExecutorBinary = path
+    },
     async handleHttp(request, response, url) {
       if (request.method === 'GET' && url.pathname === REDIRECT_PATH) {
         response.writeHead(302, { location: FIXTURE_PATH })
@@ -512,6 +516,7 @@ export function createDesktopScenario({ executorHome, resultDir, uiTimeoutMs }) 
     },
 
     async verify(control) {
+      await ensureExperimentalFeaturesEnabled(control)
       const fixtureUrl = `${control.url}${FIXTURE_PATH}`
       const redirectUrl = `${control.url}${REDIRECT_PATH}`
       const annotationFixtureUrl = `${control.url}${ANNOTATION_FIXTURE_PATH}`

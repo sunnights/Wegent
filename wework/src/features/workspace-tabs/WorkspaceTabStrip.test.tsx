@@ -4,12 +4,24 @@ import type { ComponentProps } from 'react'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceTabsProvider } from './WorkspaceTabsContext'
 import { WorkspaceTabStrip } from './WorkspaceTabStrip'
-import { workspaceTabsStorageKey, type WorkspaceTabKind } from './workspaceTabs'
+import { createWorkspaceTab, workspaceTabsStorageKey, type WorkspaceTabKind } from './workspaceTabs'
 
 const openWorkspaceTabWindow = vi.fn().mockResolvedValue(true)
+const experimentalFeatures = vi.hoisted(() => ({ enabled: true }))
+const listHarnessApps = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 
 vi.mock('./workspaceWindow', () => ({
   openWorkspaceTabWindow: (tab: unknown) => openWorkspaceTabWindow(tab),
+}))
+
+vi.mock('@/features/experimental-features/useExperimentalFeaturesEnabled', () => ({
+  useExperimentalFeaturesEnabled: () => experimentalFeatures.enabled,
+}))
+
+vi.mock('@/api/local/harnessApps', () => ({
+  harnessAppsApi: {
+    list: listHarnessApps,
+  },
 }))
 
 const labels = {
@@ -28,7 +40,8 @@ const labels = {
 function renderStrip(
   search = '',
   availableKinds?: ComponentProps<typeof WorkspaceTabStrip>['availableKinds'],
-  pathname = '/'
+  pathname = '/',
+  fixed = false
 ) {
   return render(
     <WorkspaceTabsProvider
@@ -36,6 +49,17 @@ function renderStrip(
       search={search}
       storageScope="strip-test"
       labels={labels}
+      fixedTabs={
+        fixed
+          ? (['task', 'board', 'agent'] as const).map(kind =>
+              createWorkspaceTab(kind, labels, {
+                id: `fixed-${kind}`,
+                fixed: true,
+              })
+            )
+          : undefined
+      }
+      restoreSessionTabs={!fixed}
     >
       <WorkspaceTabStrip availableKinds={availableKinds} />
     </WorkspaceTabsProvider>
@@ -46,6 +70,9 @@ describe('WorkspaceTabStrip', () => {
   beforeEach(() => {
     localStorage.clear()
     openWorkspaceTabWindow.mockClear()
+    experimentalFeatures.enabled = true
+    listHarnessApps.mockReset()
+    listHarnessApps.mockResolvedValue([])
     window.history.replaceState({}, '', '/')
   })
 
@@ -86,6 +113,25 @@ describe('WorkspaceTabStrip', () => {
     )
   })
 
+  test('keeps fixed tabs selectable and prevents closing them', async () => {
+    const user = userEvent.setup()
+    renderStrip('', undefined, '/', true)
+
+    await user.click(screen.getByTestId('workspace-tab-select-fixed-board'))
+    expect(screen.getByTestId('workspace-tab-select-fixed-board')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.queryByTestId('workspace-tab-close-fixed-board')).not.toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'w', metaKey: true })
+    expect(screen.getAllByRole('tab')).toHaveLength(3)
+    expect(screen.getByTestId('workspace-tab-select-fixed-board')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+  })
+
   test('hides the project-space tab and add action when board is not available', async () => {
     const user = userEvent.setup()
     renderStrip('', ['task', 'agent', 'auxiliary'] satisfies WorkspaceTabKind[])
@@ -103,6 +149,48 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.queryByTestId('workspace-tab-add-board')).not.toBeInTheDocument()
     expect(screen.getByTestId('workspace-tab-add-task')).toBeInTheDocument()
     expect(screen.getByTestId('workspace-tab-add-agent')).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-tab-add-smart-app')).toBeInTheDocument()
+  })
+
+  test('opens Smart apps from the top tab add menu', async () => {
+    const user = userEvent.setup()
+    renderStrip()
+
+    await user.click(screen.getByTestId('workspace-tab-add'))
+    await user.click(screen.getByTestId('workspace-tab-add-smart-app'))
+
+    expect(window.location.pathname).toBe('/sites')
+    expect(new URLSearchParams(window.location.search).get('app_type')).toBe('smart_app')
+    expect(screen.getByRole('tab', { name: '应用' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('opens an installed Smart app directly from the top tab add menu', async () => {
+    listHarnessApps.mockResolvedValue([
+      {
+        id: 'research',
+        manifest: {
+          displayName: '研究工作台',
+        },
+      },
+    ])
+    const user = userEvent.setup()
+    renderStrip()
+
+    await user.click(screen.getByTestId('workspace-tab-add'))
+    await user.click(await screen.findByTestId('workspace-tab-add-smart-app-research'))
+
+    expect(window.location.pathname).toBe('/app/harness-research')
+    expect(screen.getByRole('tab', { name: '研究工作台' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('hides Smart apps from the top tab add menu while experiments are disabled', async () => {
+    experimentalFeatures.enabled = false
+    const user = userEvent.setup()
+    renderStrip()
+
+    await user.click(screen.getByTestId('workspace-tab-add'))
+
+    expect(screen.queryByTestId('workspace-tab-add-smart-app')).not.toBeInTheDocument()
   })
 
   test('opens an allowed fallback tab in a board-only window when board is unavailable', async () => {

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { invoke } from '@tauri-apps/api/core'
 import {
   ChevronLeft,
   ChevronRight,
@@ -12,8 +11,9 @@ import {
   X,
 } from 'lucide-react'
 import type { Attachment } from '@/types/api'
-import { getAttachmentImageUrl } from '@/lib/attachments'
-import { isTauriRuntime } from '@/lib/runtime-environment'
+import { readElectronLocalFile } from '@/lib/electron-local-file'
+import { isElectronRuntime } from '@/lib/runtime-environment'
+import { useAttachmentDownload } from './AttachmentDownloadContext'
 import {
   localPathFromMarkdownImageSrc,
   resolveDirectMarkdownImageSrc,
@@ -53,8 +53,19 @@ function attachmentPreviewIdentity(attachment: Attachment): string {
   return `${attachment.id}:${attachment.local_preview_url ?? attachment.local_path ?? ''}`
 }
 
+async function loadElectronLocalImage(
+  path: string,
+  mimeType: string
+): Promise<{ url: string; objectUrl: string }> {
+  const objectUrl = URL.createObjectURL(
+    new Blob([await readElectronLocalFile(path)], { type: mimeType })
+  )
+  return { url: objectUrl, objectUrl }
+}
+
 async function loadAttachmentImageUrl(
-  attachment: Attachment
+  attachment: Attachment,
+  fetchAttachmentBlob: (attachmentId: number) => Promise<Blob>
 ): Promise<{ url: string; objectUrl: string | null }> {
   const localPreviewUrl = attachment.local_preview_url ?? attachment.local_path
   if (localPreviewUrl) {
@@ -68,20 +79,9 @@ async function loadAttachmentImageUrl(
     }
 
     const localPath = getDownloadableLocalPath(localPreviewUrl)
-    if (localPath && isTauriRuntime()) {
-      try {
-        const exists = await invoke<boolean>('local_path_exists', { path: localPath })
-        if (!exists) {
-          failedAttachmentPreviewUrls.add(localPreviewUrl)
-          throw new Error('Local attachment preview no longer exists')
-        }
-      } catch (error) {
-        if (failedAttachmentPreviewUrls.has(localPreviewUrl)) {
-          throw error
-        }
-      }
+    if (localPath && isElectronRuntime()) {
+      return loadElectronLocalImage(localPath, attachment.mime_type || 'application/octet-stream')
     }
-
     const resolvedLocalPreviewUrl = resolveDirectMarkdownImageSrc(localPreviewUrl)
     if (!resolvedLocalPreviewUrl) {
       throw new Error('Failed to resolve local attachment preview')
@@ -90,16 +90,7 @@ async function loadAttachmentImageUrl(
     return { url: resolvedLocalPreviewUrl, objectUrl: null }
   }
 
-  const token = localStorage.getItem('auth_token')
-  const response = await fetch(getAttachmentImageUrl(attachment.id), {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  })
-
-  if (!response.ok) {
-    throw new Error(`Failed to load attachment preview: ${response.status}`)
-  }
-
-  const blob = await response.blob()
+  const blob = await fetchAttachmentBlob(attachment.id)
   if (!blob.type.startsWith('image/')) {
     throw new Error(`Attachment preview is not an image: ${blob.type || 'unknown'}`)
   }
@@ -155,11 +146,14 @@ function getDownloadableLocalPath(value?: string): string | null {
 
 async function downloadAttachmentImage(attachment: Attachment, imageUrl: string) {
   const sourcePath = getDownloadableLocalPath(attachment.local_preview_url ?? attachment.local_path)
-  if (sourcePath && isTauriRuntime()) {
-    await invoke<string>('download_local_file_to_downloads', {
-      sourcePath,
-      filename: attachment.filename,
-    })
+  if (sourcePath && isElectronRuntime()) {
+    const objectUrl = URL.createObjectURL(
+      new Blob([await readElectronLocalFile(sourcePath)], {
+        type: attachment.mime_type || 'application/octet-stream',
+      })
+    )
+    triggerDownload(objectUrl, attachment.filename)
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
     return
   }
 
@@ -180,6 +174,7 @@ export function AttachmentImagePreview({
   galleryIndex = 0,
   hideOnError = false,
 }: AttachmentImagePreviewProps) {
+  const fetchAttachmentBlob = useAttachmentDownload()
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [hasError, setHasError] = useState(false)
   const [isLightboxOpen, setIsLightboxOpen] = useState(false)
@@ -188,7 +183,8 @@ export function AttachmentImagePreview({
   const [isLightboxLoading, setIsLightboxLoading] = useState(false)
   const [hasLightboxError, setHasLightboxError] = useState(false)
   const [zoom, setZoom] = useState(1)
-  const [shouldLoadPreview, setShouldLoadPreview] = useState(false)
+  const loadsPreviewImmediately = isElectronRuntime() || typeof IntersectionObserver === 'undefined'
+  const [shouldLoadPreview, setShouldLoadPreview] = useState(loadsPreviewImmediately)
   const previewContainerRef = useRef<HTMLElement | null>(null)
   const previewIdentity = attachmentPreviewIdentity(attachment)
   const attachmentRef = useRef(attachment)
@@ -207,23 +203,20 @@ export function AttachmentImagePreview({
 
   /* eslint-disable react-hooks/set-state-in-effect -- Attachment identity changes must clear stale preview UI before loading the next image. */
   useEffect(() => {
-    setShouldLoadPreview(false)
+    setShouldLoadPreview(loadsPreviewImmediately)
     setPreviewUrl(null)
     setHasError(false)
     setIsLightboxOpen(false)
     setLightboxUrl(null)
     setZoom(1)
-  }, [previewIdentity])
+  }, [loadsPreviewImmediately, previewIdentity])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (shouldLoadPreview) return undefined
 
     const element = previewContainerRef.current
-    if (!element || typeof IntersectionObserver === 'undefined') {
-      setShouldLoadPreview(true)
-      return undefined
-    }
+    if (!element) return undefined
 
     const observer = new IntersectionObserver(
       entries => {
@@ -253,7 +246,7 @@ export function AttachmentImagePreview({
       setZoom(1)
 
       try {
-        const loaded = await loadAttachmentImageUrl(targetAttachment)
+        const loaded = await loadAttachmentImageUrl(targetAttachment, fetchAttachmentBlob)
         objectUrl = loaded.objectUrl
         if (isMounted) {
           setPreviewUrl(loaded.url)
@@ -276,7 +269,7 @@ export function AttachmentImagePreview({
         URL.revokeObjectURL(objectUrl)
       }
     }
-  }, [previewIdentity, shouldLoadPreview])
+  }, [fetchAttachmentBlob, previewIdentity, shouldLoadPreview])
 
   useEffect(() => {
     if (!isLightboxOpen || disableLightbox) return
@@ -305,7 +298,7 @@ export function AttachmentImagePreview({
       setLightboxUrl(null)
 
       try {
-        const loaded = await loadAttachmentImageUrl(selectedAttachment)
+        const loaded = await loadAttachmentImageUrl(selectedAttachment, fetchAttachmentBlob)
         objectUrl = loaded.objectUrl
         if (isMounted) {
           setLightboxUrl(loaded.url)
@@ -330,7 +323,15 @@ export function AttachmentImagePreview({
         URL.revokeObjectURL(objectUrl)
       }
     }
-  }, [disableLightbox, gallery, isLightboxOpen, lightboxIndex, previewIdentity, previewUrl])
+  }, [
+    disableLightbox,
+    fetchAttachmentBlob,
+    gallery,
+    isLightboxOpen,
+    lightboxIndex,
+    previewIdentity,
+    previewUrl,
+  ])
 
   useEffect(() => {
     if (!isLightboxOpen || disableLightbox) return

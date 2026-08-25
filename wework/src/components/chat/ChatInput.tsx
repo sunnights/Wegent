@@ -55,6 +55,8 @@ import {
 import type { PluginTrialRefinementRequest } from '@/features/plugins/usePluginTrialPromptRefinement'
 import type { ComposerTextareaHandle } from './composer/ComposerTextarea'
 import { ComposerPluginIcon } from './composer/ComposerPluginIcon'
+import { runtimeProjectUiId } from '@/lib/runtime-project'
+import type { QuickPhrase } from '@/desktop/appPreferences'
 
 export type ProjectCreateMode = 'scratch' | 'existing' | 'git'
 
@@ -125,6 +127,8 @@ export interface ProjectWorkControls {
   onListBranches?: () => Promise<string[]>
   onCheckoutBranch?: (branchName: string) => Promise<void>
   onCreateBranch?: (branchName: string) => Promise<void>
+  onGenerateBranchName?: (sourceText: string) => Promise<string>
+  branchNameSource?: string
   worktreeBranch?: string | null
   onWorktreeBranchChange?: (branchName: string | null) => void
   // When false, the project trigger renders a static folder icon instead of the
@@ -151,11 +155,15 @@ export interface ChatInputProps {
   disabledReason?: string
   placeholder?: string
   inputTestId?: string
+  nativeEmptyCaret?: boolean
   submitButtonTestId?: string
   variant?: 'compact' | 'desktop'
+  collapseWhenIdle?: boolean
+  projectPhrases?: QuickPhrase[]
   projectChat?: ProjectChatControls
   projectWork?: ProjectWorkControls
   showProjectWorkBar?: boolean
+  showExecutionTools?: boolean
   queuedMessages?: QueuedWorkbenchMessage[]
   guidanceMessages?: GuidanceWorkbenchMessage[]
   codeComments?: CodeCommentContext[]
@@ -558,11 +566,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     disabledReason,
     placeholder,
     inputTestId,
+    nativeEmptyCaret = false,
     submitButtonTestId,
     variant = 'compact',
+    collapseWhenIdle = false,
+    projectPhrases,
     projectChat,
     projectWork,
     showProjectWorkBar = true,
+    showExecutionTools = true,
     queuedMessages = [],
     guidanceMessages = [],
     codeComments = [],
@@ -675,6 +687,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     listLocalSkills: async () => [],
     listLocalApps: async () => [],
   }
+  const currentRuntimeProject = projectWork?.runtimeWork?.projects.find(
+    item => runtimeProjectUiId(item.project) === projectWork.currentProject?.id
+  )?.project
+  const projectQuickPhrases =
+    projectPhrases ??
+    (currentRuntimeProject?.source === 'local_project'
+      ? (currentRuntimeProject.aiSettings?.quickPhrases ?? [])
+      : [])
   const applyTrialTemplate = (template: PluginPathComponent) => {
     const applyTemplate = controls.onApplyTrialTemplate ?? controls.applyTrialTemplate
     if (!applyTemplate) return
@@ -790,6 +810,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     disabledReason,
     placeholder: disabledReason ? '' : inputPlaceholder,
     inputTestId,
+    nativeEmptyCaret,
     submitButtonTestId,
     onOpenSkillFile,
     workspaceTarget,
@@ -954,7 +975,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               onCreateProjectMode: undefined,
             }
           }
+          projectPhrases={projectQuickPhrases}
           showProjectWorkBar={showProjectWorkBar}
+          showExecutionTools={showExecutionTools}
           projectWorkBarMiddleContext={projectWorkBarMiddleContext}
           projectWorkBarTrailingContext={projectWorkBarTrailingContext}
           projectWorkBarEndContext={projectWorkBarEndContext}
@@ -964,6 +987,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           isStreaming={isStreaming}
           onPause={onPause}
           showWorkspaceMenu={showWorkspaceMenu}
+          collapseWhenIdle={collapseWhenIdle}
           inputLeadingContext={inputLeadingContext}
           onDismissInputLeadingContext={onDismissInputLeadingContext}
           toolbarLeadingContext={toolbarLeadingContext}
@@ -1042,6 +1066,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         isModelSelectionReady={controls.isModelSelectionReady ?? true}
         isStreaming={isStreaming}
         onPause={onPause}
+        projectPhrases={projectQuickPhrases}
       />
       {queueResumeDialog}
       {modelSwitchWarningDialog}

@@ -1,6 +1,6 @@
 # Wework contributor guide
 
-This directory implements the Wework desktop workbench: Tauri, Vite, React, TypeScript, and the local coding runtime. Follow the repository-wide rules in `../AGENTS.md` first.
+This directory implements the Wework desktop workbench: Electron, Vite, React, TypeScript, and the local coding runtime. Follow the repository-wide rules in `../AGENTS.md` first.
 
 ## Wework product model
 
@@ -27,7 +27,9 @@ Before changing a Wework flow, identify the affected product area and trace its 
 - Follow the Codex-derived, neutral-first visual system in `DESIGN.md`: grayscale surfaces, `14px` default desktop UI text, sparse hairlines and shadows, inverse-neutral primary actions, and blue only for focus, links, or narrow selection accents. Green and teal are restricted to semantic success/addition states and must never define product chrome or default actions.
 - Use the Codex component density documented in `DESIGN.md`: `30px` sidebar rows, `28px` app-shell tabs and composer actions, `16px` standard desktop icons, and `4px–8px` action-group gaps. Reuse the shared component's established size instead of inventing a local height.
 - Use the shared typography scale and semantic `heading-*`, `text-chat`, and `text-code` roles. Never add arbitrary `text-[Npx]`, literal CSS `font-size`, or literal inline `fontSize` values; `pnpm lint` enforces this rule.
+- Custom Markdown renderers must preserve semantic attributes supplied by the parser, such as an ordered list's `start` value.
 - Preserve platform text-navigation semantics in the ProseMirror chat composer. Register only composer-specific key bindings instead of the document-level `baseKeymap`, and scope mention caret workarounds to unmodified arrow keys.
+- Focus popup composers through their exact editor target; a mixed `querySelector` returns the first matching element in DOM order, not the first selector in the list. In WKWebView, keep a completely empty contenteditable position native instead of replacing it with a decoration widget so programmatic focus can start the platform text input session.
 
 ## i18n
 
@@ -35,6 +37,11 @@ Before changing a Wework flow, identify the affected product area and trace its 
 - Add new copy to the appropriate Wework namespace in both `src/i18n/locales/en/` and `src/i18n/locales/zh-CN/`; register a new namespace in `src/i18n/index.ts`.
 
 ## Testing
+
+- Before modifying code, locate and understand the tests and E2E coverage for
+  the affected behavior, including its scenarios, fixtures, assertions, and
+  desktop runner or checkpoint integration. Use that understanding to preserve
+  existing coverage and determine the verification required by the change.
 
 Run focused tests before committing:
 
@@ -52,11 +59,6 @@ pnpm --filter wework exec eslint <changed-files>
   focused test, confirm the initial collection output matches the requested
   files and stop the run immediately if it starts collecting unrelated tests.
 
-Direct debug Cargo builds create marked, unavailable stubs for ignored bundled
-sidecars when their real binaries have not been prepared. Do not prepare DWS
-only to run Rust unit tests or checks. Real Tauri verification and release
-builds must still use the standard scripts that prepare the actual sidecars.
-
 E2E tests use real backend requests. Do not skip, silently fail, or replace a failing integration with frontend mocks.
 
 - Design verification cases as a QA test plan before running them. For every changed behavior, cover the preconditions, environment and test data, exact steps, expected results, negative and recovery paths, and cleanup. Record the actual result and retain reproducible evidence for failures and critical-path success.
@@ -66,16 +68,17 @@ E2E tests use real backend requests. Do not skip, silently fail, or replace a fa
 - Register long main-runner sections in the ordered desktop checkpoint list. `--segment <checkpoint>` must run that checkpoint alone after common bootstrap; `--from-segment <checkpoint>` must run it and every later checkpoint. Each checkpoint must create its own minimal fixtures when an earlier checkpoint is skipped, and must never silently rely on task IDs, model state, or UI state produced only by a previous checkpoint.
 - Ordinary desktop E2E UI actions and waits use the shared 10-second step timeout. Pass an explicit `timeoutMs` only for a genuinely slow operation such as application startup, workbench reconnection, or a deliberately held model response; do not restore a broad 120-second default.
 - In virtualized content, do not rely on test-added DOM attributes across scrolling or rendering updates. Locate the element with stable product selectors and text first, wait for layout to settle, then add any temporary marker needed by later assertions.
-- E2E coverage complements, but never replaces, verification in the real Tauri application.
+- E2E coverage complements, but never replaces, verification in the real Electron application.
 
 ## Real desktop verification
 
-Any Wework UI, Tauri command, local-runtime, IPC, or desktop integration behavior change requires isolated real-Tauri verification in addition to unit and E2E tests. A browser-only or mocked run is not sufficient. Use `scripts/ai-verify.mjs`; do not drive a personal Wework window, external Chrome, or browser plug-ins.
+Any Wework UI, Electron host command, local-runtime, IPC, or desktop integration behavior change requires isolated real-Electron verification in addition to unit and E2E tests. A browser-only or mocked run is not sufficient. Use `scripts/ai-verify.mjs`; do not drive a personal Wework window, external Chrome, or browser plug-ins.
 
 ```bash
 pnpm --filter wework ai:verify start
 pnpm --filter wework ai:verify snapshot --session <session-path>
 pnpm --filter wework ai:verify debug --session <session-path>
+pnpm --filter wework ai:verify active-element --session <session-path>
 pnpm --filter wework ai:verify click --session <session-path> --selector '[data-testid="..."]'
 pnpm --filter wework ai:verify click-at --session <session-path> --value '{"x":640,"y":360}'
 pnpm --filter wework ai:verify click-then-macrotask --session <session-path> --selector '[data-testid="..."]' --target '[data-testid="..."]'
@@ -99,11 +102,11 @@ pnpm --filter wework ai:verify stop --session <session-path>
 - Begin with `snapshot`, use existing `data-testid` selectors, and assert a visible text or stable element after each critical action.
 - Use `seed-local-project` only to establish an isolated local-project fixture when a native folder picker would block automation. `reload` waits for the new control client to reconnect; always follow it with `wait-for` so the expected post-reload UI state is asserted.
 - Prefer selector-based actions. Use `click-at` only for visible controls that cannot expose a stable selector, including controls inside open shadow roots, and retain a screenshot showing the target coordinates.
-- Execute the complete QA test plan in the isolated Tauri session, including the primary path, relevant boundary and error cases, and recovery. Document the environment, cases run, actual results, and evidence in the change handoff or pull request.
+- Execute the complete QA test plan in the isolated Electron session, including the primary path, relevant boundary and error cases, and recovery. Document the environment, cases run, actual results, and evidence in the change handoff or pull request.
 - Use `capture` after the final assertion when a visual verification artifact is required. It renders the current WebView without macOS screen-recording permission.
 - Use `request-close` to exercise the native main-window close request and its close-to-tray preference or confirmation flow.
-- Use `close-to-tray` only for window-lifecycle verification. It destroys the controlled WebView while leaving the isolated Tauri process running so native reopen behavior can be tested.
-- On failure, inspect `app.log`, `executor.log`, and Tauri logs under `test-results/ai-verify/`; do not silently downgrade to mocked verification.
+- Use `close-to-tray` only for window-lifecycle verification. It destroys the controlled renderer while leaving the isolated Electron process running so native reopen behavior can be tested.
+- On failure, inspect `app.log`, `executor.log`, and Electron host logs under `test-results/ai-verify/`; do not silently downgrade to mocked verification.
 
 ## Local runtime boundaries
 

@@ -4,6 +4,9 @@
 
 use super::codex_config::optional_proxy_url;
 use super::*;
+use ignore::WalkBuilder;
+
+const WORKSPACE_SEARCH_RESULT_LIMIT: usize = 50;
 
 impl RuntimeWorkRpcHandler {
     pub(super) fn spawn_startup_worktree_reconciliation(&self) {
@@ -30,111 +33,38 @@ impl RuntimeWorkRpcHandler {
             return false;
         }
         reconciliation.last_attempt = Some(now);
-        let interrupted_worktree_turns = self
-            .interrupted_worktree_turns
-            .lock()
-            .await
-            .clone()
-            .unwrap_or_default();
-        let interrupted_worktree_task_ids = interrupted_worktree_turns
-            .iter()
-            .map(|turn| turn.local_task_id.clone())
-            .collect::<HashSet<_>>();
         let remaining_queued_turns = self
             .turn_scheduler
             .lock()
             .expect("runtime turn scheduler lock should not be poisoned")
             .queued_turns
             .clone();
-        let queued_task_ids = remaining_queued_turns
-            .iter()
-            .map(|turn| turn.local_task_id.clone())
-            .collect::<HashSet<_>>();
         let worktrees = self.worktrees.clone();
         let store = self.store.clone();
         let result = tokio::task::spawn_blocking(move || {
             let reconciled = worktrees.reconcile()?;
-            let tasks = store.list_task_summaries(true);
-            let interrupted_preparation_errors = reconciled
-                .iter()
-                .filter(|outcome| outcome.interrupted_preparation)
-                .map(|outcome| {
-                    (
-                        normalize_workspace_path(&outcome.record.path),
-                        outcome.record.last_error.clone(),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
             let mut failed_task_ids = HashSet::new();
-            for task in tasks.iter().filter(|task| {
-                !queued_task_ids.contains(&task.local_task_id)
-                    && !matches!(
-                        task.status.as_str(),
-                        "archived" | "cancelled" | "done" | "failed"
-                    )
-                    && worktrees.is_managed_path(Path::new(&task.workspace_path))
-            }) {
-                let normalized_path = normalize_workspace_path(&task.workspace_path);
-                let error = interrupted_preparation_errors
-                    .get(&normalized_path)
-                    .cloned()
-                    .flatten()
-                    .unwrap_or_else(|| {
+            for outcome in reconciled
+                .into_iter()
+                .filter(|outcome| {
+                    outcome.interrupted_preparation || outcome.interrupted_execution
+                })
+            {
+                let task_id = outcome
+                    .interrupted_execution_task_id
+                    .unwrap_or(outcome.record.worktree_id);
+                let error = outcome.record.last_error.unwrap_or_else(|| {
+                    if outcome.interrupted_execution {
+                        "Executor restarted while the Worktree task was executing; runtime was not resumed"
+                            .to_owned()
+                    } else {
                         "Executor restarted during Worktree preparation; runtime was not resumed"
                             .to_owned()
-                    });
-                let error = if interrupted_preparation_errors.contains_key(&normalized_path) {
-                    error
-                } else {
-                    "Executor restarted while the Worktree task was active; runtime was not resumed"
-                        .to_owned()
-                };
+                    }
+                });
+                let error = AppIpcError::new("executor_restarted", error);
                 if store
-                    .update_task(&task.local_task_id, |link| {
-                        link.running = false;
-                        link.status = "failed".to_owned();
-                        link.thread_status = "failed".to_owned();
-                        link.turn_status = Some("failed".to_owned());
-                        link.updated_at = now_ms();
-                        link.completed_at = Some(link.updated_at);
-                        if !link.runtime_handle.is_object() {
-                            link.runtime_handle = json!({});
-                        }
-                        if let Some(runtime_handle) = link.runtime_handle.as_object_mut() {
-                            runtime_handle.remove("queuePosition");
-                            runtime_handle
-                                .insert("lastError".to_owned(), Value::String(error.clone()));
-                        }
-                    })
-                    .is_some()
-                {
-                    failed_task_ids.insert(task.local_task_id.clone());
-                }
-            }
-            for task_id in interrupted_worktree_task_ids {
-                if failed_task_ids.contains(&task_id) {
-                    continue;
-                }
-                let error =
-                    "Executor restarted before the queued Worktree task began; runtime was not resumed"
-                        .to_owned();
-                if store
-                    .update_task(&task_id, |link| {
-                        link.running = false;
-                        link.status = "failed".to_owned();
-                        link.thread_status = "failed".to_owned();
-                        link.turn_status = Some("failed".to_owned());
-                        link.updated_at = now_ms();
-                        link.completed_at = Some(link.updated_at);
-                        if !link.runtime_handle.is_object() {
-                            link.runtime_handle = json!({});
-                        }
-                        if let Some(runtime_handle) = link.runtime_handle.as_object_mut() {
-                            runtime_handle.remove("queuePosition");
-                            runtime_handle
-                                .insert("lastError".to_owned(), Value::String(error.clone()));
-                        }
-                    })
+                    .update_task(&task_id, |link| apply_local_task_failure(link, &error))
                     .is_some()
                 {
                     failed_task_ids.insert(task_id);
@@ -159,7 +89,6 @@ impl RuntimeWorkRpcHandler {
                     reconciliation.last_attempt = Some(Instant::now());
                     return false;
                 }
-                *self.interrupted_worktree_turns.lock().await = None;
                 reconciliation.completed = true;
                 true
             }
@@ -180,6 +109,37 @@ impl RuntimeWorkRpcHandler {
                 false
             }
         }
+    }
+
+    pub(super) async fn register_harness_context(
+        &self,
+        payload: Value,
+    ) -> Result<Value, AppIpcError> {
+        let request = harness_context::parse_registration_payload(payload)
+            .map_err(|error| AppIpcError::new("invalid_request", error))?;
+        let loopback = executor_loopback_base_url().ok_or_else(|| {
+            AppIpcError::new(
+                "runtime_unavailable",
+                "Executor HTTP server is not available",
+            )
+        })?;
+        let token =
+            harness_context::register_harness_context(&request.scope, request.user, request.model);
+        Ok(json!({
+            "token": token,
+            "baseUrl": format!("{loopback}/v1/harness-context/{token}")
+        }))
+    }
+
+    pub(super) async fn unregister_harness_context(
+        &self,
+        payload: Value,
+    ) -> Result<Value, AppIpcError> {
+        let token = string_field(&payload, "token")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| AppIpcError::new("invalid_request", "token is required"))?;
+        harness_context::unregister_harness_context(&token);
+        Ok(json!({"unregistered": true}))
     }
 
     pub(super) async fn get_runtime_capacity(&self) -> Result<Value, AppIpcError> {
@@ -266,7 +226,7 @@ impl RuntimeWorkRpcHandler {
             )
             .await
             .map_err(|error| AppIpcError::new("workspace_search_failed", error))?;
-        let files = response
+        let mut files = response
             .get("files")
             .and_then(Value::as_array)
             .map(|items| {
@@ -285,6 +245,20 @@ impl RuntimeWorkRpcHandler {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if files.is_empty() {
+            let fallback_root = root.clone();
+            let fallback_query = query.clone();
+            files = tokio::task::spawn_blocking(move || {
+                search_workspace_without_parent_ignores(&fallback_root, &fallback_query)
+            })
+            .await
+            .map_err(|error| {
+                AppIpcError::new(
+                    "workspace_search_failed",
+                    format!("Workspace fallback search task failed: {error}"),
+                )
+            })?;
+        }
         Ok(json!({ "files": files }))
     }
 
@@ -739,11 +713,14 @@ impl RuntimeWorkRpcHandler {
         payload: Value,
         expected_models: Vec<String>,
     ) -> Result<Value, AppIpcError> {
+        let _restart_guard = codex_app_server_restart_gate().lock().await;
         let active_task_count = self
-            .active_codex_turns
+            .active_local_executions
             .lock()
-            .expect("active Codex turn registry should not be poisoned")
-            .len();
+            .expect("active local execution map lock should not be poisoned")
+            .values()
+            .filter(|execution| execution.codex_turn.is_some())
+            .count();
         let force = bool_field(&payload, "force").unwrap_or(false);
         let if_idle = bool_field(&payload, "ifIdle").unwrap_or(false);
         if active_task_count > 0 && if_idle && !force {
@@ -870,6 +847,93 @@ impl RuntimeWorkRpcHandler {
     }
 }
 
+fn search_workspace_without_parent_ignores(root: &Path, query: &str) -> Vec<Value> {
+    let mut matches = WalkBuilder::new(root)
+        .hidden(false)
+        .follow_links(false)
+        .parents(false)
+        .require_git(false)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.depth() > 0)
+        .filter_map(|entry| {
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() && !file_type.is_dir() {
+                return None;
+            }
+            let relative = entry.path().strip_prefix(root).ok()?;
+            let relative_text = relative.to_string_lossy();
+            let file_name = entry.file_name().to_string_lossy();
+            let (score, indices) = score_workspace_search_match(&relative_text, &file_name, query)?;
+            Some(json!({
+                "root": root.to_string_lossy(),
+                "path": relative_text,
+                "fileName": file_name,
+                "matchType": if file_type.is_dir() { "directory" } else { "file" },
+                "score": score,
+                "indices": indices,
+            }))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        let left_score = left["score"].as_u64().unwrap_or_default();
+        let right_score = right["score"].as_u64().unwrap_or_default();
+        right_score.cmp(&left_score).then_with(|| {
+            left["path"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["path"].as_str().unwrap_or_default())
+        })
+    });
+    matches.truncate(WORKSPACE_SEARCH_RESULT_LIMIT);
+    matches
+}
+
+fn score_workspace_search_match(
+    relative_path: &str,
+    file_name: &str,
+    query: &str,
+) -> Option<(u32, Vec<u32>)> {
+    let query_chars = query.to_lowercase().chars().collect::<Vec<_>>();
+    if query_chars.is_empty() {
+        return None;
+    }
+    let path_chars = relative_path.to_lowercase().chars().collect::<Vec<_>>();
+    let mut indices = Vec::with_capacity(query_chars.len());
+    let mut query_index = 0;
+    for (path_index, path_char) in path_chars.iter().enumerate() {
+        if query_chars.get(query_index) != Some(path_char) {
+            continue;
+        }
+        indices.push(path_index as u32);
+        query_index += 1;
+        if query_index == query_chars.len() {
+            break;
+        }
+    }
+    if query_index != query_chars.len() {
+        return None;
+    }
+
+    let normalized_name = file_name.to_lowercase();
+    let normalized_query = query.to_lowercase();
+    let score = if normalized_name == normalized_query {
+        1_000
+    } else if normalized_name.starts_with(&normalized_query) {
+        900
+    } else if normalized_name.contains(&normalized_query) {
+        800
+    } else {
+        let span = indices
+            .last()
+            .zip(indices.first())
+            .map(|(last, first)| last.saturating_sub(*first))
+            .unwrap_or_default();
+        500_u32.saturating_sub(span)
+    };
+    Some((score, indices))
+}
+
 fn runtime_settings_path() -> PathBuf {
     runtime_work_dir().join("settings.json")
 }
@@ -969,5 +1033,49 @@ mod tests {
             "worktree_persistent_storage_unverified"
         );
         assert_eq!(prepare_error.code, "worktree_persistent_storage_unverified");
+    }
+
+    #[test]
+    fn workspace_fallback_search_ignores_parent_gitignore_boundary() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir(repository.path().join(".git")).expect("git marker");
+        fs::write(repository.path().join(".gitignore"), "workspace/\n").expect("parent gitignore");
+        let workspace = repository.path().join("workspace");
+        fs::create_dir_all(workspace.join("cloud-context-folder")).expect("workspace folder");
+        fs::write(
+            workspace.join("cloud-context-folder/nested.txt"),
+            "context\n",
+        )
+        .expect("nested context");
+        fs::write(workspace.join("auth.ts"), "export const auth = true\n").expect("workspace file");
+
+        let folder_matches =
+            search_workspace_without_parent_ignores(&workspace, "cloud-context-folder");
+        let file_matches = search_workspace_without_parent_ignores(&workspace, "auth");
+
+        assert!(folder_matches.iter().any(|item| {
+            item["path"] == "cloud-context-folder" && item["matchType"] == "directory"
+        }));
+        assert!(file_matches
+            .iter()
+            .any(|item| item["path"] == "auth.ts" && item["matchType"] == "file"));
+    }
+
+    #[test]
+    fn workspace_fallback_search_keeps_workspace_local_ignore_rules() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::write(workspace.path().join(".gitignore"), "ignored/\n").expect("workspace gitignore");
+        fs::create_dir_all(workspace.path().join("ignored")).expect("ignored folder");
+        fs::write(workspace.path().join("ignored/secret.txt"), "secret\n").expect("ignored file");
+        fs::write(workspace.path().join("visible-secret.txt"), "visible\n").expect("visible file");
+
+        let matches = search_workspace_without_parent_ignores(workspace.path(), "secret");
+
+        assert!(matches
+            .iter()
+            .any(|item| item["path"] == "visible-secret.txt"));
+        assert!(!matches
+            .iter()
+            .any(|item| item["path"] == "ignored/secret.txt"));
     }
 }

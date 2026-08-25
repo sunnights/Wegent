@@ -13,6 +13,8 @@ import {
   DEFAULT_MODEL_ID,
   DEFAULT_MODEL_LABEL,
   DEFAULT_STEP_TIMEOUT_MS,
+  FORK_FOLLOW_UP_COMPLETION_TEXT,
+  FORK_FOLLOW_UP_PROMPT,
   FRESH_CHAT_COMPLETION_TEXT,
   FRESH_CHAT_PROMPT,
   SHORT_CONVERSATION_MAX_MESSAGE_TOP_OFFSET,
@@ -23,6 +25,7 @@ import {
   pathExists,
   resultDir,
   selectE2EModel,
+  sendPromptUntilScenarioRequest,
   withTimeout,
   writeFile,
 } from './shared.mjs'
@@ -168,6 +171,11 @@ async function verifyShortConversationLayout({ composerSelector, control }) {
     control,
     taskRowsBeforeRace,
     'WEWORK_DESKTOP_E2E_CONCURRENT_MEMORY_1'
+  )
+  await assertNewTaskPrecedesExistingTask(
+    control,
+    runningTaskRowTestId,
+    shortConversationTaskRowTestId
   )
 
   await ensureTaskRowVisible(control, shortConversationTaskRowTestId)
@@ -747,6 +755,46 @@ async function waitForNewTaskRow(
   throw new Error(`The sidebar did not expose a task row for ${expectedText}`)
 }
 
+async function assertNewTaskPrecedesExistingTask(control, newTaskRowTestId, existingTaskRowTestId) {
+  const snapshot = JSON.parse(await control.command('snapshot', 'body'))
+  const candidateListTestIds = snapshot.testIds.filter(
+    testId =>
+      testId === 'runtime-chat-task-sortable-list' ||
+      testId.startsWith('project-runtime-task-sortable-')
+  )
+
+  for (const listTestId of candidateListTestIds) {
+    const listSelector = `[data-testid="${listTestId}"]`
+    const containsNewTask =
+      Number(
+        await control.command(
+          'getElementCount',
+          `${listSelector} [data-testid="${newTaskRowTestId}"]`
+        )
+      ) === 1
+    const containsExistingTask =
+      Number(
+        await control.command(
+          'getElementCount',
+          `${listSelector} [data-testid="${existingTaskRowTestId}"]`
+        )
+      ) === 1
+    if (!containsNewTask || !containsExistingTask) continue
+
+    const taskOrder = JSON.parse(await control.command('getTestIdOrder', listSelector)).filter(
+      testId => testId === newTaskRowTestId || testId === existingTaskRowTestId
+    )
+    assert.deepEqual(
+      taskOrder,
+      [newTaskRowTestId, existingTaskRowTestId],
+      'A newly created task was displayed below an existing task in the sidebar'
+    )
+    return
+  }
+
+  throw new Error('The new and existing tasks did not share a sidebar task list')
+}
+
 async function createCheckpointTaskFixture(
   control,
   composerSelector,
@@ -867,6 +915,51 @@ async function verifyWorktreeCreationStatus({ composerSelector, control, workspa
     stableMs: COMPOSER_READY_STABILITY_MS,
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
+
+  const taskRowsBeforeFork = new Set(
+    JSON.parse(await control.command('snapshot', 'body')).testIds.filter(testId =>
+      testId.startsWith('runtime-local-task-row-')
+    )
+  )
+  await control.command(
+    'clickDescendantInElementWithText',
+    `${ACTIVE_WORKBENCH_SELECTOR} [data-testid="message-assistant"]`,
+    {
+      target: '[data-testid="fork-message-button"]',
+      text: CHECKPOINT_TASK_COMPLETION_TEXT,
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    }
+  )
+  const forkTaskRowTestId = await waitForNewTaskRow(control, taskRowsBeforeFork, '')
+  const forkTaskId = forkTaskRowTestId.replace('runtime-local-task-row-', '')
+  const forkDebugSnapshot = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
+  assert.equal(
+    forkDebugSnapshot.workbench?.currentRuntimeTask?.taskId,
+    forkTaskId,
+    'Forking a worktree task did not open the forked task'
+  )
+  assert.equal(
+    forkDebugSnapshot.workbench?.currentRuntimeTask?.workspacePath,
+    worktreePath,
+    'The forked task did not inherit the managed source worktree'
+  )
+
+  control.setScenario('fork_follow_up')
+  const forkRequest = await sendPromptUntilScenarioRequest(
+    control,
+    composerSelector,
+    FORK_FOLLOW_UP_PROMPT,
+    'fork_follow_up'
+  )
+  assert.ok(
+    JSON.stringify(forkRequest.body).includes(FORK_FOLLOW_UP_PROMPT),
+    'The forked managed-worktree task did not send its follow-up'
+  )
+  await control.command('waitFor', '[data-testid="message-assistant"]', {
+    text: FORK_FOLLOW_UP_COMPLETION_TEXT,
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  })
+  await captureVerificationScreenshot(control, 'worktree-status-05-fork-follow-up-complete.png')
 
   await control.command('click', `[data-testid="runtime-local-task-archive-${worktreeTaskId}"]`)
   await withTimeout(

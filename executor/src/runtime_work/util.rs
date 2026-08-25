@@ -20,6 +20,9 @@ pub(crate) fn execution_request(payload: &Value) -> Option<ExecutionRequest> {
 }
 
 pub(crate) fn apply_runtime_payload_metadata(request: &mut ExecutionRequest, payload: &Value) {
+    if let Some(title) = string_field(payload, "title") {
+        set_runtime_task_title(request, &title);
+    }
     if !request.extra.contains_key("cloudProjectId")
         && !request.extra.contains_key("cloud_project_id")
     {
@@ -133,6 +136,28 @@ pub(crate) fn apply_runtime_payload_metadata(request: &mut ExecutionRequest, pay
     if let Some(turn_id) = id_field(payload, "turn_id") {
         request.subtask_id = turn_id;
     }
+}
+
+pub(crate) fn set_runtime_task_title(request: &mut ExecutionRequest, title: &str) {
+    let title = title.trim();
+    if title.is_empty() {
+        return;
+    }
+    request.extra.insert(
+        "runtimeTaskTitle".to_owned(),
+        Value::String(title.to_owned()),
+    );
+}
+
+pub(crate) fn runtime_task_title(request: &ExecutionRequest) -> Option<String> {
+    request
+        .extra
+        .get("runtimeTaskTitle")
+        .or_else(|| request.extra.get("runtime_task_title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
 }
 
 fn runtime_generated_user_message(payload: &Value) -> Option<Value> {
@@ -283,6 +308,18 @@ pub(crate) fn timestamp_ms(value: i64) -> i64 {
     } else {
         value
     }
+}
+
+pub(crate) fn normalize_runtime_goal_timestamps(mut goal: Value) -> Value {
+    if let Some(object) = goal.as_object_mut() {
+        for key in ["createdAt", "updatedAt", "created_at", "updated_at"] {
+            let timestamp = object.get(key).and_then(timestamp_ms_value);
+            if let Some(timestamp) = timestamp {
+                object.insert(key.to_owned(), Value::Number(timestamp.into()));
+            }
+        }
+    }
+    goal
 }
 
 fn parse_utc_timestamp_ms(value: &str) -> Option<i64> {
@@ -653,6 +690,14 @@ fn resolved_worktree_root_and_id(path: &str) -> Option<(String, String)> {
     if let Some(worktree) = git_worktree_root_and_id(path) {
         return Some(worktree);
     }
+    if let Some((worktree_root, worktree_id)) = path_worktree_root_and_id(path) {
+        if let Some(repository_root) = git_common_workspace_root(path) {
+            if path_is_within(&worktree_root, &repository_root) {
+                return None;
+            }
+        }
+        return Some((worktree_root, worktree_id));
+    }
     if git_common_workspace_root(path).is_some() {
         return None;
     }
@@ -771,6 +816,18 @@ mod tests {
     }
 
     #[test]
+    fn copies_runtime_task_title_from_runtime_payload() {
+        let mut request = ExecutionRequest::default();
+
+        apply_runtime_payload_metadata(&mut request, &json!({"title": " Analyze issue "}));
+
+        assert_eq!(
+            runtime_task_title(&request).as_deref(),
+            Some("Analyze issue")
+        );
+    }
+
+    #[test]
     fn copies_runtime_origin_from_runtime_payload() {
         let mut request = ExecutionRequest::default();
 
@@ -882,6 +939,27 @@ mod tests {
     }
 
     #[test]
+    fn nested_repository_inside_a_worktree_is_not_the_outer_worktree() {
+        let directory = tempdir().expect("temporary directory");
+        let common_dir = directory.path().join("repo").join(".git");
+        let outer_worktree = directory.path().join("worktrees").join("runtime-1");
+        let outer_git_dir = common_dir.join("worktrees").join("runtime-1");
+        std::fs::create_dir_all(&outer_git_dir).expect("outer worktree metadata");
+        std::fs::create_dir_all(&outer_worktree).expect("outer worktree");
+        std::fs::write(
+            outer_worktree.join(".git"),
+            format!("gitdir: {}\n", outer_git_dir.display()),
+        )
+        .expect("outer worktree git file");
+        let nested_repository = outer_worktree.join("artifacts").join("workspace");
+        std::fs::create_dir_all(nested_repository.join(".git")).expect("nested repository");
+        let nested_path = nested_repository.display().to_string();
+
+        assert_eq!(infer_workspace_kind(&nested_path), "workspace");
+        assert_eq!(infer_worktree_id(&nested_path), None);
+    }
+
+    #[test]
     fn nonexistent_planned_worktree_does_not_inherit_an_ancestor_worktree() {
         let directory = tempdir().expect("temporary directory");
         let common_dir = directory.path().join("repo").join(".git");
@@ -910,6 +988,61 @@ mod tests {
         assert_eq!(
             infer_worktree_id(&planned_path).as_deref(),
             Some("runtime-1")
+        );
+    }
+
+    #[test]
+    fn planned_worktree_path_under_repository_checkout_is_a_worktree() {
+        let checkout = tempdir().expect("temporary directory");
+        std::fs::create_dir_all(checkout.path().join(".git")).expect("checkout git metadata");
+        let planned = checkout
+            .path()
+            .join("executor-home")
+            .join("workspace")
+            .join("worktrees")
+            .join("runtime-132780333")
+            .join("workspace");
+        std::fs::create_dir_all(&planned).expect("planned worktree directory");
+        let planned_path = planned.display().to_string();
+
+        assert_eq!(infer_workspace_kind(&planned_path), "worktree");
+        assert_eq!(
+            infer_worktree_id(&planned_path),
+            Some("runtime-132780333".to_owned())
+        );
+        assert_eq!(
+            workspace_task_path(&planned_path, &checkout.path().display().to_string()),
+            planned_path
+        );
+    }
+
+    #[test]
+    fn normalizes_runtime_goal_seconds_to_milliseconds() {
+        assert_eq!(
+            normalize_runtime_goal_timestamps(json!({
+                "threadId": "thread-1",
+                "createdAt": 1_787_636_000,
+                "updatedAt": 1_787_636_001,
+            })),
+            json!({
+                "threadId": "thread-1",
+                "createdAt": 1_787_636_000_000_i64,
+                "updatedAt": 1_787_636_001_000_i64,
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_runtime_goal_millisecond_timestamps() {
+        assert_eq!(
+            normalize_runtime_goal_timestamps(json!({
+                "createdAt": 1_787_636_000_123_i64,
+                "updatedAt": 1_787_636_001_456_i64,
+            })),
+            json!({
+                "createdAt": 1_787_636_000_123_i64,
+                "updatedAt": 1_787_636_001_456_i64,
+            })
         );
     }
 }

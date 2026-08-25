@@ -20,6 +20,7 @@ import { Slice, type Node as ProseMirrorNode } from 'prosemirror-model'
 import { AllSelection, EditorState, Plugin, TextSelection } from 'prosemirror-state'
 import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
 import type { PluginReference } from '@/features/plugins/pluginNavigation'
+import { isElectronRuntime } from '@/lib/runtime-environment'
 import { ComposerMentionNodeView } from './ComposerMentionNodeView'
 import { ComposerLinkNodeView } from './ComposerLinkNodeView'
 import type { ComposerLinkPayload } from './composerLinks'
@@ -80,6 +81,7 @@ interface ComposerProseMirrorEditorProps {
   rows: number
   textareaRef: RefObject<HTMLElement | null>
   className: string
+  nativeEmptyCaret?: boolean
 }
 
 const EXTERNAL_VALUE_META = 'composer-external-value'
@@ -160,7 +162,13 @@ export const ComposerProseMirrorEditor = forwardRef<
                 if (
                   !state.selection.empty ||
                   !state.selection.$head.parent.isTextblock ||
-                  state.selection.$head.parent.content.size > 0
+                  state.selection.$head.parent.content.size > 0 ||
+                  // WKWebView and explicitly native composers need the only
+                  // empty text position to remain native so programmatic focus
+                  // can start a platform text input session.
+                  ((!isElectronRuntime() || callbacksRef.current.nativeEmptyCaret) &&
+                    state.doc.childCount === 1 &&
+                    state.doc.firstChild?.content.size === 0)
                 ) {
                   return null
                 }
@@ -329,6 +337,11 @@ export const ComposerProseMirrorEditor = forwardRef<
         event.stopImmediatePropagation()
         return
       }
+      if (moveComposerCaretToBoundary(view, event)) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        return
+      }
       const handledByComposer = callbacksRef.current.onKeyDown(
         event,
         readComposerSnapshot(view.state)
@@ -443,7 +456,7 @@ export const ComposerProseMirrorEditor = forwardRef<
       <div ref={mountRef} />
       {!hasContent && (
         <div
-          className={`${props.className} pointer-events-none absolute inset-0 !text-text-muted/55`}
+          className={`${props.className} composer-prosemirror-placeholder pointer-events-none absolute inset-0 !text-text-muted/55`}
         >
           {props.placeholder}
         </div>
@@ -573,6 +586,28 @@ function setComposerSelection(view: EditorView, event: KeyboardEvent, position: 
   event.preventDefault()
   event.stopPropagation()
   view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, position)))
+  view.focus()
+  return true
+}
+
+function moveComposerCaretToBoundary(view: EditorView, event: KeyboardEvent): boolean {
+  if (event.key !== 'Home' && event.key !== 'End') return false
+
+  const { selection } = view.state
+  const { $head } = selection
+  const target =
+    event.metaKey || event.ctrlKey
+      ? event.key === 'Home'
+        ? TextSelection.atStart(view.state.doc).from
+        : TextSelection.atEnd(view.state.doc).to
+      : event.key === 'Home'
+        ? $head.start()
+        : $head.end()
+
+  const nextSelection = event.shiftKey
+    ? TextSelection.create(view.state.doc, selection.anchor, target)
+    : TextSelection.create(view.state.doc, target)
+  view.dispatch(view.state.tr.setSelection(nextSelection))
   view.focus()
   return true
 }

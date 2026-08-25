@@ -407,6 +407,10 @@ may reveal on hover/focus but must remain keyboard accessible.
   screenshot-matched review artifacts must use that width.
 - Sidebar rows are `30px` high with a `10px` radius, `8px–10px` horizontal
   padding, `14px` text, and an ordinary `16px` icon.
+- Leading status icons may occupy reserved indentation only when their negative
+  offset is fully contained by the row's left padding. Keep icons in the normal
+  flex flow for shallow pinned and top-level task rows so the glyph and its hit
+  target remain inside the sidebar viewport.
 - Priority task entries are selectable two-line data rows rather than compact
   navigation rows. They use a `48px` minimum height so the title and `12px–14px`
   source metadata remain readable.
@@ -414,10 +418,10 @@ may reveal on hover/focus but must remain keyboard accessible.
 - Keep the sidebar base surface stable when the application window gains or
   loses focus. Window focus must not darken the task or work-items sidebar.
 - Sortable sidebar rows must keep the sortable container separate from the
-  pointer activator. Only the primary icon-and-label or label region may start
-  pointer sorting, after at least `6px` of movement; trailing actions, metadata,
-  and unused row space must remain click-only. Preserve keyboard sorting on the
-  sortable container.
+  pointer activator. The primary non-action area, including unused space beside
+  a short label, may start pointer sorting after at least `6px` of movement.
+  Trailing actions and metadata must remain outside the activator. Preserve
+  keyboard sorting on the sortable container.
 - Section spacing may be larger than row spacing; avoid divider-heavy grouping.
 - On macOS light theme, use the captured warm translucent/off-white sidebar
   material and keep the main canvas pure white. Preserve the traffic-light safe
@@ -864,7 +868,7 @@ implementation and WCAG conflict.
 - File paths, terminals, permissions, and external applications reflect the
   actual current environment.
 - Keep pane resize and open/close motion stable under window zoom.
-- Verify changes through the isolated real-Tauri flow in `AGENTS.md`, never a
+- Verify changes through the isolated real-Electron flow in `AGENTS.md`, never a
   personal Wework window.
 
 ## 13. Implementation and review contract
@@ -895,7 +899,7 @@ For each material UI change, review:
 - Do keyboard behavior, accessible names, focus restoration, reduced motion,
   long translations, and constrained widths work?
 - Are light and dark themes both correct?
-- Was the affected flow verified in the isolated real Tauri application with a
+- Was the affected flow verified in the isolated real Electron application with a
   screenshot of the final normal state and any critical transient state?
 
 When a screenshot feels wrong, compare it in this order: composition, surface

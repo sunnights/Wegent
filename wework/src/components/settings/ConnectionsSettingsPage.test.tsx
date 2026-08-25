@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ConnectionsSettingsPage } from './ConnectionsSettingsPage'
@@ -13,7 +13,7 @@ import type { CloudConnectionContextValue } from '@/features/cloud-connection/Cl
 import { createDefaultLocalModelCatalogEntry } from '@/features/model-settings/localModelCatalog'
 import { saveLocalModelConfig } from '@/features/model-settings/localModelSettings'
 import { openExternalUrl } from '@/lib/external-links'
-import { requestLocalExecutor } from '@/tauri/localExecutor'
+import { requestLocalExecutor } from '@/desktop/localExecutor'
 import '@/i18n'
 import type { DeviceInfo } from '@/types/devices'
 
@@ -61,7 +61,7 @@ vi.mock('@/config/runtime', () => ({
 
 vi.mock('@/api/http', () => ({
   createHttpClient: vi.fn((options: unknown) => ({ options })),
-  shouldUseTauriFetch: vi.fn(() => false),
+  shouldUseNativeFetch: vi.fn(() => false),
 }))
 
 vi.mock('@/api/models', () => ({
@@ -105,7 +105,7 @@ vi.mock('@/lib/external-links', () => ({
   openExternalUrl: vi.fn(),
 }))
 
-vi.mock('@/tauri/localExecutor', () => ({
+vi.mock('@/desktop/localExecutor', () => ({
   ensureLocalExecutorStarted: vi.fn().mockResolvedValue({
     running: true,
     ready: true,
@@ -209,7 +209,7 @@ describe('ConnectionsSettingsPage', () => {
     experimentalFeatures.enabled = true
     vi.clearAllMocks()
     localStorage.clear()
-    delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    delete window.__WEWORK_RUNTIME_CONFIG__
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: {
@@ -407,11 +407,8 @@ describe('ConnectionsSettingsPage', () => {
     expect(settingsPage).not.toHaveClass('h-screen')
   })
 
-  test('does not duplicate titlebar clearance beneath the Tauri app chrome', () => {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      configurable: true,
-      value: {},
-    })
+  test('does not duplicate titlebar clearance beneath the Electron app chrome', () => {
+    window.__WEWORK_RUNTIME_CONFIG__ = { desktopHost: 'electron' }
     api.getAllDevices.mockResolvedValue([])
 
     render(<ConnectionsSettingsPage onBack={vi.fn()} />)
@@ -1185,12 +1182,15 @@ describe('ConnectionsSettingsPage', () => {
         'anthropic-messages'
       )
       expect(screen.getByTestId('local-model-request-path-input')).toHaveValue('/v1/messages')
-      await userEvent.type(
-        screen.getByTestId('local-model-url-input'),
-        'https://api.kimi.com/coding/'
-      )
-      await userEvent.type(screen.getByTestId('local-model-id-input'), 'kimi-for-coding')
-      await userEvent.type(screen.getByTestId('local-model-api-key-input'), 'local-secret')
+      fireEvent.change(screen.getByTestId('local-model-url-input'), {
+        target: { value: 'https://api.kimi.com/coding/' },
+      })
+      fireEvent.change(screen.getByTestId('local-model-id-input'), {
+        target: { value: 'kimi-for-coding' },
+      })
+      fireEvent.change(screen.getByTestId('local-model-api-key-input'), {
+        target: { value: 'local-secret' },
+      })
       await userEvent.click(screen.getByTestId('local-model-test-button'))
 
       expect(await screen.findByTestId('local-model-test-result')).toHaveTextContent('模型连接正常')

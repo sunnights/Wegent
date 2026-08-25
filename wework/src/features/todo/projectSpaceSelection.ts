@@ -22,6 +22,7 @@ export function projectStoreLocation(
 }
 
 const projectSpaceTaskContextListeners = new Set<(task: RuntimeTaskAddress) => void>()
+const projectSpaceTaskBindingListeners = new Set<(task: RuntimeTaskAddress) => void>()
 
 export function publishProjectSpaceTaskContextChanged(task: RuntimeTaskAddress) {
   for (const listener of projectSpaceTaskContextListeners) listener(task)
@@ -33,6 +34,19 @@ export function subscribeProjectSpaceTaskContextChanged(
   projectSpaceTaskContextListeners.add(listener)
   return () => {
     projectSpaceTaskContextListeners.delete(listener)
+  }
+}
+
+export function publishProjectSpaceTaskBindingChanged(task: RuntimeTaskAddress) {
+  for (const listener of projectSpaceTaskBindingListeners) listener(task)
+}
+
+export function subscribeProjectSpaceTaskBindingChanged(
+  listener: (task: RuntimeTaskAddress) => void
+) {
+  projectSpaceTaskBindingListeners.add(listener)
+  return () => {
+    projectSpaceTaskBindingListeners.delete(listener)
   }
 }
 
@@ -98,14 +112,12 @@ export async function findProjectSpaceContextForTask(
   apis: ProjectSpaceApi[],
   task: RuntimeTaskAddress
 ): ReturnType<ProjectSpaceApi['findCloudContextForTask']> {
-  const errors: unknown[] = []
-  for (const api of apis) {
-    try {
-      return await api.findCloudContextForTask(task)
-    } catch (error) {
-      errors.push(error)
-    }
-  }
+  const results = await Promise.allSettled(apis.map(api => api.findCloudContextForTask(task)))
+  const contexts = results.flatMap(result => (result.status === 'fulfilled' ? [result.value] : []))
+  const userContext = contexts.find(context => !isDefaultWorkItemProject(context.project))
+  if (userContext) return userContext
+  if (contexts[0]) return contexts[0]
+  const errors = results.flatMap(result => (result.status === 'rejected' ? [result.reason] : []))
   throw new AggregateError(errors, 'Task is not linked to a project space')
 }
 
@@ -126,6 +138,7 @@ export async function loadProjectSpaceOptions(
   for (const result of results) {
     if (result.status !== 'fulfilled') continue
     for (const option of result.value) {
+      if (isDefaultWorkItemProject(option.project)) continue
       if (!options.has(option.key)) options.set(option.key, option)
     }
   }

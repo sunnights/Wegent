@@ -7,6 +7,8 @@ import {
   normalizeModelOptions,
 } from '@/lib/model-ui'
 import { LOCAL_MODEL_SETTINGS_CHANGED_EVENT } from '@/features/model-settings/localModelSettings'
+import { findModelForSelection } from './runtimeContextUsage'
+import { modelSelectionIdentityOptions } from './runtimeModelSelection'
 import { WORKBENCH_MODELS_CHANGED_EVENT } from './workbenchCloudDataEvents'
 import type {
   ModelCompatibilityDisabledReason,
@@ -23,6 +25,7 @@ interface WorkbenchModelApi {
 interface UseWorkbenchModelsOptions {
   api: WorkbenchModelApi
   locked: boolean
+  enabled?: boolean
   filterModel?: (model: UnifiedModel) => boolean
   scopeKey?: string
   persistSelection?: boolean
@@ -38,25 +41,14 @@ interface UseWorkbenchModelsOptions {
 
 const DEFAULT_MODEL_SCOPE_KEY = 'default'
 
-function findConfiguredModel(
-  models: UnifiedModel[],
-  selectionConfig?: ModelSelectionConfig | null
-): UnifiedModel | null {
-  if (!selectionConfig?.modelName) return null
-  return (
-    models.find(
-      model =>
-        model.name === selectionConfig.modelName &&
-        (!selectionConfig.modelType || model.type === selectionConfig.modelType)
-    ) ?? null
-  )
-}
-
 function toSelectionConfig(model: UnifiedModel, options: ModelOptions): ModelSelectionConfig {
   return {
     modelName: model.name,
     modelType: model.type,
-    options,
+    options: {
+      ...options,
+      ...modelSelectionIdentityOptions(model),
+    },
   }
 }
 
@@ -79,7 +71,18 @@ function getSelectionKey(
   models: UnifiedModel[],
   selectionConfig?: ModelSelectionConfig | null
 ): string {
-  const modelsKey = models.map(model => `${model.type}:${model.name}`).join('|')
+  const modelsKey = models
+    .map(model => {
+      const identity = modelSelectionIdentityOptions(model)
+      return [
+        model.type,
+        model.name,
+        identity.codexProviderId ?? '',
+        identity.weworkCloudModelNamespace ?? '',
+        identity.weworkCloudModelResourceUserId ?? '',
+      ].join(':')
+    })
+    .join('|')
   const options = selectionConfig?.options ?? {}
   const optionsKey = Object.keys(options)
     .sort()
@@ -96,6 +99,7 @@ function getSelectionKey(
 export function useWorkbenchModels({
   api,
   locked,
+  enabled = true,
   filterModel,
   scopeKey = DEFAULT_MODEL_SCOPE_KEY,
   persistSelection = true,
@@ -120,13 +124,14 @@ export function useWorkbenchModels({
   const selectedModelOptions = selectedModelOptionsByScope[scopeKey] ?? {}
   const selectedModelRef = useRef<Record<string, UnifiedModel | null>>({})
   const selectedModelOptionsRef = useRef<Record<string, ModelOptions>>({})
+  const modelLoadRevisionRef = useRef(0)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [restoredSelectionKeyByScope, setRestoredSelectionKeyByScope] = useState<
     Record<string, string | null>
   >({})
   const effectiveSelectionConfig = useMemo(() => {
-    if (selectionConfig?.modelName && findConfiguredModel(models, selectionConfig)) {
+    if (selectionConfig?.modelName && findModelForSelection(models, selectionConfig)) {
       return selectionConfig
     }
     return defaultSelectionConfig?.(models) ?? selectionConfig ?? null
@@ -144,10 +149,12 @@ export function useWorkbenchModels({
   )
   const isSelectionReady = useMemo(
     () =>
-      selectionReady &&
-      !isLoading &&
-      (restoredSelectionKeyByScope[scopeKey] === selectionKey || selectionMatchesConfig),
+      !enabled ||
+      (selectionReady &&
+        !isLoading &&
+        (restoredSelectionKeyByScope[scopeKey] === selectionKey || selectionMatchesConfig)),
     [
+      enabled,
       isLoading,
       restoredSelectionKeyByScope,
       scopeKey,
@@ -159,7 +166,7 @@ export function useWorkbenchModels({
 
   const restoreSelection = useCallback(
     (availableModels: UnifiedModel[], nextSelectionConfig?: ModelSelectionConfig | null) => {
-      const model = findConfiguredModel(availableModels, nextSelectionConfig)
+      const model = findModelForSelection(availableModels, nextSelectionConfig)
       const nextOptions = model
         ? normalizeModelOptions(model, nextSelectionConfig?.options ?? {})
         : (nextSelectionConfig?.options ?? {})
@@ -215,24 +222,27 @@ export function useWorkbenchModels({
   }, [])
 
   useEffect(() => {
+    if (!enabled) return
+
     let cancelled = false
 
     async function loadModels() {
+      const revision = ++modelLoadRevisionRef.current
       setIsLoading(true)
       setError(null)
       try {
         const response = await api.listModels()
-        if (!cancelled) {
+        if (!cancelled && revision === modelLoadRevisionRef.current) {
           const filtered = response.data.filter(isSupportedModelFamily)
           reconcileSelectedModels(filterModel ? filtered.filter(filterModel) : filtered)
           setAvailableModels(filtered)
         }
       } catch (nextError) {
-        if (!cancelled) {
+        if (!cancelled && revision === modelLoadRevisionRef.current) {
           setError(nextError instanceof Error ? nextError : new Error('Failed to load models'))
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && revision === modelLoadRevisionRef.current) {
           setIsLoading(false)
         }
       }
@@ -246,10 +256,10 @@ export function useWorkbenchModels({
       window.removeEventListener(LOCAL_MODEL_SETTINGS_CHANGED_EVENT, loadModels)
       window.removeEventListener(WORKBENCH_MODELS_CHANGED_EVENT, loadModels)
     }
-  }, [api, filterModel, reconcileSelectedModels])
+  }, [api, enabled, filterModel, reconcileSelectedModels])
 
   useEffect(() => {
-    if (!selectionReady) {
+    if (!enabled || !selectionReady) {
       return
     }
 
@@ -277,6 +287,7 @@ export function useWorkbenchModels({
     }
   }, [
     effectiveSelectionConfig,
+    enabled,
     models,
     restoreSelection,
     restoredSelectionKeyByScope,
@@ -385,7 +396,7 @@ export function useWorkbenchModels({
     setSelectionForScope,
     getSelectedModel,
     getSelectedModelOptions,
-    isLoading,
-    error,
+    isLoading: enabled && isLoading,
+    error: enabled ? error : null,
   }
 }

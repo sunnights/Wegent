@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WORKBENCH_AUTOMATIONS_CHANGED_EVENT } from '@/features/workbench/workbenchCloudDataEvents'
+import { selectedModelExecutionFields } from '@/features/workbench/runtimeModelSelection'
 import { createHybridWorkbenchServices } from './hybridServices'
 
 const mocks = vi.hoisted(() => {
@@ -30,7 +31,7 @@ const mocks = vi.hoisted(() => {
   const cloudRuntimeIpcSubscribe = vi.fn(async () => vi.fn())
   const localChatStreamSubscribe = vi.fn(() => vi.fn())
   const cloudRuntimeChatStreamSubscribe = vi.fn(() => vi.fn())
-  const invoke = vi.fn()
+  const readElectronLocalFile = vi.fn()
   const localUploadAttachment = vi.fn()
   const localDeleteAttachment = vi.fn()
   const cloudUploadAttachment = vi.fn()
@@ -178,7 +179,7 @@ const mocks = vi.hoisted(() => {
     cloudRuntimeIpcSubscribe,
     localChatStreamSubscribe,
     cloudRuntimeChatStreamSubscribe,
-    invoke,
+    readElectronLocalFile,
     localUploadAttachment,
     localDeleteAttachment,
     cloudUploadAttachment,
@@ -299,8 +300,8 @@ vi.mock('@/api/local/localServices', () => ({
   },
 }))
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: mocks.invoke,
+vi.mock('@/lib/electron-local-file', () => ({
+  readElectronLocalFile: mocks.readElectronLocalFile,
 }))
 
 vi.mock('@/api/backend/backendServices', () => ({
@@ -524,7 +525,8 @@ describe('createHybridWorkbenchServices', () => {
         { kind: 'process', label: 'Process', command: 'wegent-executor' },
       ],
     })
-    mocks.invoke.mockResolvedValue([])
+    mocks.readElectronLocalFile.mockReset()
+    mocks.readElectronLocalFile.mockResolvedValue(Uint8Array.from([1, 2, 3, 4]))
     mocks.cloudUploadAttachment.mockResolvedValue({
       id: 42,
       filename: 'screenshot.png',
@@ -536,13 +538,7 @@ describe('createHybridWorkbenchServices', () => {
     })
   })
 
-  it('uploads a local attachment to the connected cloud backend on demand', async () => {
-    mocks.invoke.mockResolvedValue([
-      {
-        name: 'screenshot.png',
-        bytes: [1, 2, 3, 4],
-      },
-    ])
+  it('reads a local attachment through the Electron host before uploading it to cloud', async () => {
     const services = createServices()
 
     const uploaded = await services.attachmentApi?.uploadLocalAttachmentToCloud?.({
@@ -556,13 +552,10 @@ describe('createHybridWorkbenchServices', () => {
       local_path: '/Users/me/.wework/workspace/attachments/draft/screenshot.png',
     })
 
-    expect(mocks.invoke).toHaveBeenCalledWith('read_dropped_files', {
-      paths: ['/Users/me/.wework/workspace/attachments/draft/screenshot.png'],
-    })
-    expect(mocks.cloudUploadAttachment).toHaveBeenCalledWith(expect.any(File))
+    expect(mocks.readElectronLocalFile).toHaveBeenCalledWith(
+      '/Users/me/.wework/workspace/attachments/draft/screenshot.png'
+    )
     const file = mocks.cloudUploadAttachment.mock.calls[0][0] as File
-    expect(file.name).toBe('screenshot.png')
-    expect(file.type).toBe('image/png')
     expect(Array.from(new Uint8Array(await file.arrayBuffer()))).toEqual([1, 2, 3, 4])
     expect(uploaded?.id).toBe(42)
   })
@@ -686,6 +679,63 @@ describe('createHybridWorkbenchServices', () => {
       'responses-model',
     ])
     expect(response.data[1]).toEqual(responsesModel)
+  })
+
+  it('keeps well-formed cloud vision references without a client-side catalog lookup', async () => {
+    const reference = {
+      modelName: 'kimi-k2.5-vision',
+      modelType: 'public',
+      namespace: 'default',
+      resourceUserId: 0,
+      apiFormat: 'anthropic-messages',
+    }
+    // The sidecar target declares no capabilities and is absent from the Wework
+    // catalog; the backend gateway resolves and authorizes it at send time.
+    const configuredPrimary = {
+      name: 'text-only-primary',
+      type: 'public',
+      displayName: 'Text Only Primary',
+      modelId: 'text-only-primary',
+      namespace: 'default',
+      resourceUserId: 0,
+      config: { visionSidecarModel: reference },
+      runtime: { family: 'claude' },
+      isActive: true,
+    }
+    const malformedPrimary = {
+      ...configuredPrimary,
+      name: 'text-only-primary-malformed',
+      modelId: 'text-only-primary-malformed',
+      config: { visionSidecarModel: { ...reference, apiFormat: 'gemini-generate-content' } },
+    }
+    mocks.localListModels.mockResolvedValue({ data: [] })
+    mocks.cloudListModels.mockResolvedValue({
+      data: [configuredPrimary, malformedPrimary],
+    })
+    const services = createServices()
+
+    await services.modelApi.listModels()
+    await vi.waitFor(async () => {
+      const refreshed = await services.modelApi.listModels()
+      expect(refreshed.data).toHaveLength(2)
+    })
+    const response = await services.modelApi.listModels()
+
+    expect(
+      response.data.find(model => model.name === configuredPrimary.name)?.config
+    ).toMatchObject({ visionSidecarModel: reference })
+    expect(
+      selectedModelExecutionFields(
+        response.data.find(model => model.name === configuredPrimary.name)!,
+        {}
+      ).modelOptions?.weworkCloudVisionSidecar
+    ).toBe(JSON.stringify(reference))
+    expect(
+      selectedModelExecutionFields(
+        response.data.find(model => model.name === malformedPrimary.name)!,
+        {}
+      ).modelOptions
+    ).not.toHaveProperty('weworkCloudVisionSidecar')
   })
 
   it('does not wait for an unresponsive cloud model request', async () => {

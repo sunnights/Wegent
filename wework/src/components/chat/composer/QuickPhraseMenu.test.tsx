@@ -21,13 +21,9 @@ vi.mock('@/hooks/useQuickPhrases', () => ({
   ],
 }))
 
-vi.mock('@tauri-apps/api/core', () => ({
-  convertFileSrc: (path: string) => `asset://localhost/${path}`,
-}))
-
 vi.mock('@/lib/navigation', () => ({ navigateTo: vi.fn() }))
 
-vi.mock('@/tauri/appPreferences', () => ({
+vi.mock('@/desktop/appPreferences', () => ({
   getAppPreferences: appPreferenceMocks.get,
   updateAppPreferences: appPreferenceMocks.update,
 }))
@@ -69,6 +65,38 @@ describe('QuickPhraseMenu', () => {
     fireEvent.keyDown(search, { key: 'Enter' })
 
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'plan' }))
+  })
+
+  test('shows project phrases before global phrases and selects them independently', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuickPhraseMenu
+        projectPhrases={[
+          {
+            id: 'review-project',
+            title: '检查项目约束',
+            content: '检查这个项目的约束',
+            mode: 'normal',
+          },
+        ]}
+        onSelect={onSelect}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('quick-phrase-button'))
+
+    const projectPhrase = screen.getByTestId('project-quick-phrase-option-review-project')
+    const globalPhrase = screen.getByTestId('quick-phrase-option-summary')
+    expect(screen.getByText('项目快捷短语')).toBeInTheDocument()
+    expect(screen.getByText('全局快捷短语')).toBeInTheDocument()
+    expect(
+      projectPhrase.compareDocumentPosition(globalPhrase) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+
+    fireEvent.click(projectPhrase)
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'review-project', content: '检查这个项目的约束' })
+    )
   })
 
   test('renders attachment stashes in a horizontal tray with hover preview', () => {

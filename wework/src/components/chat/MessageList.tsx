@@ -49,7 +49,7 @@ import {
 } from '@/lib/attachments'
 import { openLocalFile } from '@/lib/local-terminal'
 import { getRecognizedLink } from '@/lib/link-preview'
-import { isTauriRuntime } from '@/lib/runtime-environment'
+import { isDesktopRuntime, isElectronRuntime } from '@/lib/runtime-environment'
 import { splitRuntimeUserMessage, visibleRuntimeUserMessage } from '@/lib/runtime-user-message'
 import { ComposerLinkChip } from './ComposerLinkChip'
 import { ComposerTextarea } from './composer/ComposerTextarea'
@@ -63,6 +63,7 @@ import { AssistantThinkingIndicator } from './AssistantThinkingIndicator'
 import { AttachmentImagePreview } from './AttachmentImagePreview'
 import { CodeCommentPreview } from './CodeCommentPreview'
 import { ToolBlocksDisplay } from './blocks/ToolBlocksDisplay'
+import { getFileEditDurationsBySourceBlock } from './blocks/fileEditDurations'
 import { getDurationText } from './blocks/processingDuration'
 import { usePersistentProcessingExpansion } from './blocks/processingExpansionState'
 import { isContextCompactionToolName, isGuidanceToolName } from './blocks/toolBlockKinds'
@@ -85,6 +86,7 @@ import {
   cacheConversationVirtualMeasurements,
   getConversationVirtualMeasurements,
 } from '@/features/workbench/runtimeConversationCache'
+import { getRuntimeMessageActiveThinking } from '@/features/workbench/runtimeThinking'
 
 interface MessageListProps {
   messages: WorkbenchMessage[]
@@ -238,7 +240,7 @@ export const MessageList = memo(function MessageList({
   const [layoutWidth, setLayoutWidth] = useState(0)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [submittingEditMessageId, setSubmittingEditMessageId] = useState<string | null>(null)
-  const isTauri = isTauriRuntime()
+  const isDesktop = isElectronRuntime()
   const visibleMessages = useMemo(() => messages.filter(shouldRenderMessage), [messages])
   const editableLastUserMessageId = useMemo(
     () =>
@@ -266,7 +268,7 @@ export const MessageList = memo(function MessageList({
   const listLayoutClass = className
     ? 'mx-auto flex min-w-0 flex-col gap-4 pb-2 pt-8'
     : 'mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-6 pb-2 pt-8'
-  const virtualMessages = isTauri && Boolean(scrollElementRef)
+  const virtualMessages = isDesktopRuntime() && Boolean(scrollElementRef)
   const virtualMeasurementKey = conversationKey == null ? null : String(conversationKey)
   const forcedVirtualMessageIndex = useMemo(
     () =>
@@ -450,7 +452,7 @@ export const MessageList = memo(function MessageList({
   }, [virtualMessages])
 
   useEffect(() => {
-    if (isTauri && (!onAddSelectionToConversation || !onAskSelectionInSidebar)) return
+    if (isDesktop && (!onAddSelectionToConversation || !onAskSelectionInSidebar)) return
 
     const updateSelectionState = (preserveCapturedSelection = false) => {
       const selection = document.getSelection?.()
@@ -466,7 +468,7 @@ export const MessageList = memo(function MessageList({
       const selectionTouchesList =
         isNodeInsideElement(selection.anchorNode, root) ||
         isNodeInsideElement(selection.focusNode, root)
-      setIsTextSelectionActive(!isTauri && selectionTouchesList)
+      setIsTextSelectionActive(!isDesktop && selectionTouchesList)
       if (!onAddSelectionToConversation || !onAskSelectionInSidebar) return
 
       const range = selection.getRangeAt(0)
@@ -529,7 +531,7 @@ export const MessageList = memo(function MessageList({
       window.removeEventListener('scroll', handleScroll, true)
       window.removeEventListener('blur', handleBlur)
     }
-  }, [conversationKey, isTauri, onAddSelectionToConversation, onAskSelectionInSidebar])
+  }, [conversationKey, isDesktop, onAddSelectionToConversation, onAskSelectionInSidebar])
 
   const applySelectionAction = (action: (text: string) => void) => {
     if (!textSelection) return
@@ -610,7 +612,7 @@ export const MessageList = memo(function MessageList({
           <article
             className={cn(
               'min-w-0',
-              !isTauri &&
+              !isDesktop &&
                 !disableContentVisibility &&
                 !isTextSelectionActive &&
                 '[content-visibility:auto]',
@@ -1947,24 +1949,6 @@ function getDisplayProcessingBlocks(
     })
 }
 
-function getLatestActiveThinkingContent(blocks: ProcessingBlock[] | undefined): string {
-  if (!blocks?.length) return ''
-
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index]
-    if (
-      block?.type === 'thinking' &&
-      block.status !== 'done' &&
-      block.status !== 'error' &&
-      block.content.trim()
-    ) {
-      return block.content
-    }
-  }
-
-  return ''
-}
-
 function getWebSearchToolBlocks(blocks: ProcessingBlock[]) {
   return blocks.filter(
     (block): block is Extract<ProcessingBlock, { type: 'tool' }> =>
@@ -1972,7 +1956,7 @@ function getWebSearchToolBlocks(blocks: ProcessingBlock[]) {
   )
 }
 
-function AssistantMessage({
+export function AssistantMessage({
   message,
   conversationKey,
   devices,
@@ -2038,13 +2022,15 @@ function AssistantMessage({
     () => getDisplayProcessingBlocks(message.blocks, isCancelled),
     [isCancelled, message.blocks]
   )
+  const fileEditDurationsBySourceBlock = useMemo(
+    () => getFileEditDurationsBySourceBlock(displayBlocks),
+    [displayBlocks]
+  )
   const processingSegments = splitProcessingBlocks(displayBlocks)
   const hasBlocks = displayBlocks.length > 0
   const hasVisibleContent = Boolean(visibleContent.trim())
   const isStreaming = !isCancelled && message.status === 'streaming'
-  const activeThinkingContent = isStreaming
-    ? (message.streamingThinkingContent ?? getLatestActiveThinkingContent(message.blocks))
-    : ''
+  const activeThinkingContent = isStreaming ? getRuntimeMessageActiveThinking(message) : ''
   const hasRunningBlocks = hasRunningProcessingBlocks(displayBlocks)
   const isAssistantRunning = isStreaming || hasRunningBlocks
   const canShowFinalArtifacts = !isAssistantRunning
@@ -2110,7 +2096,7 @@ function AssistantMessage({
         <ToolBlocksDisplay
           key={`${segment.kind}:${index}`}
           blocks={segment.blocks}
-          fileEditDurationBlocks={displayBlocks}
+          fileEditDurationsBySourceBlock={fileEditDurationsBySourceBlock}
           isStreaming={isStreaming}
           startedAt={getProcessingSummaryStartMs(message, segment.blocks, isStreaming)}
           forceExpanded={segment.kind === 'narrative'}
@@ -2167,7 +2153,7 @@ function AssistantMessage({
               <ToolBlocksDisplay
                 key={`${processingSegment.kind}:${processingIndex}`}
                 blocks={processingSegment.blocks}
-                fileEditDurationBlocks={displayBlocks}
+                fileEditDurationsBySourceBlock={fileEditDurationsBySourceBlock}
                 isStreaming={isStreaming}
                 startedAt={getProcessingSummaryStartMs(
                   message,

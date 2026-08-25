@@ -1,30 +1,35 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { getWeworkUpdateTarget } from './app-updater'
+import { checkForWeworkUpdate, getWeworkUpdateTarget } from './app-updater'
+
+vi.mock('./runtime-environment', () => ({
+  isElectronRuntime: () => true,
+}))
 
 function setUserAgent(userAgent: string) {
   vi.stubGlobal('navigator', { userAgent })
 }
 
 describe('getWeworkUpdateTarget', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
+  afterEach(() => vi.unstubAllGlobals())
 
   test('routes stable macOS updates to the stable Darwin manifest', () => {
     setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
-
     expect(getWeworkUpdateTarget('stable')).toBe('stable-darwin')
   })
 
   test('routes Beta Windows updates to the Beta Windows manifest', () => {
     setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
-
     expect(getWeworkUpdateTarget('beta')).toBe('beta-windows')
   })
 
   test('rejects Linux because desktop updates are unavailable', () => {
     setUserAgent('Mozilla/5.0 (X11; Linux x86_64)')
-
     expect(() => getWeworkUpdateTarget('stable')).toThrow()
+  })
+
+  test('reports that automatic updates are not implemented by Electron yet', async () => {
+    await expect(checkForWeworkUpdate('stable')).rejects.toThrow(
+      'Automatic updates are not yet available in the Electron desktop host.'
+    )
   })
 })

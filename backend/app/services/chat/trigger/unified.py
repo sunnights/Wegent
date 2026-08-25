@@ -34,9 +34,6 @@ from app.services.chat.external_knowledge_refs import (
     validate_external_knowledge_refs,
 )
 from app.services.context import context_service
-from app.services.knowledge.task_knowledge_base_service import (
-    task_knowledge_base_service,
-)
 from app.services.runtime_codex_model import (
     CODEX_RUNTIME_MODEL_ID,
     CODEX_RUNTIME_MODEL_NAME,
@@ -45,17 +42,21 @@ from app.services.user_runtime_config import (
     UserRuntimeConfigError,
     user_runtime_config_service,
 )
+from shared.codex_model_catalog import (
+    codex_catalog_model_id_for_upstream,
+    codex_catalog_model_id_from_config,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from app.api.ws.chat_namespace import ChatNamespace
+    from app.models.subtask_context import SubtaskContext
     from app.services.execution.emitters import ResultEmitter
     from shared.models.execution import ExecutionRequest
 
 logger = logging.getLogger(__name__)
 
-SELECTED_KB_PRELOAD_SKILL = "wegent-knowledge"
 KNOWLEDGE_ARTIFACT_SOURCE = "knowledge_artifact"
 CODEX_RUNTIME = "codex"
 RUNTIME_MODEL_TYPE = "runtime"
@@ -219,20 +220,44 @@ def _catalog_model_id_from_model_options(
     model_options: Optional[Dict[str, Any]],
 ) -> Optional[str]:
     """Extract catalog model id override from UI model options."""
-    if not model_options:
+    return codex_catalog_model_id_from_config(
+        model_options,
+        (
+            "weworkCloudModelCodexCatalogModelId",
+            "weworkCloudModelCatalogModelId",
+            "codex_catalog_model_id",
+            "codexCatalogModelId",
+        ),
+    )
+
+
+def _catalog_model_id_from_model_spec(
+    model_spec: Any,
+) -> Optional[str]:
+    """Resolve a catalog ID from non-secret fields in a Model spec."""
+    if not isinstance(model_spec, dict):
         return None
-    catalog_id = (
-        model_options.get("weworkCloudModelCodexCatalogModelId")
-        or model_options.get("weworkCloudModelCatalogModelId")
-        or model_options.get("codex_catalog_model_id")
-        or model_options.get("codexCatalogModelId")
+    model_config = model_spec.get("modelConfig")
+    if not isinstance(model_config, dict):
+        return None
+    env = model_config.get("env")
+    if not isinstance(env, dict):
+        return None
+    explicit_catalog_model_id = _catalog_model_id_from_model_options(env)
+    if explicit_catalog_model_id:
+        return explicit_catalog_model_id
+    upstream_api_format = _canonical_codex_upstream_api_format(
+        str(
+            model_spec.get("apiFormat")
+            or model_config.get("apiFormat")
+            or model_spec.get("protocol")
+            or model_config.get("protocol")
+            or ""
+        )
     )
-    result = (
-        catalog_id.strip()
-        if isinstance(catalog_id, str) and catalog_id.strip()
-        else None
+    return codex_catalog_model_id_for_upstream(
+        env.get("model_id") or env.get("modelId"), upstream_api_format
     )
-    return result
 
 
 def _should_ignore_unavailable_task_model_override(payload: Any) -> bool:
@@ -335,6 +360,10 @@ def _build_codex_runtime_model_config(
                     resolved_config["temperature"] = full_config["temperature"]
                 if full_config.get("think_config"):
                     resolved_config["think_config"] = dict(full_config["think_config"])
+                if full_config.get("codex_catalog_model_id"):
+                    resolved_config["codex_catalog_model_id"] = str(
+                        full_config["codex_catalog_model_id"]
+                    )
                 # Upstream wire format mirrors the App's
                 # getCloudModelUpstreamApiFormat inference: claude-family
                 # models go through the Anthropic Messages protocol instead of
@@ -387,8 +416,16 @@ def _build_codex_runtime_model_config(
         resolved_config["model_provider"] = str(provider_id)
     if provider_name:
         resolved_config["provider_name"] = str(provider_name)
-    if catalog_model_id:
-        resolved_config["codex_catalog_model_id"] = catalog_model_id
+    effective_catalog_model_id = (
+        catalog_model_id
+        or resolved_config.get("codex_catalog_model_id")
+        or codex_catalog_model_id_for_upstream(
+            resolved_config.get("model_id"),
+            resolved_config.get("upstream_api_format"),
+        )
+    )
+    if effective_catalog_model_id:
+        resolved_config["codex_catalog_model_id"] = effective_catalog_model_id
     return resolved_config
 
 
@@ -489,7 +526,9 @@ def _build_cloud_gateway_model_config(
         {"sub": creator.user_name, "user_id": creator.id},
         expires_delta=30,
     )
-    return {
+    model_spec = kind.json.get("spec") if isinstance(kind.json, dict) else None
+    catalog_model_id = _catalog_model_id_from_model_spec(model_spec)
+    config = {
         "model": "openai",
         "model_id": model_name,
         "api_format": "responses",
@@ -506,6 +545,9 @@ def _build_cloud_gateway_model_config(
         },
         "runtime_config": {"codex": {"use_user_config": False, "configured": True}},
     }
+    if catalog_model_id:
+        config["codex_catalog_model_id"] = catalog_model_id
+    return config
 
 
 def build_wework_runtime_model_config(
@@ -530,16 +572,15 @@ def build_wework_runtime_model_config(
     )
     if gateway_config is None:
         return resolved
-    upstream_model_id = str(resolved.get("model_id") or "").lower()
-    inferred_catalog_model_id = (
-        "wework-kimi-k2-7" if "kimi-k2.7" in upstream_model_id else None
+    resolved_catalog_model_id = resolved.get(
+        "codex_catalog_model_id"
+    ) or codex_catalog_model_id_for_upstream(
+        resolved.get("model_id"), resolved.get("upstream_api_format")
     )
-    gateway_config.setdefault(
-        "codex_catalog_model_id",
-        resolved.get("codex_catalog_model_id")
-        or inferred_catalog_model_id
-        or "wework-gpt-5.6-sol",
-    )
+    if resolved_catalog_model_id:
+        gateway_config["codex_catalog_model_id"] = resolved_catalog_model_id
+    else:
+        gateway_config.setdefault("codex_catalog_model_id", "wework-gpt-5.6-sol")
     gateway_config["codex_responses_compat_proxy"] = True
     return gateway_config
 
@@ -617,32 +658,6 @@ def _build_executor_attachment_payload(context: Any) -> dict[str, Any]:
         "file_size": context.file_size,
         "subtask_id": context.subtask_id,
     }
-
-
-def _ensure_selected_kb_skill_priority(request: "ExecutionRequest") -> None:
-    """Ensure selected-KB requests both preload and prioritize the KB skill."""
-    if not request.knowledge_base_ids or not request.is_user_selected_kb:
-        return
-
-    preload_skills = list(request.preload_skills or [])
-    if SELECTED_KB_PRELOAD_SKILL not in preload_skills:
-        preload_skills.append(SELECTED_KB_PRELOAD_SKILL)
-        request.preload_skills = preload_skills
-        logger.info(
-            "[ai_trigger_unified] Added preload skill '%s' for selected KBs: %s",
-            SELECTED_KB_PRELOAD_SKILL,
-            request.knowledge_base_ids,
-        )
-
-    user_selected_skills = list(request.user_selected_skills or [])
-    if SELECTED_KB_PRELOAD_SKILL not in user_selected_skills:
-        user_selected_skills.append(SELECTED_KB_PRELOAD_SKILL)
-        request.user_selected_skills = user_selected_skills
-        logger.info(
-            "[ai_trigger_unified] Added user-selected skill '%s' for selected KBs: %s",
-            SELECTED_KB_PRELOAD_SKILL,
-            request.knowledge_base_ids,
-        )
 
 
 async def trigger_ai_response_unified(
@@ -924,12 +939,6 @@ async def build_execution_request(
         # Task spec is the runtime source of truth. Message-level external
         # contexts are materialized into Task.spec before execution is built.
         task_refs = extract_task_external_knowledge_refs(task)
-        if task_refs and not internal_knowledge_only:
-            validate_external_knowledge_refs(
-                task_refs,
-                binding_level="conversation",
-            )
-            request.external_knowledge_refs = task_refs
 
         # Merge reasoning config from API/model selection into model_config.
         # Priority: explicit API reasoning_config > UI model_options > model think_config.
@@ -1105,40 +1114,70 @@ async def build_execution_request(
         context_subtask_id = (
             user_subtask_id if user_subtask_id else processed_subtask_id
         )
-        resolved_knowledge_base_names: dict[int, str] = {}
+        current_contexts = []
         if context_subtask_id:
-            preload_selected_kb_skill = (
-                task_labels.get("source") != KNOWLEDGE_ARTIFACT_SOURCE
+            current_contexts = context_service.get_by_subtask(db, context_subtask_id)
+
+        inherited_external_refs = [] if internal_knowledge_only else list(task_refs)
+        if inherited_external_refs:
+            validate_external_knowledge_refs(
+                inherited_external_refs,
+                binding_level="conversation",
             )
+        request.external_knowledge_refs = inherited_external_refs
+
+        from app.services.chat.selected_knowledge import (
+            SUPPORTED_PROVIDER_NATIVE_SHELLS,
+            activate_provider_native_knowledge,
+            apply_selected_knowledge_context,
+            build_inherited_selected_knowledge_refs,
+            build_selected_knowledge_context,
+            validate_explicit_knowledge_contexts,
+        )
+
+        is_knowledge_artifact = task_labels.get("source") == KNOWLEDGE_ARTIFACT_SOURCE
+        supports_provider_native = (
+            not is_knowledge_artifact
+            and _request_shell_type(request) in SUPPORTED_PROVIDER_NATIVE_SHELLS
+        )
+        selected_knowledge_context = None
+        if supports_provider_native:
+            inherited_refs = build_inherited_selected_knowledge_refs(
+                db,
+                task,
+                user.id,
+                external_refs=inherited_external_refs,
+            )
+            selected_knowledge_context = build_selected_knowledge_context(
+                db,
+                request,
+                task,
+                current_contexts=current_contexts,
+                inherited_refs=inherited_refs,
+                user_id=user.id,
+            )
+        elif not is_knowledge_artifact:
+            validate_explicit_knowledge_contexts(current_contexts)
+        should_apply_provider_native = bool(
+            selected_knowledge_context and selected_knowledge_context.refs
+        )
+
+        if context_subtask_id:
             request = await _process_contexts(
                 db,
                 request,
                 context_subtask_id,
                 user.id,
-                preload_selected_kb_skill=preload_selected_kb_skill,
+                prepare_provider_native_knowledge=should_apply_provider_native,
+                current_contexts=current_contexts,
             )
-            resolved_knowledge_base_names = (
-                task_knowledge_base_service.get_knowledge_base_display_names_by_ids(
-                    db,
-                    list(request.knowledge_base_ids or []),
-                )
-            )
-
-        from app.services.chat.selected_knowledge import (
-            activate_provider_native_knowledge,
-            apply_selected_knowledge_context,
-        )
-
         provider_skills = []
-        if (
-            not internal_knowledge_only
-            and task_labels.get("source") != KNOWLEDGE_ARTIFACT_SOURCE
-        ):
+        if should_apply_provider_native:
             provider_skills = apply_selected_knowledge_context(
                 db,
                 request,
                 task,
-                resolved_knowledge_base_names=resolved_knowledge_base_names,
+                context=selected_knowledge_context,
             )
         unresolved_provider_skills = [
             skill_name
@@ -1171,7 +1210,8 @@ async def _process_contexts(
     user_subtask_id: int,
     user_id: int,
     *,
-    preload_selected_kb_skill: bool = True,
+    prepare_provider_native_knowledge: bool = False,
+    current_contexts: Optional[List["SubtaskContext"]] = None,
 ) -> "ExecutionRequest":
     """Process contexts (attachments, knowledge bases, etc.) for the request.
 
@@ -1180,8 +1220,8 @@ async def _process_contexts(
         request: ExecutionRequest to enhance
         user_subtask_id: User subtask ID for context retrieval
         user_id: User ID for context retrieval
-        preload_selected_kb_skill: Whether a selected knowledge base should preload
-            the knowledge-management skill (default: True)
+        prepare_provider_native_knowledge: Whether the resolved knowledge context
+            should suppress the legacy KB prompt.
 
     Returns:
         Enhanced ExecutionRequest with context information
@@ -1204,6 +1244,7 @@ async def _process_contexts(
         context_window=model_context_window,
         model_config=request.model_config,
         inline_attachment_content=inline_attachment_content,
+        contexts=current_contexts,
     )
 
     # Update request with all processed context results.
@@ -1211,15 +1252,6 @@ async def _process_contexts(
     # computed inside _prepare_kb_tools_from_contexts and surfaced here - no extra
     # DB queries needed.
     request.prompt = ctx.final_message
-    from app.services.chat.selected_knowledge import (
-        SUPPORTED_PROVIDER_NATIVE_SHELLS,
-    )
-
-    prepare_provider_native_knowledge = bool(
-        ctx.kb.knowledge_base_ids
-        and preload_selected_kb_skill
-        and _request_shell_type(request) in SUPPORTED_PROVIDER_NATIVE_SHELLS
-    )
     request.system_prompt = (
         base_system_prompt
         if prepare_provider_native_knowledge
@@ -1248,9 +1280,6 @@ async def _process_contexts(
         request.kb_tool_access_mode = ctx.kb.kb_tool_access_mode
         if ctx.kb.document_ids and not ctx.kb.knowledge_base_scopes:
             request.document_ids = ctx.kb.document_ids
-        if prepare_provider_native_knowledge:
-            _ensure_selected_kb_skill_priority(request)
-
     logger.info(
         "[ai_trigger_unified] Context processing completed: "
         "user_subtask_id=%d, knowledge_base_ids=%s, table_contexts_count=%d, "

@@ -31,7 +31,8 @@ use super::{
     },
     util::{
         extract_text, is_codex_context_compaction_item_type, is_completed_plan_item, item_id,
-        item_type, now_ms, raw_string_field, string_field,
+        item_type, normalize_runtime_goal_timestamps, now_ms, raw_string_field, runtime_task_title,
+        string_field,
     },
 };
 
@@ -144,6 +145,14 @@ pub(crate) fn emit_response_event(
     if let Some(source) = request.extra.get("source") {
         if let Some(payload_object) = payload.get_mut("payload").and_then(Value::as_object_mut) {
             payload_object.insert("source".to_owned(), source.clone());
+        }
+    }
+    if terminal {
+        if let Some(title) = runtime_task_title(request) {
+            if let Some(payload_object) = payload.get_mut("payload").and_then(Value::as_object_mut)
+            {
+                payload_object.insert("taskTitle".to_owned(), Value::String(title));
+            }
         }
     }
     if let Some(generated_user_message) = request.extra.get("runtime_generated_user_message") {
@@ -481,11 +490,14 @@ impl CodexNotificationEventMapper {
                 emit_goal_continuation_event(&emit_context, notification.params, "settled");
             }
             "thread/goal/updated" => {
-                self.goal_status = notification
+                let goal = notification
                     .params
                     .get("goal")
-                    .and_then(|goal| string_field(goal, "status"))
-                    .map(|status| status.to_ascii_lowercase());
+                    .cloned()
+                    .map(normalize_runtime_goal_timestamps)
+                    .unwrap_or(Value::Null);
+                self.goal_status =
+                    string_field(&goal, "status").map(|status| status.to_ascii_lowercase());
                 emit_response_event(
                     event_tx,
                     device_id,
@@ -497,7 +509,7 @@ impl CodexNotificationEventMapper {
                             .or_else(|| string_field(notification.params, "thread_id")),
                         "turn_id": string_field(notification.params, "turnId")
                             .or_else(|| string_field(notification.params, "turn_id")),
-                        "goal": notification.params.get("goal").cloned().unwrap_or(Value::Null),
+                        "goal": goal,
                     }),
                 );
             }
@@ -2142,6 +2154,42 @@ mod tests {
     }
 
     #[test]
+    fn emits_runtime_task_title_only_with_terminal_response_events() {
+        let (event_tx, mut event_rx) = broadcast::channel(2);
+        let request = ExecutionRequest {
+            task_id: "task-1".to_owned(),
+            subtask_id: "codex-turn-1".to_owned(),
+            extra: Map::from_iter([(
+                "runtimeTaskTitle".to_owned(),
+                json!("Analyze production issue"),
+            )]),
+            ..ExecutionRequest::default()
+        };
+
+        emit_response_event(
+            &Some(event_tx.clone()),
+            "device-1",
+            "response.output_text.delta",
+            "local-task-1",
+            &request,
+            json!({"delta": "working"}),
+        );
+        emit_response_event(
+            &Some(event_tx),
+            "device-1",
+            "response.completed",
+            "local-task-1",
+            &request,
+            json!({"value": "done"}),
+        );
+
+        let progress = event_rx.try_recv().expect("progress event");
+        let terminal = event_rx.try_recv().expect("terminal event");
+        assert!(progress["payload"].get("taskTitle").is_none());
+        assert_eq!(terminal["payload"]["taskTitle"], "Analyze production issue");
+    }
+
+    #[test]
     fn emits_one_transient_block_while_codex_reconnects() {
         let (event_tx, mut event_rx) = broadcast::channel(4);
         let request = ExecutionRequest {
@@ -3729,11 +3777,23 @@ mod tests {
                 "method": "thread/goal/updated",
                 "params": {
                     "threadId": "thread-root",
-                    "goal": { "status": "active" }
+                    "goal": {
+                        "status": "active",
+                        "createdAt": 1_787_636_000,
+                        "updatedAt": 1_787_636_001
+                    }
                 }
             }),
         );
-        let _ = event_rx.try_recv().expect("goal event should be emitted");
+        let goal = event_rx.try_recv().expect("goal event should be emitted");
+        assert_eq!(
+            goal["payload"]["data"]["goal"]["createdAt"],
+            1_787_636_000_000_i64
+        );
+        assert_eq!(
+            goal["payload"]["data"]["goal"]["updatedAt"],
+            1_787_636_001_000_i64
+        );
 
         mapper.map(
             &Some(event_tx.clone()),

@@ -11,6 +11,8 @@ const PROMPTS = {
   first: 'QUEUE_1_RUNNING_WEWORK_DESKTOP_E2E',
   second: 'QUEUE_2_WAITING_WEWORK_DESKTOP_E2E',
   third: 'QUEUE_3_WAITING_WEWORK_DESKTOP_E2E',
+  fourth: 'QUEUE_4_RUNNING_BEFORE_LIMIT_INCREASE_WEWORK_DESKTOP_E2E',
+  fifth: 'QUEUE_5_STARTS_AFTER_LIMIT_INCREASE_WEWORK_DESKTOP_E2E',
 }
 
 function sse(events) {
@@ -72,8 +74,17 @@ async function pathExists(path) {
   }
 }
 
-async function sendNewTask(control, knownRows, prompt, timeoutMs, executionMode = 'local_path') {
-  await control.command('click', '[data-testid="project-new-conversation-button"]')
+async function sendNewTask(
+  control,
+  newConversationSelector,
+  knownRows,
+  prompt,
+  timeoutMs,
+  executionMode = 'local_path'
+) {
+  await control.command('clickWhenEnabled', newConversationSelector, {
+    timeoutMs,
+  })
   await control.command('waitFor', COMPOSER_SELECTOR)
   await control.command('waitFor', '[data-testid="execution-mode-button"]')
   await control.command('click', '[data-testid="execution-mode-button"]')
@@ -253,12 +264,29 @@ export function createDesktopScenario({ captureScreenshot, uiTimeoutMs, workspac
       await control.command('click', '[data-testid="settings-back-button"]')
       await createSingleRootLocalProject(control, workspacePath, 'runtime-task-queue')
       await control.command('waitFor', COMPOSER_SELECTOR, { timeoutMs: uiTimeoutMs })
+      const createdProjectSnapshot = JSON.parse(
+        await control.command('getWorkbenchDebugSnapshot', 'body')
+      )
+      const createdProjectId = createdProjectSnapshot.workbench?.currentProject?.id
+      assert.ok(createdProjectId, 'The created queue project did not become the active project')
+      const newConversationSelector =
+        `[data-testid="project-row-${createdProjectId}"] ` +
+        '[data-testid="project-new-conversation-button"]'
+      await control.command('waitFor', newConversationSelector, {
+        timeoutMs: uiTimeoutMs,
+      })
 
       const initialSnapshot = JSON.parse(await control.command('snapshot', 'body'))
       const knownRows = new Set(
         initialSnapshot.testIds.filter(testId => testId.startsWith('runtime-local-task-row-'))
       )
-      const first = await sendNewTask(control, knownRows, PROMPTS.first, uiTimeoutMs)
+      const first = await sendNewTask(
+        control,
+        newConversationSelector,
+        knownRows,
+        PROMPTS.first,
+        uiTimeoutMs
+      )
       await waitForRequestCount(requests, 1, uiTimeoutMs)
       await control.command(
         'waitFor',
@@ -270,6 +298,7 @@ export function createDesktopScenario({ captureScreenshot, uiTimeoutMs, workspac
 
       const second = await sendNewTask(
         control,
+        newConversationSelector,
         knownRows,
         PROMPTS.second,
         uiTimeoutMs,
@@ -311,7 +340,13 @@ export function createDesktopScenario({ captureScreenshot, uiTimeoutMs, workspac
         false,
         'The queued task created its worktree before a concurrency slot was available'
       )
-      const third = await sendNewTask(control, knownRows, PROMPTS.third, uiTimeoutMs)
+      const third = await sendNewTask(
+        control,
+        newConversationSelector,
+        knownRows,
+        PROMPTS.third,
+        uiTimeoutMs
+      )
       await control.command(
         'waitFor',
         `${sidebarSelector} [data-testid="runtime-local-task-queued-${third.taskId}"]`,
@@ -445,6 +480,64 @@ export function createDesktopScenario({ captureScreenshot, uiTimeoutMs, workspac
       )
       await prepareScreenshot(control)
       await captureScreenshot(control, 'runtime-queue-05-drained-in-order.png', 'body')
+
+      const fourth = await sendNewTask(
+        control,
+        newConversationSelector,
+        knownRows,
+        PROMPTS.fourth,
+        uiTimeoutMs
+      )
+      await waitForRequestCount(requests, 4, uiTimeoutMs)
+      await control.command(
+        'waitFor',
+        `${sidebarSelector} [data-testid="runtime-local-task-running-${fourth.taskId}"]`,
+        {
+          timeoutMs: uiTimeoutMs,
+          visible: sidebarVisible,
+        }
+      )
+      const fifth = await sendNewTask(
+        control,
+        newConversationSelector,
+        knownRows,
+        PROMPTS.fifth,
+        uiTimeoutMs
+      )
+      await control.command(
+        'waitFor',
+        `${sidebarSelector} [data-testid="runtime-local-task-queued-${fifth.taskId}"]`,
+        {
+          timeoutMs: uiTimeoutMs,
+          visible: sidebarVisible,
+        }
+      )
+      assert.equal(requests.length, 4, 'The regression task did not wait at concurrency one')
+
+      await control.command('click', '[data-testid="settings-button"]')
+      await control.command('click', '[data-testid="settings-menu-button"]')
+      await control.command('waitFor', '[data-testid="general-max-concurrent-tasks-select"]', {
+        timeoutMs: uiTimeoutMs,
+      })
+      await control.command('select', '[data-testid="general-max-concurrent-tasks-select"]', {
+        value: '2',
+      })
+      await waitForRequestCount(requests, 5, uiTimeoutMs)
+      await control.command('click', '[data-testid="settings-back-button"]')
+      const { requireVisible: refreshedSidebarVisible, sidebarSelector: refreshedSidebarSelector } =
+        await ensureRuntimeProjectExpanded(control, uiTimeoutMs)
+      await control.command(
+        'waitFor',
+        `${refreshedSidebarSelector} [data-testid="runtime-local-task-running-${fifth.taskId}"]`,
+        {
+          timeoutMs: uiTimeoutMs,
+          visible: refreshedSidebarVisible,
+        }
+      )
+      await prepareScreenshot(control)
+      await captureScreenshot(control, 'runtime-queue-06-limit-increase-drained.png', 'body')
+      releases.get(PROMPTS.fourth)?.()
+      releases.get(PROMPTS.fifth)?.()
       active = false
     },
 

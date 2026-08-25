@@ -1,5 +1,4 @@
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { getAttachmentImageUrl } from '@/lib/attachments'
+import { isElectronRuntime } from '@/lib/runtime-environment'
 
 const ATTACHMENT_DOWNLOAD_PATH_PATTERN = /\/(?:api\/)?attachments\/(\d+)\/download(?:[?#].*)?$/
 
@@ -15,7 +14,6 @@ export type MarkdownLinkTarget =
     }
 
 const HTML_FILE_PATTERN = /\.(?:html?|xhtml)$/i
-const LOCAL_TAURI_PATH_PREFIXES = ['/Users/', '/Volumes/', '/private/', '/tmp/', '/var/']
 
 // Assistant responses frequently reference repository files with relative or
 // absolute filesystem paths. Rendering those as plain anchors makes the browser
@@ -41,10 +39,6 @@ export function classifyMarkdownLink(href?: string): MarkdownLinkTarget {
       return { kind: 'none' }
     }
   }
-  const localTauriPath = localPathFromTauriUrl(value)
-  if (localTauriPath) {
-    return { kind: 'file', ...splitMarkdownFileLineSuffix(localTauriPath) }
-  }
   if (value.startsWith('file://')) {
     return { kind: 'file', ...splitMarkdownFileLineSuffix(localPathFromMarkdownImageSrc(value)) }
   }
@@ -57,13 +51,17 @@ export function isHtmlFilePath(path: string): boolean {
 }
 
 export function localHtmlBrowserUrl(path: string): string | null {
-  if (!isHtmlFilePath(path) || typeof convertFileSrc !== 'function') return null
+  if (!isHtmlFilePath(path)) return null
+  return isElectronRuntime() ? desktopFileUrl(path) : null
+}
 
-  try {
-    return convertFileSrc(path)
-  } catch {
-    return null
-  }
+export function desktopFileUrl(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const encoded = normalized
+    .split('/')
+    .map(segment => encodeURIComponent(segment).replace(/%3A/gi, ':'))
+    .join('/')
+  return `file://${encoded.startsWith('/') ? '' : '/'}${encoded}`
 }
 
 export function splitMarkdownFileLineSuffix(path: string): {
@@ -90,13 +88,7 @@ export function resolveDirectMarkdownImageSrc(src: string): string | null {
   if (!isLocalImagePath(src)) return src
 
   const localPath = localPathFromMarkdownImageSrc(src)
-  if (typeof convertFileSrc !== 'function') return null
-
-  try {
-    return convertFileSrc(localPath)
-  } catch {
-    return null
-  }
+  return isElectronRuntime() ? desktopFileUrl(localPath) : null
 }
 
 export function localPathFromMarkdownImageSrc(src: string): string {
@@ -110,22 +102,7 @@ export function localPathFromMarkdownImageSrc(src: string): string {
   }
 }
 
-function localPathFromTauriUrl(value: string): string | null {
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'tauri:' || url.hostname !== 'localhost') return null
-
-    const pathname = decodeURIComponent(url.pathname)
-    if (LOCAL_TAURI_PATH_PREFIXES.some(prefix => pathname.startsWith(prefix))) {
-      return pathname
-    }
-    return /^\/[a-zA-Z]:\//.test(pathname) ? pathname.slice(1) : null
-  } catch {
-    return null
-  }
-}
-
-function getAttachmentDownloadId(src: string): number | null {
+export function getAuthenticatedAttachmentId(src: string): number | null {
   try {
     const url = new URL(src)
     const match = url.pathname.match(ATTACHMENT_DOWNLOAD_PATH_PATTERN)
@@ -137,15 +114,7 @@ function getAttachmentDownloadId(src: string): number | null {
 }
 
 export function isAuthenticatedAttachmentImageSrc(src: string): boolean {
-  return getAttachmentDownloadId(src) !== null
-}
-
-export function getAuthenticatedImageFetchUrl(src: string): string {
-  if (src.startsWith('/api/')) return src
-  if (/^https?:\/\//i.test(src)) return src
-
-  const attachmentId = getAttachmentDownloadId(src)
-  return attachmentId === null ? src : getAttachmentImageUrl(attachmentId)
+  return getAuthenticatedAttachmentId(src) !== null
 }
 
 function isLocalImagePath(src: string): boolean {

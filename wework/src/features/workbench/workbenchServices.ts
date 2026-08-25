@@ -26,11 +26,12 @@ import { createTaskApi } from '@/api/tasks'
 import { createTeamApi } from '@/api/teams'
 import { createUserApi } from '@/api/users'
 import { getRuntimeConfig } from '@/config/runtime'
-import { isTauriRuntime } from '@/lib/runtime-environment'
+import { isDesktopRuntime } from '@/lib/runtime-environment'
 import { isLocalFirstAppRuntime } from '@/lib/runtime-mode'
 import type { RemoteTerminalClientFactory } from '@/lib/remote-terminal-socket'
 import { createChatStream } from '@/stream/chatStream'
 import type { Attachment, ProjectDeviceSessionResponse, User } from '@/types/api'
+import type { ModelOptions, ModelType } from '@/types/api'
 import type { DeviceSessionResponse } from '@/types/devices'
 import type {
   Automation,
@@ -147,6 +148,7 @@ export interface WorkbenchServices {
   attachmentApi?: {
     uploadAttachment: (file: File, onProgress?: (progress: number) => void) => Promise<Attachment>
     deleteAttachment?: (attachmentId: number) => Promise<void>
+    fetchAttachmentBlob?: (attachmentId: number) => Promise<Blob>
     uploadLocalAttachmentToCloud?: (attachment: Attachment) => Promise<Attachment>
   }
   executorClient?: ExecutorClient
@@ -165,8 +167,18 @@ export interface WorkbenchServices {
       option: LocalHarnessModelOption | null
     ) => Promise<LocalHarnessModelLaunchConfig | null>
     unregisterProxy: (token: string) => Promise<void>
+    unregisterContext: (token: string) => Promise<void>
   }
   workspaceSessionApi?: WorkspaceSessionApi
+  branchNameApi?: {
+    generateBranchName: (data: {
+      sourceText: string
+      deviceId?: string | null
+      modelId: string
+      modelType?: ModelType | null
+      modelOptions?: ModelOptions
+    }) => Promise<string>
+  }
   chatStream: ReturnType<typeof createChatStream>
   cloudBackgroundApi?: {
     listTeams?: ReturnType<typeof createTeamApi>['listTeams']
@@ -238,7 +250,7 @@ export function createDefaultWorkbenchServices(
   }
 
   const cloudServices = createBackendWorkbenchServices()
-  if (!isTauriRuntime()) return cloudServices
+  if (!isDesktopRuntime()) return cloudServices
 
   const localServices = createLocalAppServices({ user: cloudConnection?.user })
   const cloudProjectSpaceApi = createCloudProjectSpaceApi(cloudServices.deliveryApi!)

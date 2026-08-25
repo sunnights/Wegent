@@ -4,13 +4,17 @@ import {
   Globe2,
   LayoutDashboard,
   ListChecks,
+  Loader2,
   MessageCircle,
+  PanelRight,
   Plus,
+  Puzzle,
+  RefreshCw,
   SquareTerminal,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ComponentType, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import {
   FileChangesReviewPanel,
@@ -21,6 +25,7 @@ import { CentralHarnessTerminal } from '@/components/layout/CentralHarnessTermin
 import type { LocalHarnessWorkbenchSession } from '@/components/layout/localHarnessWorkbench'
 import { MacOSTitleBarDragRegion } from '@/components/layout/MacOSTitleBarDragRegion'
 import { TitlebarRightPanelPortal } from '@/components/topnav/TitlebarActionsPortal'
+import { SmartAppPluginDialog } from '@/features/harness-apps/SmartAppPluginDialog'
 import type { WorkspaceSessionApi } from '@/features/workbench/workbenchServices'
 import { useTranslation } from '@/hooks/useTranslation'
 import type {
@@ -30,9 +35,9 @@ import type {
   WorkspaceTarget,
 } from '@/types/workspace-files'
 import type { BrowserAnnotationCommand, BrowserAnnotationScope } from '@/types/browser-annotation'
-import { isTauriRuntime } from '@/lib/runtime-environment'
+import { isDesktopRuntime } from '@/lib/runtime-environment'
 import { getPlatform } from '@/lib/platform'
-import type { EmbeddedBrowserOpenRequest } from '@/lib/embedded-browser'
+import { reloadEmbeddedBrowser, type EmbeddedBrowserOpenRequest } from '@/lib/embedded-browser'
 import { cn } from '@/lib/utils'
 import type { DeviceInfo, ProjectWithTasks, RuntimeTaskAddress } from '@/types/api'
 import { isEditableShortcutTarget } from '@/lib/keybindings'
@@ -41,6 +46,18 @@ import { WorkspaceAddMenu, type WorkspaceAddMenuItem } from './WorkspaceAddMenu'
 import { WorkspaceBrowserPanel } from './WorkspaceBrowserPanelContainer'
 import { WorkspacePanelCards } from './WorkspacePanelCards'
 import { TemporaryChatPanel } from './TemporaryChatPanel'
+import { DshSidebarExtensionPanel } from './DshSidebarExtensionPanel'
+import {
+  resolveRightWorkspaceExtensionDescriptor,
+  rightWorkspaceBetterSidebar,
+  isRightWorkspaceExtensionTab,
+  isWeworkWorkspaceSidebarTabAvailable,
+  titleOfWeworkWorkspaceSidebarTab,
+  type WeworkWorkspaceScope,
+  type WeworkWorkspaceSidebarTabDescriptor,
+  type RightWorkspaceExtensionTab,
+  type RightWorkspaceExtensionTabState,
+} from './rightWorkspaceSidebarRegistry'
 
 function getRightWorkspaceShortcuts(platform: ReturnType<typeof getPlatform>) {
   if (platform === 'win') {
@@ -72,6 +89,7 @@ export type RightWorkspacePanelTab =
   | RightWorkspaceBrowserTab
   | RightWorkspaceHarnessTab
   | RightWorkspaceTerminalTab
+  | RightWorkspaceExtensionTab
 export type RightWorkspacePanelView = 'launcher' | RightWorkspacePanelTab
 
 function isRightWorkspaceChatTab(tab: RightWorkspacePanelView): tab is RightWorkspaceChatTab {
@@ -114,8 +132,16 @@ export interface RightWorkspaceBrowserState {
   browserSessionId: string
   title: string | null
   faviconUrl: string | null
+  isLoading: boolean
   hasActiveDownload: boolean
   openRequest: EmbeddedBrowserOpenRequest | null
+  developmentPreview?: {
+    installationId: string
+    displayName: string
+    workspaceTabId?: string
+    status: 'starting' | 'ready' | 'reloading' | 'error'
+    error?: string
+  }
 }
 
 interface RightWorkspaceReviewState {
@@ -156,11 +182,22 @@ interface RightWorkspacePanelProps {
   review: RightWorkspaceReviewState
   planContent?: string | null
   workItemPanel?: ReactNode
+  extensionTabs?: Partial<Record<RightWorkspaceExtensionTab, RightWorkspaceExtensionTabState>>
+  extensionScope: WeworkWorkspaceScope
   browserStates: Partial<Record<RightWorkspaceBrowserTab, RightWorkspaceBrowserState>>
   onBrowserStateChange: (
     tab: RightWorkspaceBrowserTab,
     update: Partial<RightWorkspaceBrowserState>
   ) => void
+  onReloadSmartAppDevelopmentPreview?: (
+    tab: RightWorkspaceBrowserTab,
+    installationId: string
+  ) => void
+  onAddSmartAppDevelopmentPlugin?: (
+    tab: RightWorkspaceBrowserTab,
+    installationId: string,
+    pluginSpec: string
+  ) => Promise<void>
   codeCommentCount?: number
   codeCommentContexts?: CodeCommentContext[]
   browserAnnotationCommand?: BrowserAnnotationCommand | null
@@ -231,6 +268,10 @@ function RightWorkspaceBrowserPanelSlot({
     (faviconUrl: string | null) => onBrowserStateChange(tab, { faviconUrl }),
     [onBrowserStateChange, tab]
   )
+  const handleLoadingChange = useCallback(
+    (isLoading: boolean) => onBrowserStateChange(tab, { isLoading }),
+    [onBrowserStateChange, tab]
+  )
   const handleTitleChange = useCallback(
     (title: string | null) => onBrowserStateChange(tab, { title }),
     [onBrowserStateChange, tab]
@@ -243,6 +284,7 @@ function RightWorkspaceBrowserPanelSlot({
   return (
     <WorkspaceBrowserPanel
       active={active}
+      hideToolbar={Boolean(state.developmentPreview)}
       label={state.label}
       browserTabId={tab}
       openRequest={state.openRequest}
@@ -254,9 +296,50 @@ function RightWorkspaceBrowserPanelSlot({
       onRemoveBrowserCodeComments={onRemoveBrowserCodeComments}
       onDownloadActivityChange={handleDownloadActivityChange}
       onFaviconChange={handleFaviconChange}
+      onLoadingChange={handleLoadingChange}
       onTitleChange={handleTitleChange}
       onNativeLabelChange={handleNativeLabelChange}
     />
+  )
+}
+
+function SmartAppDevelopmentPreviewState({
+  status,
+  error,
+}: {
+  status: 'starting' | 'reloading' | 'error'
+  error?: string | null
+}) {
+  const { t } = useTranslation('common')
+  const isError = status === 'error'
+  const message =
+    status === 'starting'
+      ? t('workbench.smart_app_preview_starting')
+      : status === 'reloading'
+        ? t('workbench.smart_app_preview_reloading')
+        : error || t('workbench.smart_app_preview_failed')
+
+  return (
+    <div
+      data-testid={`smart-app-development-preview-${status}`}
+      className="flex min-h-0 flex-1 items-center justify-center bg-background px-6 text-center"
+    >
+      <div className="flex max-w-sm flex-col items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
+          {isError ? (
+            <LayoutDashboard className="h-5 w-5" />
+          ) : (
+            <Loader2 className="h-5 w-5 animate-spin" />
+          )}
+        </div>
+        <div className="text-sm font-medium text-text-primary">{message}</div>
+        {!isError ? (
+          <div className="text-xs text-text-secondary">
+            {t('workbench.smart_app_preview_starting_hint')}
+          </div>
+        ) : null}
+      </div>
+    </div>
   )
 }
 
@@ -287,8 +370,12 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   review,
   planContent,
   workItemPanel,
+  extensionTabs = {},
+  extensionScope,
   browserStates,
   onBrowserStateChange,
+  onReloadSmartAppDevelopmentPreview,
+  onAddSmartAppDevelopmentPlugin,
   codeCommentCount = 0,
   codeCommentContexts = [],
   browserAnnotationCommand,
@@ -316,6 +403,16 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onChatAddressChange,
 }: RightWorkspacePanelProps) {
   const { t } = useTranslation('common')
+  const registeredExtensionTabs = useSyncExternalStore(
+    rightWorkspaceBetterSidebar.subscribe,
+    rightWorkspaceBetterSidebar.getTabs,
+    rightWorkspaceBetterSidebar.getTabs
+  )
+  const [pluginDialog, setPluginDialog] = useState<{
+    tab: RightWorkspaceBrowserTab
+    installationId: string
+    displayName: string
+  } | null>(null)
   const availableTabs = allowTemporaryChat
     ? openTabs
     : openTabs.filter(tab => !isRightWorkspaceChatTab(tab))
@@ -323,7 +420,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   const showTabs = visibleTabs.length > 0
   const platform = getPlatform()
   const renderTabsInTitlebar =
-    renderTabsInAppTitlebar && isTauriRuntime() && platform !== 'win' && visible && showTabs
+    renderTabsInAppTitlebar && isDesktopRuntime() && platform !== 'win' && visible && showTabs
   const harnessSessionsById = new Map(
     harnessSessions.map(session => [session.sessionId, session] as const)
   )
@@ -383,6 +480,27 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
 
   const getNewTabOptions = (): WorkspaceAddMenuItem[] => [
     ...workspaceActions,
+    ...registeredExtensionTabs
+      .filter(descriptor => !descriptor.hidden)
+      .sort((left, right) => (left.order ?? 100) - (right.order ?? 100))
+      .map(
+        (descriptor): WorkspaceAddMenuItem => ({
+          id: `wework-sidebar-extension:${descriptor.id}`,
+          testId: `right-workspace-extension-option-${descriptor.id}`,
+          icon: PanelRight,
+          label: titleOfWeworkWorkspaceSidebarTab(descriptor),
+          disabled: !isWeworkWorkspaceSidebarTabAvailable(
+            descriptor,
+            extensionScope,
+            rightWorkspaceBetterSidebar.getSnapshot().state ?? {
+              panelOpen: visible,
+              tabs: [],
+              activeTabId: null,
+            }
+          ),
+          onSelect: () => rightWorkspaceBetterSidebar.openTab({ type: descriptor.id }),
+        })
+      ),
     {
       id: 'review',
       testId: 'right-workspace-review-option',
@@ -438,7 +556,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
       data-testid="right-workspace-tabbar"
       role="tablist"
       className={cn(
-        'relative z-chrome flex shrink-0 items-center gap-1.5 pointer-events-auto',
+        'electron-titlebar-interactive-region relative z-chrome flex shrink-0 items-center gap-1.5 pointer-events-auto',
         renderTabsInTitlebar
           ? 'h-[38px] w-full bg-transparent pl-4 pr-2'
           : cn(
@@ -453,9 +571,30 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
           key={tab}
           tab={tab}
           active={activeView === tab}
-          label={getRightWorkspaceTabLabel(tab, t, browserStates, harnessSessionsById)}
-          icon={getRightWorkspaceTabIcon(tab)}
-          iconSrc={isRightWorkspaceBrowserTab(tab) ? browserStates[tab]?.faviconUrl : null}
+          label={getRightWorkspaceTabLabel(
+            tab,
+            t,
+            browserStates,
+            harnessSessionsById,
+            extensionTabs
+          )}
+          icon={
+            isRightWorkspaceBrowserTab(tab) && browserStates[tab]?.developmentPreview
+              ? LayoutDashboard
+              : getRightWorkspaceTabIcon(tab)
+          }
+          extensionState={isRightWorkspaceExtensionTab(tab) ? extensionTabs[tab] : undefined}
+          iconSrc={
+            isRightWorkspaceBrowserTab(tab) && !browserStates[tab]?.developmentPreview
+              ? browserStates[tab]?.faviconUrl
+              : null
+          }
+          loading={
+            isRightWorkspaceBrowserTab(tab) &&
+            (browserStates[tab]?.isLoading ||
+              browserStates[tab]?.developmentPreview?.status === 'starting' ||
+              browserStates[tab]?.developmentPreview?.status === 'reloading')
+          }
           onSelect={getTabSelectHandler(tab)}
           onClose={() => closeTab(tab)}
         />
@@ -510,6 +649,8 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             canBrowseFiles={canBrowseFiles}
             allowTemporaryChat={allowTemporaryChat}
             workspaceActions={workspaceActions}
+            extensionTabs={registeredExtensionTabs}
+            extensionScope={extensionScope}
             onSelectReview={onSelectReview}
             onSelectTerminal={onSelectTerminal}
             onSelectBrowser={onSelectBrowser}
@@ -607,23 +748,115 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
         {openTabs.filter(isRightWorkspaceBrowserTab).map(tab => {
           const browserState = browserStates[tab]
           if (!browserState) return null
+          const developmentPreview = browserState.developmentPreview
+          const browserPanel = (
+            <RightWorkspaceBrowserPanelSlot
+              tab={tab}
+              active={visible && activeView === tab}
+              state={browserState}
+              codeCommentCount={codeCommentCount}
+              codeCommentContexts={codeCommentContexts}
+              browserAnnotationCommand={browserAnnotationCommand}
+              onAddCodeComment={onAddCodeComment}
+              onReplaceBrowserCodeComments={onReplaceBrowserCodeComments}
+              onRemoveBrowserCodeComments={onRemoveBrowserCodeComments}
+              onBrowserStateChange={onBrowserStateChange}
+            />
+          )
           return (
             <div
               key={tab}
               className={cn('min-h-0 flex-1 flex-col', activeView === tab ? 'flex' : 'hidden')}
             >
-              <RightWorkspaceBrowserPanelSlot
-                tab={tab}
-                active={visible && activeView === tab}
-                state={browserState}
-                codeCommentCount={codeCommentCount}
-                codeCommentContexts={codeCommentContexts}
-                browserAnnotationCommand={browserAnnotationCommand}
-                onAddCodeComment={onAddCodeComment}
-                onReplaceBrowserCodeComments={onReplaceBrowserCodeComments}
-                onRemoveBrowserCodeComments={onRemoveBrowserCodeComments}
-                onBrowserStateChange={onBrowserStateChange}
-              />
+              {developmentPreview ? (
+                <section
+                  data-testid="smart-app-development-preview"
+                  className="flex min-h-0 flex-1 flex-col"
+                >
+                  <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-muted/30 px-3">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                        <LayoutDashboard className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0 truncate text-sm font-medium text-text-primary">
+                        {developmentPreview.displayName}
+                        <span className="ml-2 text-xs font-normal text-text-secondary">
+                          {developmentPreview.status === 'starting'
+                            ? t('workbench.smart_app_preview_starting')
+                            : developmentPreview.status === 'reloading'
+                              ? t('workbench.smart_app_preview_reloading')
+                              : developmentPreview.status === 'error'
+                                ? developmentPreview.error
+                                : t('workbench.smart_app_preview_ready')}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center justify-end gap-1">
+                      <button
+                        type="button"
+                        data-testid="smart-app-development-preview-add-plugins"
+                        disabled={developmentPreview.status !== 'ready'}
+                        onClick={() =>
+                          setPluginDialog({
+                            tab,
+                            installationId: developmentPreview.installationId,
+                            displayName: developmentPreview.displayName,
+                          })
+                        }
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-text-secondary transition-colors hover:bg-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Puzzle className="h-3.5 w-3.5" />
+                        {t('workbench.smart_app_preview_add_plugins')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="smart-app-development-preview-refresh"
+                        disabled={developmentPreview.status !== 'ready'}
+                        onClick={() => void reloadEmbeddedBrowser(browserState.label)}
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-text-secondary transition-colors hover:bg-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        {t('workbench.smart_app_preview_refresh')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="smart-app-development-preview-reload"
+                        disabled={
+                          developmentPreview.status === 'starting' ||
+                          developmentPreview.status === 'reloading'
+                        }
+                        onClick={() =>
+                          onReloadSmartAppDevelopmentPreview?.(
+                            tab,
+                            developmentPreview.installationId
+                          )
+                        }
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-text-primary transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          className={cn(
+                            'h-3.5 w-3.5',
+                            (developmentPreview.status === 'starting' ||
+                              developmentPreview.status === 'reloading') &&
+                              'animate-spin'
+                          )}
+                        />
+                        {t('workbench.smart_app_preview_reload')}
+                      </button>
+                    </div>
+                  </header>
+                  {developmentPreview.status === 'ready' ? (
+                    browserPanel
+                  ) : (
+                    <SmartAppDevelopmentPreviewState
+                      status={developmentPreview.status}
+                      error={developmentPreview.error}
+                    />
+                  )}
+                </section>
+              ) : (
+                browserPanel
+              )}
             </div>
           )
         })}
@@ -648,7 +881,41 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             </div>
           )
         })}
+        {openTabs.filter(isRightWorkspaceExtensionTab).map(tab => {
+          const extensionState = extensionTabs[tab]
+          const descriptor = resolveRightWorkspaceExtensionDescriptor(extensionState)
+          if (!extensionState || !descriptor) return null
+          return (
+            <div
+              key={tab}
+              data-testid={`right-workspace-extension-panel-${descriptor.id}`}
+              className={cn('min-h-0 flex-1 flex-col', activeView === tab ? 'flex' : 'hidden')}
+            >
+              <DshSidebarExtensionPanel
+                descriptor={descriptor}
+                scope={extensionScope}
+                tab={extensionState.tab}
+                visible={visible && activeView === tab}
+              />
+            </div>
+          )
+        })}
       </div>
+      {pluginDialog ? (
+        <SmartAppPluginDialog
+          displayName={pluginDialog.displayName}
+          onClose={() => setPluginDialog(null)}
+          onInstall={pluginSpec =>
+            onAddSmartAppDevelopmentPlugin
+              ? onAddSmartAppDevelopmentPlugin(
+                  pluginDialog.tab,
+                  pluginDialog.installationId,
+                  pluginSpec
+                )
+              : Promise.reject(new Error('Smart app plugin installation is unavailable'))
+          }
+        />
+      ) : null}
     </section>
   )
 })
@@ -658,7 +925,9 @@ function RightWorkspaceTitleTab({
   active,
   label,
   icon: Icon,
+  extensionState,
   iconSrc,
+  loading = false,
   onSelect,
   onClose,
 }: {
@@ -666,7 +935,9 @@ function RightWorkspaceTitleTab({
   active: boolean
   label: string
   icon: LucideIcon
+  extensionState?: RightWorkspaceExtensionTabState
   iconSrc?: string | null
+  loading?: boolean
   onSelect: () => void
   onClose: () => void
 }) {
@@ -704,7 +975,9 @@ function RightWorkspaceTitleTab({
       >
         <RightWorkspaceTabIcon
           icon={Icon}
+          extensionState={extensionState}
           iconSrc={iconSrc}
+          loading={loading}
           testId={getRightWorkspaceTabTestId(tab)}
         />
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -729,15 +1002,40 @@ function RightWorkspaceTitleTab({
 
 function RightWorkspaceTabIcon({
   icon: Icon,
+  extensionState,
   iconSrc,
+  loading,
   testId,
 }: {
   icon: ComponentType<{ className?: string }>
+  extensionState?: RightWorkspaceExtensionTabState
   iconSrc?: string | null
+  loading: boolean
   testId: string
 }) {
   const [failedIconSrc, setFailedIconSrc] = useState<string | null>(null)
   const imageFailed = Boolean(iconSrc && failedIconSrc === iconSrc)
+
+  if (loading) {
+    return (
+      <Loader2
+        data-testid={`${testId}-loading-icon`}
+        className="h-3.5 w-3.5 shrink-0 animate-spin text-text-secondary"
+      />
+    )
+  }
+
+  const descriptor = resolveRightWorkspaceExtensionDescriptor(extensionState)
+  if (descriptor?.icon) {
+    return (
+      <span
+        data-testid={`${testId}-icon`}
+        className="flex h-4 w-4 shrink-0 items-center justify-center text-text-secondary"
+      >
+        {typeof descriptor.icon === 'function' ? descriptor.icon(14) : descriptor.icon}
+      </span>
+    )
+  }
 
   if (iconSrc && !imageFailed) {
     return (
@@ -782,6 +1080,8 @@ function RightWorkspaceLauncher({
   canBrowseFiles,
   allowTemporaryChat,
   workspaceActions,
+  extensionTabs,
+  extensionScope,
   onSelectReview,
   onSelectTerminal,
   onSelectBrowser,
@@ -792,6 +1092,8 @@ function RightWorkspaceLauncher({
   canBrowseFiles: boolean
   allowTemporaryChat: boolean
   workspaceActions: WorkspaceAddMenuItem[]
+  extensionTabs: readonly WeworkWorkspaceSidebarTabDescriptor[]
+  extensionScope: WeworkWorkspaceScope
   onSelectReview: () => void
   onSelectTerminal: () => void
   onSelectBrowser: () => void
@@ -807,6 +1109,29 @@ function RightWorkspaceLauncher({
       className="flex min-h-0 flex-1 items-center justify-center px-8"
     >
       <div className="flex w-full max-w-xl flex-col gap-1.5">
+        {extensionTabs
+          .filter(descriptor => !descriptor.hidden)
+          .sort((left, right) => (left.order ?? 100) - (right.order ?? 100))
+          .map(descriptor => (
+            <RightWorkspaceLauncherItem
+              key={descriptor.id}
+              data-testid={`right-workspace-extension-option-${descriptor.id}`}
+              icon={PanelRight}
+              label={titleOfWeworkWorkspaceSidebarTab(descriptor)}
+              onClick={() => rightWorkspaceBetterSidebar.openTab({ type: descriptor.id })}
+              disabled={
+                !isWeworkWorkspaceSidebarTabAvailable(
+                  descriptor,
+                  extensionScope,
+                  rightWorkspaceBetterSidebar.getSnapshot().state ?? {
+                    panelOpen: true,
+                    tabs: [],
+                    activeTabId: null,
+                  }
+                )
+              }
+            />
+          ))}
         {workspaceActions.map(action => (
           <RightWorkspaceLauncherItem
             key={action.id}
@@ -900,8 +1225,14 @@ function getRightWorkspaceTabLabel(
   tab: RightWorkspacePanelTab,
   t: ReturnType<typeof useTranslation>['t'],
   browserStates: Partial<Record<RightWorkspaceBrowserTab, RightWorkspaceBrowserState>>,
-  harnessSessionsById: Map<string, LocalHarnessWorkbenchSession>
+  harnessSessionsById: Map<string, LocalHarnessWorkbenchSession>,
+  extensionTabs: Partial<Record<RightWorkspaceExtensionTab, RightWorkspaceExtensionTabState>>
 ) {
+  if (isRightWorkspaceExtensionTab(tab)) {
+    const descriptor = resolveRightWorkspaceExtensionDescriptor(extensionTabs[tab])
+    if (!descriptor) return t('workbench.workspace_tab_plugin', '插件')
+    return titleOfWeworkWorkspaceSidebarTab(descriptor)
+  }
   if (tab === 'review') return t('workbench.workspace_tab_review', '审查')
   if (isRightWorkspaceTerminalTab(tab)) {
     const suffix = getRightWorkspaceTerminalTabSuffix(tab)
@@ -910,7 +1241,12 @@ function getRightWorkspaceTabLabel(
       : `${t('workbench.terminal', '终端')} ${suffix}`
   }
   if (isRightWorkspaceBrowserTab(tab)) {
-    return browserStates[tab]?.title || t('workbench.browser_new_tab', '新选项卡')
+    const browserState = browserStates[tab]
+    return (
+      browserState?.developmentPreview?.displayName ||
+      browserState?.title ||
+      t('workbench.browser_new_tab', '新选项卡')
+    )
   }
   if (isRightWorkspaceChatTab(tab)) return t('workbench.workspace_tab_chat', '临时聊天')
   if (isRightWorkspaceHarnessTab(tab)) {
@@ -925,6 +1261,9 @@ function getRightWorkspaceTabLabel(
 }
 
 function getRightWorkspaceTabTestId(tab: RightWorkspacePanelTab) {
+  if (isRightWorkspaceExtensionTab(tab)) {
+    return `right-workspace-extension-tab-${tab.slice('dsh:'.length)}`
+  }
   if (isRightWorkspaceTerminalTab(tab)) {
     const suffix = getRightWorkspaceTerminalTabSuffix(tab)
     return suffix === '1'
@@ -945,6 +1284,7 @@ function getRightWorkspaceTabTestId(tab: RightWorkspacePanelTab) {
 }
 
 function getRightWorkspaceTabIcon(tab: RightWorkspacePanelTab) {
+  if (isRightWorkspaceExtensionTab(tab)) return PanelRight
   if (tab === 'review') return FileDiff
   if (isRightWorkspaceTerminalTab(tab)) return SquareTerminal
   if (isRightWorkspaceBrowserTab(tab)) return Globe2

@@ -59,7 +59,7 @@ import {
 } from '@/features/model-settings/localModelSettings'
 import { useTranslation } from '@/hooks/useTranslation'
 import { isClaudeCodeDevice } from '@/lib/device-capabilities'
-import { ensureLocalExecutorStarted, requestLocalExecutor } from '@/tauri/localExecutor'
+import { ensureLocalExecutorStarted, requestLocalExecutor } from '@/desktop/localExecutor'
 import { track } from '@/telemetry/client'
 import type { UnifiedModel } from '@/types/api'
 import type { DeviceInfo } from '@/types/devices'
@@ -1067,8 +1067,7 @@ function LocalModelSettingsSection({
           imageGenerationEnabled: form.imageGenerationEnabled,
           visionModelConfigId: model.visionModelConfigId || null,
           codexCatalogModelId:
-            providerModelDefaults?.codexCatalogModelId ??
-            (typeof catalogEntry?.slug === 'string' ? catalogEntry.slug : undefined),
+            typeof catalogEntry?.slug === 'string' ? catalogEntry.slug : undefined,
           catalogEntry,
           catalogReady: !catalogEntry,
           catalogPendingRuntimeInstanceId: catalogEntry

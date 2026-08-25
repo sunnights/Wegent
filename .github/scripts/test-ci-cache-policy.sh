@@ -62,7 +62,6 @@ docker=false
 executor_rust=false
 node=false
 python=false
-wework_rust=false
 wework_target=false
 EOF
 )
@@ -71,9 +70,14 @@ assert_warmup_case "workflow change" "$warmup_all_true" \
   ".github/workflows/ci-cache-warmup.yml"
 
 node_only="${warmup_all_false/node=false/node=true}"
-assert_warmup_case "pnpm lock" "$node_only" "pnpm-lock.yaml"
+node_and_wework_target="${node_only/wework_target=false/wework_target=true}"
+assert_warmup_case "pnpm lock" "$node_and_wework_target" "pnpm-lock.yaml"
 assert_warmup_case "workspace manifest" "$node_only" "pnpm-workspace.yaml"
 assert_warmup_case "Wework manifest" "$node_only" "wework/package.json"
+assert_warmup_case "Wework Electron manifest" "$node_and_wework_target" \
+  "wework/electron/package.json"
+assert_warmup_case "Wework Electron lock" "$node_and_wework_target" \
+  "wework/electron/pnpm-lock.yaml"
 assert_warmup_case "Claude CLI lock" "$node_only" \
   ".github/claude-code-cli/package-lock.json"
 
@@ -89,11 +93,6 @@ desktop_image="${warmup_all_false/docker=false/docker=true}"
 desktop_image="${desktop_image/wework_target=false/wework_target=true}"
 assert_warmup_case "Wework desktop image" "$desktop_image" \
   "docker/wework-e2e/desktop.Dockerfile"
-
-wework_lock="${warmup_all_false/wework_rust=false/wework_rust=true}"
-wework_lock="${wework_lock/wework_target=false/wework_target=true}"
-assert_warmup_case "Wework lock" "$wework_lock" \
-  "wework/src-tauri/Cargo.lock"
 
 pr_workflows=(
   lint.yml
@@ -178,14 +177,20 @@ if ! grep -Fq 'SCCACHE_BASEDIRS=$GITHUB_WORKSPACE' "$sccache_action" ||
   fail "sccache must normalize paths and allow writes only from main"
 fi
 
-if ! grep -Fq 'name: Warm Wework macOS Rust Cache' "$warmup_workflow" ||
-  ! grep -A90 'name: Warm Wework macOS Rust Cache' "$warmup_workflow" |
-    grep -Fq 'runs-on: macos-14' ||
-  ! grep -A90 'name: Warm Wework macOS Rust Cache' "$warmup_workflow" |
-    grep -Fq 'uses: ./.github/actions/setup-sccache' ||
-  ! grep -A90 'name: Warm Wework macOS Rust Cache' "$warmup_workflow" |
-    grep -Fq 'task-flow.e2e.mjs --build-only'; then
-  fail "Wework macOS memory builds must be prewarmed with the shared sccache"
+macos_warmup_section="$(
+  sed -n \
+    '/^  warm-wework-macos-electron:/,/^  prepare-wework-desktop-image:/p' \
+    "$warmup_workflow"
+)"
+if [[ "$macos_warmup_section" != *'name: Warm Wework macOS Electron Build Cache'* ]] ||
+  [[ "$macos_warmup_section" != *'runs-on: macos-14'* ]] ||
+  [[ "$macos_warmup_section" != *"needs.changes.outputs.wework_target == 'true'"* ]] ||
+  [[ "$macos_warmup_section" != *'uses: ./.github/actions/setup-sccache'* ]] ||
+  [[ "$macos_warmup_section" != *'wework-electron-app-v1-'* ]] ||
+  [[ "$macos_warmup_section" != *'executor/target'* ]] ||
+  [[ "$macos_warmup_section" != *'~/Library/Caches/electron'* ]] ||
+  [[ "$macos_warmup_section" != *'pnpm --filter wework ai:verify:electron:build'* ]]; then
+  fail "Wework macOS Electron builds must be prewarmed with the shared build cache"
 fi
 
 if grep -R -q 'type=gha' \
@@ -258,20 +263,93 @@ done
 
 # GitHub expressions are matched literally in workflow source.
 # shellcheck disable=SC2016
-playwright_key='playwright-chromium-v2-${{ steps.playwright-version.outputs.version }}'
-if ! grep -Fq "$playwright_key" "$workflow_dir/e2e-tests.yml" ||
-  ! grep -Fq "$playwright_key" "$warmup_workflow"; then
-  fail "Platform E2E and warmup must share the Playwright browser cache"
+if ! sed -n '/^  e2e-tests:/,/^  executor-e2e-tests:/p' \
+  "$workflow_dir/e2e-tests.yml" |
+  grep -F 'image: ${{ needs.prepare-platform-e2e-image.outputs.image }}' \
+    >/dev/null ||
+  ! sed -n '/^  e2e-tests:/,/^  executor-e2e-tests:/p' \
+  "$workflow_dir/e2e-tests.yml" |
+    grep -F 'setup-toolchain: "false"' >/dev/null ||
+  sed -n '/^  e2e-tests:/,/^  executor-e2e-tests:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -E 'install-playwright-(browser|system-deps)' >/dev/null; then
+  fail "Platform E2E shards must consume the immutable Playwright image without runtime installs"
+fi
+
+# GitHub expressions are matched literally in workflow source.
+# shellcheck disable=SC2016
+if ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+  "$workflow_dir/e2e-tests.yml" |
+  grep -F 'prepare-platform-e2e-image' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F \
+    'PLATFORM_E2E_IMAGE: ${{ needs.prepare-platform-e2e-image.outputs.image }}' \
+      >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F 'docker run --rm' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F -- '--network host' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F -- \
+      '--volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE"' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F -- \
+      '--volume "$GITHUB_WORKSPACE:$container_workspace"' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F 'container_workspace="/__w/$repository_name/$repository_name"' \
+      >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F -- '--env E2E_BOOTSTRAP_ADMIN_PASSWORD' >/dev/null ||
+  ! sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F -- '--env E2E_CLAUDE_MODEL_SERVER_URL' >/dev/null ||
+  sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -E 'install-playwright-(browser|system-deps)' >/dev/null ||
+  sed -n '/^  executor-e2e-tests:/,/^  merge-reports:/p' \
+    "$workflow_dir/e2e-tests.yml" |
+    grep -F 'playwright-chromium-v2-' >/dev/null; then
+  fail "Executor E2E must run Playwright from the immutable dependency image"
+fi
+
+if grep -R -E \
+  'install-playwright-(browser|system-deps)|playwright-chromium-v2-' \
+  "$workflow_dir/e2e-tests.yml" "$warmup_workflow" >/dev/null; then
+  fail "CI workflows must not install or cache Playwright outside dependency images"
+fi
+
+if ! grep -Fq 'docker/wework-e2e/browser.Dockerfile' \
+  "$workflow_dir/e2e-tests.yml" ||
+  ! grep -Fq 'does not match workspace version' \
+    "$workflow_dir/e2e-tests.yml"; then
+  fail "Platform E2E image preparation must pin and verify the Playwright version"
 fi
 
 wework_workflow="$workflow_dir/wework-e2e.yml"
+wework_browser_image="$script_dir/../../docker/wework-e2e/browser.Dockerfile"
 wework_desktop_image="$script_dir/../../docker/wework-e2e/desktop.Dockerfile"
 if ! grep -Fq 'file: docker/wework-e2e/browser.Dockerfile' "$wework_workflow" ||
   ! grep -Fq 'file: docker/wework-e2e/desktop.Dockerfile' "$wework_workflow" ||
   [[ "$(grep -c 'push: true' "$wework_workflow")" -ne 2 ]] ||
-  grep -Eq 'playwright (install|install-deps)|install-wework-tauri-system-dependencies' \
+  grep -Eq 'playwright (install|install-deps)' \
     "$wework_workflow"; then
   fail "Wework E2E must consume its immutable dependency image without runtime installs"
+fi
+
+if ! grep -Fq 'libmagic1' "$wework_browser_image" ||
+  ! grep -Fq 'zstd' \
+  "$wework_browser_image" ||
+  ! grep -Fq "ldconfig -p | grep -q 'libmagic\\.so\\.1'" \
+    "$wework_browser_image" ||
+  ! grep -Fq 'zstd --version' "$wework_browser_image"; then
+  fail "Browser E2E images must include backend and artifact runtime libraries"
 fi
 
 if ! grep -Eq '^ENV IS_SANDBOX=1$' "$wework_desktop_image"; then
@@ -280,19 +358,27 @@ fi
 
 # GitHub expressions are matched literally in workflow source.
 # shellcheck disable=SC2016
-wework_target_key='wework-desktop-e2e-v3-${{ hashFiles('\''docker/wework-e2e/desktop.Dockerfile'\'') }}-${{ hashFiles('\''executor/Cargo.lock'\'', '\''wework/src-tauri/Cargo.lock'\'') }}'
+wework_target_key='wework-electron-e2e-v1-${{ hashFiles('\''docker/wework-e2e/desktop.Dockerfile'\'') }}-${{ hashFiles('\''executor/Cargo.lock'\'', '\''wework/electron/package.json'\'', '\''wework/electron/pnpm-lock.yaml'\'', '\''pnpm-lock.yaml'\'') }}'
 if ! grep -Fq "$wework_target_key" "$workflow_dir/wework-e2e.yml" ||
   ! grep -Fq "$wework_target_key" "$warmup_workflow"; then
-  fail "Wework E2E and warmup must share the desktop Cargo target cache"
+  fail "Wework E2E and warmup must share the Electron build cache"
 fi
 
-if ! grep -A40 'name: Warm Wework Desktop Cargo Target' "$warmup_workflow" |
-  grep -Fq 'image: ${{ needs.prepare-wework-desktop-image.outputs.desktop_image }}' ||
-  ! grep -A40 'name: Warm Wework Desktop Cargo Target' "$warmup_workflow" |
-    grep -Fq 'HOME: /root' ||
-  grep -A40 'name: Warm Wework Desktop Cargo Target' "$warmup_workflow" |
-    grep -Eq 'install-wework-tauri-system-dependencies|dtolnay/rust-toolchain'; then
-  fail "Wework desktop target warmup must build inside the E2E container"
+desktop_warmup_section="$(
+  sed -n \
+    '/^  warm-wework-desktop-target:/,/^  warm-executor-e2e-image:/p' \
+    "$warmup_workflow"
+)"
+# GitHub expressions are matched literally in workflow source.
+# shellcheck disable=SC2016
+if [[ "$desktop_warmup_section" != *'image: ${{ needs.prepare-wework-desktop-image.outputs.desktop_image }}'* ]] ||
+  [[ "$desktop_warmup_section" != *'HOME: /root'* ]] ||
+  [[ "$desktop_warmup_section" != *'uses: ./.github/actions/setup-sccache'* ]] ||
+  [[ "$desktop_warmup_section" != *'executor/target'* ]] ||
+  [[ "$desktop_warmup_section" != *'~/.cache/electron'* ]] ||
+  [[ "$desktop_warmup_section" != *'pnpm --filter wework ai:verify:electron:build'* ]] ||
+  [[ "$desktop_warmup_section" =~ dtolnay/rust-toolchain ]]; then
+  fail "Wework desktop Electron warmup must use shared build caches inside the E2E container"
 fi
 
 printf 'CI cache policy tests passed\n'

@@ -12,7 +12,7 @@ const clipboardMocks = vi.hoisted(() => ({
   copyTextToClipboard: vi.fn(),
 }))
 
-vi.mock('@/tauri/localExecutor', () => localExecutorMocks)
+vi.mock('@/desktop/localExecutor', () => localExecutorMocks)
 vi.mock('@/lib/clipboard', () => clipboardMocks)
 
 describe('ProjectSpaceSettings', () => {
@@ -63,7 +63,9 @@ describe('ProjectSpaceSettings', () => {
 
     render(<ProjectSpaceSettings deviceApi={deviceApi} />)
 
-    expect(await screen.findByTestId('project-settings-total-capacity')).toHaveTextContent('7')
+    await waitFor(() =>
+      expect(screen.getByTestId('project-settings-total-capacity')).toHaveTextContent('7')
+    )
     expect(screen.getByTestId('project-settings-device-current-device')).toHaveTextContent(
       '当前设备'
     )

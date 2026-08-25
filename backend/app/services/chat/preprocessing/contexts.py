@@ -1247,6 +1247,7 @@ async def prepare_contexts_for_chat(
     context_window: Optional[int] = None,
     model_config: Optional[dict[str, Any]] = None,
     inline_attachment_content: bool = True,
+    contexts: Optional[List[SubtaskContext]] = None,
 ) -> ChatContextsResult:
     """
     Unified context processing based on user_subtask_id.
@@ -1279,7 +1280,11 @@ async def prepare_contexts_for_chat(
     from .tables import parse_table_url
 
     # Get all contexts for this subtask
-    contexts = context_service.get_by_subtask(db, user_subtask_id) or []
+    contexts = (
+        contexts
+        if contexts is not None
+        else context_service.get_by_subtask(db, user_subtask_id) or []
+    )
 
     # Separate contexts by type
     attachment_contexts = [
@@ -1999,6 +2004,9 @@ def _build_kb_meta_prompt(
             select_kb_summary_text,
         )
         from app.services.knowledge import KnowledgeService
+        from app.services.knowledge.retrieval_capabilities import (
+            derive_retrieval_capabilities,
+        )
         from app.services.knowledge.task_knowledge_base_service import (
             task_knowledge_base_service,
         )
@@ -2071,6 +2079,9 @@ def _build_kb_meta_prompt(
                     "kb_id": kb_id,
                     "kb_name": kb_name,
                     "search_available": bool(retrieval_config.get("retriever_name")),
+                    "retrieval_capabilities": derive_retrieval_capabilities(
+                        retrieval_config
+                    ),
                     "total_document_count": stats["total_document_count"],
                     "searchable_document_count": stats["searchable_document_count"],
                     "spreadsheet_document_count": stats["spreadsheet_document_count"],

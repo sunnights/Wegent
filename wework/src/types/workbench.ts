@@ -105,6 +105,8 @@ export interface QueuedWorkbenchMessage {
   content: string
   status: QueuedMessageStatus
   deliveryMode?: 'message' | 'guidance'
+  awaitingTurnStart?: boolean
+  awaitingGuidanceAcceptance?: boolean
   createdAt: string
   error?: string
   notice?: string

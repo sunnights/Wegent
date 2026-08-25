@@ -1,3 +1,6 @@
+import { access } from 'node:fs/promises'
+import { basename } from 'node:path'
+
 import { verifyShortConversationLayout } from './conversation-layout.mjs'
 
 import {
@@ -52,6 +55,7 @@ import {
   join,
   mkdir,
   resultDir,
+  runChecked,
   selectE2EModel,
   writeFile,
 } from './shared.mjs'
@@ -67,6 +71,7 @@ import { verifyWorkspaceTabIsolation, waitForControlValue } from './workspace-fl
 
 const CLOUD_CHECKPOINTS = [
   'workspace-tabs',
+  'cloud-project-creation',
   'priority-filter',
   'telemetry-consent',
   'automation-lifecycle',
@@ -112,6 +117,7 @@ async function createCloudProjectFixture(control, workspacePath) {
   await control.command('fill', '[data-testid="standalone-remote-device-select"]', {
     value: CLOUD_DEVICE_ID,
   })
+  await control.command('click', '[data-testid="remote-project-source-existing"]')
   await waitForControlValue(
     control,
     '[data-testid="device-folder-path-input"]',
@@ -161,6 +167,79 @@ async function createCloudProjectFixture(control, workspacePath) {
   }
 }
 
+async function verifyCloudProjectCreationSources(control, workspacePath) {
+  await control.command('waitFor', '[data-testid="projects-create-button"]', {
+    timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+  })
+
+  const homePath = join(resultDir, 'cloud-executor-home')
+
+  const createProjectAndSnapshotMenus = async sourceTestId => {
+    const previousMenus = new Set(
+      JSON.parse(await control.command('snapshot', 'body')).testIds.filter(testId =>
+        testId.startsWith('project-menu-')
+      )
+    )
+    await control.command('click', '[data-testid="projects-create-button"]')
+    await control.command('click', '[data-testid="project-create-remote-option"]')
+    await control.command('waitFor', '[data-testid="standalone-remote-device-select"]')
+    await control.command('fill', '[data-testid="standalone-remote-device-select"]', {
+      value: CLOUD_DEVICE_ID,
+    })
+    await control.command('click', `[data-testid="${sourceTestId}"]`)
+    return previousMenus
+  }
+
+  const blankMenus = await createProjectAndSnapshotMenus('remote-project-source-blank')
+  await waitForControlValue(
+    control,
+    '[data-testid="device-folder-path-input"]',
+    homePath,
+    'The blank cloud project picker did not load the remote executor home'
+  )
+  await control.command('fill', '[data-testid="device-folder-name-input"]', {
+    value: 'cloud-blank-project',
+  })
+  await control.command('clickWhenEnabled', '[data-testid="confirm-device-folder-picker-button"]')
+  await waitForCloudProject(
+    control,
+    blankMenus,
+    'Creating a blank cloud project did not add it to the sidebar'
+  )
+
+  await runChecked('git', ['rev-parse', '--is-inside-work-tree'], { cwd: workspacePath })
+  const gitMenus = await createProjectAndSnapshotMenus('remote-project-source-git')
+  await waitForControlValue(
+    control,
+    '[data-testid="remote-project-git-parent-input"]',
+    homePath,
+    'The Git cloud project form did not load the remote executor home'
+  )
+  await control.command('click', '[data-testid="remote-project-git-parent-browse"]')
+  await control.command('waitFor', '[data-testid="device-folder-directory-list"]')
+  await control.command('clickWhenEnabled', '[data-testid="confirm-device-folder-picker-button"]')
+  await waitForControlValue(
+    control,
+    '[data-testid="remote-project-git-parent-input"]',
+    homePath,
+    'The Git cloud project folder picker did not retain the selected parent directory'
+  )
+  await control.command('fill', '[data-testid="remote-project-git-url-input"]', {
+    value: workspacePath,
+  })
+  await control.command('clickWhenEnabled', '[data-testid="remote-project-git-submit"]')
+  const clonedProjectPath = join(homePath, basename(workspacePath))
+  await waitForGitCloneProject(
+    control,
+    gitMenus,
+    clonedProjectPath,
+    'Cloning a Git cloud project did not add it to the sidebar'
+  )
+  await runChecked('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd: clonedProjectPath,
+  })
+}
+
 async function waitForCloudProject(control, previousProjectMenus, message) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < WORKBENCH_READY_TIMEOUT_MS) {
@@ -170,6 +249,27 @@ async function waitForCloudProject(control, previousProjectMenus, message) {
         testId => testId.startsWith('project-menu-') && !previousProjectMenus.has(testId)
       )
     ) {
+      return snapshot
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  throw new Error(message)
+}
+
+async function waitForGitCloneProject(control, previousProjectMenus, targetPath, message) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < WORKBENCH_READY_TIMEOUT_MS) {
+    const snapshot = JSON.parse(await control.command('snapshot', 'body'))
+    const projectAdded = snapshot.testIds.some(
+      testId => testId.startsWith('project-menu-') && !previousProjectMenus.has(testId)
+    )
+    const clonePending = snapshot.testIds.some(testId =>
+      testId.startsWith('git-clone-project-operation-')
+    )
+    const targetExists = await access(targetPath)
+      .then(() => true)
+      .catch(() => false)
+    if (projectAdded && !clonePending && targetExists) {
       return snapshot
     }
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -222,10 +322,13 @@ async function verifyCloudWorkspacePathMentions({ composerSelector, control, wor
 
 async function verifyCloudCheckpoint({
   app,
+  appBundlePath,
   appIdentifier,
   cloudEnvironment,
+  codexHome,
   control,
   desktopScenario,
+  executorLogPath,
   restartDesktopApp,
   setPhase,
   workspacePath,
@@ -256,6 +359,8 @@ async function verifyCloudCheckpoint({
   }
 
   if (checkpoint === 'plugin-auto-update') {
+    setPhase('cloud-plugin-auto-update-disable-codex-rpc')
+    await cloudEnvironment.restartCloudExecutorWithoutCodexPluginRpc()
     setPhase('cloud-plugin-auto-update-fixtures')
     await cloudEnvironment.seedPluginAutoUpdateFixtures(6)
     setPhase('cloud-plugin-auto-update')
@@ -281,9 +386,18 @@ async function verifyCloudCheckpoint({
     assert.equal(
       noticeKind,
       'success',
-      'Plugin auto-update did not finish successfully in the real Tauri application'
+      'Plugin auto-update did not finish successfully in the real Electron application'
     )
-    await cloudEnvironment.assertPluginAutoUpdateComplete(6)
+    await cloudEnvironment.assertPluginAutoUpdateComplete(codexHome, 6)
+    setPhase('cloud-plugin-auto-update-without-codex-rpc')
+    await cloudEnvironment.syncPluginAutoUpdatesToCloudDevice()
+    await cloudEnvironment.assertPluginAutoUpdateComplete(cloudEnvironment.remoteCodexHome, 6)
+    return
+  }
+
+  if (checkpoint === 'cloud-project-creation') {
+    setPhase('cloud-project-creation-sources')
+    await verifyCloudProjectCreationSources(control, workspacePath)
     return
   }
 
@@ -291,7 +405,7 @@ async function verifyCloudCheckpoint({
     control,
     workspacePath
   )
-  const executorLogPath = cloudEnvironment.remoteExecutorLogPath
+  const remoteExecutorLogPath = cloudEnvironment.remoteExecutorLogPath
 
   switch (checkpoint) {
     case 'cloud-git-worktree':
@@ -336,6 +450,7 @@ async function verifyCloudCheckpoint({
       setPhase('cloud-window-lifecycle')
       await verifyBackgroundTaskWindowLifecycle({
         app,
+        appBundlePath,
         appIdentifier,
         composerSelector,
         control,
@@ -346,9 +461,17 @@ async function verifyCloudCheckpoint({
       return
     case 'goal-lifecycle':
       setPhase('cloud-goal-busy-handoff')
-      await verifyBusyTurnGoalHandoff({ composerSelector, control, executorLogPath })
+      await verifyBusyTurnGoalHandoff({
+        composerSelector,
+        control,
+        executorLogPath: remoteExecutorLogPath,
+      })
       setPhase('cloud-goal-idle-unread')
-      await verifyActiveGoalIdleUnreadLifecycle({ composerSelector, control, executorLogPath })
+      await verifyActiveGoalIdleUnreadLifecycle({
+        composerSelector,
+        control,
+        executorLogPath: remoteExecutorLogPath,
+      })
       setPhase('cloud-goal-restart-recovery')
       await verifyCloudGoalRestartRecoveryLifecycle({
         composerSelector,
@@ -394,6 +517,7 @@ async function verifyCloudCheckpoint({
       setPhase('cloud-attachment-sidebar')
       await verifyAttachmentOnlySidebarLifecycle({
         app,
+        appBundlePath,
         appIdentifier,
         composerSelector,
         control,

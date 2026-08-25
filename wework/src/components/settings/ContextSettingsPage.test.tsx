@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { AppPreferences } from '@/tauri/appPreferences'
+import type { AppPreferences } from '@/desktop/appPreferences'
 import { ContextSettingsPage } from './ContextSettingsPage'
 
 const defaultPreferences: AppPreferences = {
@@ -40,7 +40,7 @@ vi.mock('@/hooks/useTranslation', () => ({
   }),
 }))
 
-vi.mock('@/tauri/appPreferences', () => ({
+vi.mock('@/desktop/appPreferences', () => ({
   defaultAppPreferences: {
     closeToTrayEnabled: true,
     showMainWindowOnLaunch: true,
@@ -112,6 +112,7 @@ describe('ContextSettingsPage', () => {
 
     const input = await screen.findByTestId('context-compaction-threshold-input')
     expect(input).toHaveValue(85)
+    await waitFor(() => expect(input).toBeEnabled())
 
     await userEvent.clear(input)
     await userEvent.type(input, '90{Enter}')

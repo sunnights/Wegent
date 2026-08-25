@@ -215,6 +215,34 @@ describe('plugin trial state', () => {
     expect(consumePluginTrialInput()).toBe('[$Sites](plugin://sites@openai-bundled) ')
   })
 
+  test('queues a prompted plugin reference in a fresh chat', () => {
+    const targetProject = {
+      id: 42,
+      name: '空白工作台',
+      tasks: [],
+    }
+    expect(
+      queuePluginReferenceTrial({
+        pluginName: 'smart-app-builder',
+        marketplaceName: 'wework-personal',
+        displayName: '智能工作台开发助手',
+        prompt: '帮我创建一个智能工作台',
+        openInNewChat: true,
+        targetProject,
+      })
+    ).toBe(true)
+
+    expect(consumePluginTrial()).toEqual(
+      expect.objectContaining({
+        input:
+          '[$智能工作台开发助手](plugin://smart-app-builder@wework-personal) 帮我创建一个智能工作台',
+        pluginName: '智能工作台开发助手',
+        openInNewChat: true,
+        targetProject,
+      })
+    )
+  })
+
   test('queues plugin templates for the trial composer', () => {
     expect(
       queuePluginTrial(pluginWithSkill('/tmp/plugin/skills/report/SKILL.md'), {

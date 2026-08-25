@@ -79,7 +79,7 @@ describe('loadComposerPluginApps', () => {
     expect(readDetail).toHaveBeenCalledWith(localPlugin)
     expect(apps).toEqual([
       expect.objectContaining({
-        logoUrl: '/Users/test/.codex/plugins/cache/personal/dingtalk/1/assets/icon.png',
+        logoUrl: 'file:///Users/test/.codex/plugins/cache/personal/dingtalk/1/assets/icon.png',
       }),
     ])
   })
@@ -107,6 +107,39 @@ describe('loadComposerPluginApps', () => {
       listCloudInstalledPlugins: async () => [dingtalk],
     })
     expect(apps.map(app => app.id)).toEqual(['plugin:dingtalk'])
+  })
+
+  test('lists a globally disabled plugin when the current project installed it', async () => {
+    const projectPlugin: InstalledPlugin = {
+      ...dingtalk,
+      spec: {
+        ...dingtalk.spec,
+        enabled: false,
+      },
+      status: { state: 'disabled' },
+    }
+
+    const hiddenApps = await loadComposerPluginApps({
+      listCodexApps: async () => [],
+      readLocalInstalledPlugins: async () => [projectPlugin],
+      listCloudInstalledPlugins: async () => [],
+    })
+    expect(hiddenApps).toEqual([])
+
+    const projectApps = await loadComposerPluginApps(
+      {
+        listCodexApps: async () => [],
+        readLocalInstalledPlugins: async () => [projectPlugin],
+        listCloudInstalledPlugins: async () => [],
+      },
+      { visiblePluginKeys: new Set(['dingtalk']) }
+    )
+    expect(projectApps).toEqual([
+      expect.objectContaining({
+        id: 'plugin:dingtalk',
+        name: '钉钉',
+      }),
+    ])
   })
 
   test('prefers marketplace catalog package logos over unresolved installed logos', async () => {

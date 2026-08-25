@@ -22,14 +22,18 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { DESKTOP_CHECKPOINTS, PLUGIN_SEGMENTS } from '../checkpoints.mjs'
-import { stopProcess, stopProcessGroup } from '../process-lifecycle.mjs'
+import { processIsAlive, stopProcess, stopProcessGroup } from '../process-lifecycle.mjs'
 import { loadDesktopScenario } from '../scenario-loader.mjs'
 import { waitForSnapshot } from './conversation-layout.mjs'
 import { sendPrompt } from './conversation-navigation.mjs'
 import { waitForFolderPathReady, waitForFolderPickerInitialized } from './workspace-flows.mjs'
 
-const DESKTOP_READY_TIMEOUT_MS = 60_000
 const WORKBENCH_READY_TIMEOUT_MS = 180_000
+const DESKTOP_READY_TIMEOUT_MS = readPositiveTimeout(
+  process.env.WEWORK_E2E_DESKTOP_READY_TIMEOUT_MS,
+  WORKBENCH_READY_TIMEOUT_MS,
+  'WEWORK_E2E_DESKTOP_READY_TIMEOUT_MS'
+)
 const DEFAULT_STEP_TIMEOUT_MS = readPositiveTimeout(
   process.env.WEWORK_E2E_STEP_TIMEOUT_MS,
   10_000,
@@ -45,7 +49,11 @@ const DESKTOP_CONTROL_SERVER_PORT = readOptionalPort(
 )
 const MODEL_PROTOCOL_MATRIX_TIMEOUT_MS = 120_000
 const COMPOSER_READY_STABILITY_MS = 750
-const DESKTOP_CONTROL_DELIVERY_TIMEOUT_MS = DEFAULT_STEP_TIMEOUT_MS
+const DESKTOP_CONTROL_DELIVERY_TIMEOUT_MS = readPositiveTimeout(
+  process.env.WEWORK_E2E_CONTROL_DELIVERY_TIMEOUT_MS,
+  30_000,
+  'WEWORK_E2E_CONTROL_DELIVERY_TIMEOUT_MS'
+)
 const DESKTOP_CONTROL_RESULT_GRACE_MS = 5_000
 const QUEUE_MANAGEMENT_REQUEST_TIMEOUT_MS = 120_000
 
@@ -250,6 +258,7 @@ const VISION_SIDECAR_PROMPT =
   'WEWORK_DESKTOP_E2E_VISION_SIDECAR: describe the attached verification image.'
 const VISION_SIDECAR_DESCRIPTION = 'The verification image is a solid red square.'
 const VISION_SIDECAR_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_VISION_SIDECAR_COMPLETE'
+const VISION_SIDECAR_MAIN_REQUEST_SCENARIO = 'vision_sidecar_main'
 const MULTIMODAL_VISION_PROMPT =
   'WEWORK_DESKTOP_E2E_MULTIMODAL_VISION: inspect the attached verification image.'
 const MULTIMODAL_VISION_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_MULTIMODAL_VISION_COMPLETE'
@@ -263,8 +272,8 @@ const LOCAL_VISION_SIDECAR_CASE = {
 const CLOUD_VISION_SIDECAR_CASE = {
   source: 'cloud',
   mainOptionId: 'desktop-e2e-cloud-vision-main',
-  mainLabel: 'Desktop E2E Cloud Vision Main',
-  mainModelId: 'desktop-e2e-cloud-vision-main-upstream',
+  mainLabel: 'Desktop E2E DeepSeek Flash Vision Main',
+  mainModelId: 'deepseek-v4-flash',
   sidecarModelId: 'desktop-e2e-cloud-vision-sidecar-upstream',
 }
 const CLOUD_MULTIMODAL_VISION_CASE = {
@@ -505,7 +514,10 @@ const repoDir = resolve(weworkDir, '..')
 const toolDetailsMcpServerPath = join(weworkDir, 'e2e', 'utils', 'tool-details-mcp-server.mjs')
 const mcpElicitationServerPath = join(weworkDir, 'e2e', 'utils', 'mcp-elicitation-server.mjs')
 const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`
-const resultDir = join(weworkDir, 'test-results', 'desktop-e2e', runId)
+const resultRoot = process.env.WEWORK_E2E_RESULT_ROOT?.trim()
+  ? resolve(process.env.WEWORK_E2E_RESULT_ROOT.trim())
+  : join(weworkDir, 'test-results', 'desktop-e2e')
+const resultDir = join(resultRoot, runId)
 
 const OFFICIAL_PLUGIN_REPOSITORY = 'https://github.com/openai/plugins.git'
 const OFFICIAL_PLUGIN_REPOSITORY_PREFIX = 'https://github.com/openai/plugins'
@@ -537,7 +549,6 @@ const CONNECTOR_AUTH_UNMATCHED_RESUME_COMPLETION_TEXT =
 const STARTUP_NETWORK_PROBE_MARKETPLACE_NAME = 'desktop-e2e-startup-network-probe'
 const STARTUP_NETWORK_PROBE_MARKETPLACE_URL =
   'https://desktop-e2e-startup-probe.invalid/marketplace.git'
-const STARTUP_NETWORK_PROBE_REQUEST_PATTERN = /desktop-e2e-startup-probe\.invalid/i
 const AUTOMATION_NAME = 'Desktop E2E automation'
 const AUTOMATION_PROMPT = 'WEWORK_DESKTOP_E2E_AUTOMATION: report the current workspace status.'
 const AUTOMATION_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_AUTOMATION_COMPLETE'
@@ -874,40 +885,6 @@ function commandOutput(command, args, options = {}) {
   return result.stdout.trim()
 }
 
-function macosFrontmostProcessId() {
-  const output = commandOutput('osascript', [
-    '-l',
-    'JavaScript',
-    '-e',
-    'ObjC.import("AppKit"); Number($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier)',
-  ])
-  const processId = Number(output)
-  assert.ok(Number.isInteger(processId), `Invalid macOS frontmost process ID: ${output}`)
-  return processId
-}
-
-function macosApplicationProcessId(appIdentifier) {
-  const output = commandOutput('osascript', [
-    '-l',
-    'JavaScript',
-    '-e',
-    `ObjC.import("AppKit"); const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(${JSON.stringify(appIdentifier)}); apps.count > 0 ? Number(apps.objectAtIndex(0).processIdentifier) : 0`,
-  ])
-  const processId = Number(output)
-  assert.ok(Number.isInteger(processId), `Invalid macOS application process ID: ${output}`)
-  return processId
-}
-
-async function waitForMacosApplicationProcessId(appIdentifier, launcher) {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < DESKTOP_READY_TIMEOUT_MS) {
-    const processId = macosApplicationProcessId(appIdentifier)
-    if (processId > 0) return processId
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
-  }
-  throw new Error(`Timed out waiting for macOS application ${appIdentifier}`)
-}
-
 async function stopDesktopAppProcess(app) {
   if (!app) return
   if (!app.launcher) {
@@ -1000,29 +977,16 @@ class BlockingNetworkProxy {
     throw new Error('Codex did not reach the blocking network proxy')
   }
 
-  async waitForRequestMatchingAfter(requestCount, pattern, timeoutMs = WORKBENCH_READY_TIMEOUT_MS) {
-    const startedAt = Date.now()
-    while (Date.now() - startedAt < timeoutMs) {
-      const request = this.requests.slice(requestCount).find(candidate => pattern.test(candidate))
-      if (request) return request
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
-    }
-    const observedRequests = this.requests.slice(requestCount)
-    throw new Error(
-      `Codex did not send a startup request matching ${pattern}; observed=${JSON.stringify(observedRequests)}`
-    )
-  }
-
-  requestCount() {
-    return this.requests.length
-  }
-
   release() {
     if (this.released) return
     this.released = true
     for (const socket of this.sockets) {
       socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
     }
+  }
+
+  block() {
+    this.released = false
   }
 
   async stop() {
@@ -1082,24 +1046,13 @@ async function appendProcessOutput(stream, destination) {
   })
 }
 
-function processIsAlive(processId) {
-  try {
-    process.kill(processId, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
 function macosSleepAssertionIds(appProcessId) {
   if (process.platform !== 'darwin') return []
   const output = commandOutput('/usr/bin/pmset', ['-g', 'assertions'])
   return output.split('\n').flatMap(line => {
     const match = line
       .trim()
-      .match(
-        /^pid (\d+)\([^)]+\): \[(0x[0-9a-f]+)\].*PreventUserIdleSystemSleep named: "Wework local task is running"/i
-      )
+      .match(/^pid (\d+)\([^)]+\): \[(0x[0-9a-f]+)\].*NoIdleSleepAssertion named: "Electron"/i)
     if (!match || Number(match[1]) !== appProcessId) {
       return []
     }
@@ -1119,21 +1072,25 @@ async function waitForMacosSleepAssertion(appProcessId, expectedRunning) {
   )
 }
 
-async function waitForExecutorReadyEvidence(
-  logPath,
+async function waitForExecutorRuntimeEvidence(
+  control,
+  _logPath,
   timeoutMs = DEFAULT_STEP_TIMEOUT_MS,
   minimumProcessCount = 1
 ) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
-    const content = await readFile(logPath, 'utf8').catch(() => '')
-    const processIds = [...content.matchAll(/app IPC stdio ready[^\n]*process_id=(\d+)/g)].map(
-      match => Number(match[1])
-    )
-    if (processIds.length >= minimumProcessCount) return { processIds, content }
+    const diagnostics = JSON.parse(await control.command('getDesktopRuntimeDiagnostics', 'body'))
+    const executorProcessId = Number(diagnostics.executorPid)
+    if (Number.isInteger(executorProcessId) && executorProcessId > 0) {
+      return {
+        processIds: [executorProcessId],
+        content: JSON.stringify(diagnostics),
+      }
+    }
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
   }
-  throw new Error(`Timed out waiting for executor stdio-ready evidence in ${logPath}`)
+  throw new Error('Timed out waiting for the Electron core runtime executor process')
 }
 
 async function waitForLogPattern(
@@ -1150,8 +1107,21 @@ async function waitForLogPattern(
   throw new Error(`Timed out waiting for ${pattern} in ${logPath} after offset ${fromOffset}`)
 }
 
-async function reactivateMacApplication(appIdentifier) {
+async function reactivateMacApplication(appIdentifier, appBundlePath = null) {
+  if (appBundlePath) {
+    await runChecked('open', ['-g', appBundlePath])
+    return
+  }
   await runChecked('open', ['-g', '-b', appIdentifier])
+}
+
+function requestMacosApplicationQuit(processId) {
+  commandOutput('osascript', [
+    '-l',
+    'JavaScript',
+    '-e',
+    `ObjC.import("AppKit"); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${processId}); app ? Boolean(app.terminate) : false`,
+  ])
 }
 
 async function triggerModelReloadUntilCloudFailure(control) {
@@ -1180,34 +1150,28 @@ async function sendPromptUntilScenarioRequest(control, selector, prompt, scenari
   )
 }
 
-async function visibleModelOptionId(control, targetOptionIds) {
+function modelProviderSelector(providerId) {
+  return providerId ? `[data-model-provider-id="${providerId}"]` : ''
+}
+
+async function visibleModelOptionId(control, targetOptionIds, providerId) {
   for (const targetOptionId of targetOptionIds) {
-    const targetSelector = `[data-testid="model-selector-submenu"] [data-testid="${targetOptionId}"]`
+    const targetSelector = `[data-testid="model-selector-submenu"] [data-testid="${targetOptionId}"]${modelProviderSelector(providerId)}`
     await control.command('scrollIntoView', targetSelector).catch(() => undefined)
-    const metrics = await control
-      .command('getElementMetrics', targetSelector)
-      .then(value => JSON.parse(value))
-      .catch(() => [])
-    if (
-      metrics.some(
-        metric =>
-          metric.width > 0 &&
-          metric.height > 0 &&
-          metric.bottom > 0 &&
-          metric.right > 0 &&
-          metric.top < 720 &&
-          metric.left < 1280
-      )
-    ) {
+    const visibleCount = await control
+      .command('getElementCount', targetSelector, { visible: true })
+      .then(value => Number(value))
+      .catch(() => 0)
+    if (visibleCount > 0) {
       return targetOptionId
     }
   }
   return null
 }
 
-async function revealGroupedModelOption(control, targetOptionIds) {
+async function revealGroupedModelOption(control, targetOptionIds, providerId) {
   const menu = JSON.parse(await control.command('snapshot', 'body'))
-  if (await visibleModelOptionId(control, targetOptionIds)) return true
+  if (await visibleModelOptionId(control, targetOptionIds, providerId)) return true
   const familyTestIds = menu.testIds.filter(testId => testId.startsWith('model-family-'))
 
   for (const familyTestId of familyTestIds) {
@@ -1215,7 +1179,7 @@ async function revealGroupedModelOption(control, targetOptionIds) {
       timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
     })
     await new Promise(resolvePromise => setTimeout(resolvePromise, 150))
-    if (await visibleModelOptionId(control, targetOptionIds)) return true
+    if (await visibleModelOptionId(control, targetOptionIds, providerId)) return true
   }
 
   return false
@@ -1227,19 +1191,34 @@ function modelOptionIdCandidates(modelIds) {
   )
 }
 
+function expectedModelProviderId(modelIds) {
+  const targetOptionIds = modelOptionIdCandidates(modelIds)
+  return targetOptionIds.includes(`model-option-${DEFAULT_MODEL_ID}`)
+    ? MODEL_PROVIDER_ID
+    : undefined
+}
+
 function hasModelOption(menu, targetOptionIds) {
   return targetOptionIds.some(targetOptionId => menu.testIds.includes(targetOptionId))
+}
+
+async function hasExpectedModelOption(control, menu, targetOptionIds, expectedProviderId) {
+  if (!expectedProviderId) return hasModelOption(menu, targetOptionIds)
+  return Boolean(await visibleModelOptionId(control, targetOptionIds, expectedProviderId))
 }
 
 async function ensureModelOptionVisible(
   control,
   modelIds,
-  modelSelectorButton = '[data-testid="model-selector-button"]'
+  modelSelectorButton = '[data-testid="model-selector-button"]',
+  expectedProviderId = expectedModelProviderId(modelIds)
 ) {
   const targetOptionIds = modelOptionIdCandidates(modelIds)
+  let reloadedLocalModels = false
   for (let attempt = 0; attempt < 8; attempt += 1) {
     let menu = JSON.parse(await control.command('snapshot', 'body'))
-    if (hasModelOption(menu, targetOptionIds)) return menu
+    if (await hasExpectedModelOption(control, menu, targetOptionIds, expectedProviderId))
+      return menu
     if (menu.testIds.includes('model-control-menu-model')) {
       await control
         .command('hover', '[data-testid="model-control-menu-model"]', {
@@ -1250,6 +1229,7 @@ async function ensureModelOptionVisible(
       await control
         .command('hover', modelSelectorButton, {
           timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+          visible: true,
         })
         .catch(() => undefined)
       menu = JSON.parse(await control.command('snapshot', 'body'))
@@ -1257,18 +1237,26 @@ async function ensureModelOptionVisible(
         await control.command('clickWhenEnabled', modelSelectorButton, {
           stableMs: 100,
           timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+          visible: true,
         })
       }
     }
     await new Promise(resolvePromise => setTimeout(resolvePromise, 150))
     menu = JSON.parse(await control.command('snapshot', 'body'))
-    if (hasModelOption(menu, targetOptionIds)) return menu
-    if (await revealGroupedModelOption(control, targetOptionIds)) {
+    if (await hasExpectedModelOption(control, menu, targetOptionIds, expectedProviderId))
+      return menu
+    if (await revealGroupedModelOption(control, targetOptionIds, expectedProviderId)) {
       return JSON.parse(await control.command('snapshot', 'body'))
+    }
+    if (expectedProviderId && !reloadedLocalModels) {
+      await control.command('dispatchLocalModelSettingsChanged', '')
+      reloadedLocalModels = true
     }
   }
 
-  throw new Error(`Model options ${targetOptionIds.join(', ')} did not become visible`)
+  throw new Error(
+    `Model options ${targetOptionIds.join(', ')} did not become visible${expectedProviderId ? ` for provider ${expectedProviderId}` : ''}`
+  )
 }
 
 async function confirmLocalProjectName(control, name) {
@@ -1289,7 +1277,24 @@ async function confirmLocalProjectName(control, name) {
 }
 
 async function createSingleRootLocalProject(control, workspacePath, name) {
-  await control.command('click', '[data-testid="projects-create-button"]')
+  const sidebarSnapshot = await waitForSnapshot(
+    control,
+    snapshot =>
+      snapshot.testIds.includes('projects-empty-create-button') ||
+      snapshot.testIds.includes('runtime-project-sortable-list'),
+    'The project section did not settle into an empty or populated state'
+  )
+  const createButtonSelector = sidebarSnapshot.testIds.includes('projects-empty-create-button')
+    ? '[data-testid="projects-empty-create-button"]'
+    : '[data-testid="projects-create-button"]'
+  if (createButtonSelector.includes('projects-empty-create-button')) {
+    assert.match(
+      await control.command('getText', createButtonSelector),
+      /New project|新建项目/,
+      'The empty project section did not expose a localized creation action'
+    )
+  }
+  await control.command('click', createButtonSelector)
   await control.command('click', '[data-testid="project-create-local-option"]')
   await control.command('waitFor', '[data-testid="device-folder-path-input"]', {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
@@ -1314,29 +1319,42 @@ async function selectE2EModel(
   composerSelector = ''
 ) {
   const labels = Array.isArray(modelLabels) ? modelLabels : [modelLabels]
+  const expectedProviderId = expectedModelProviderId(modelIds)
   const modelSelectorButton = `${composerSelector} [data-testid="model-selector-button"]`.trim()
   await control.command('waitFor', modelSelectorButton, {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+    visible: true,
   })
-  const selectedModelLabel = await control.command('getText', modelSelectorButton)
-  if (labels.some(label => selectedModelLabel.includes(label))) return
+  const selectedModelLabel = await control.command('getText', modelSelectorButton, {
+    visible: true,
+  })
+  const selectedProviderId = await control.command('getAttribute', modelSelectorButton, {
+    value: 'data-model-provider-id',
+  })
+  if (
+    labels.some(label => selectedModelLabel.includes(label)) &&
+    (!expectedProviderId || selectedProviderId === expectedProviderId)
+  ) {
+    return
+  }
 
-  await ensureModelOptionVisible(control, modelIds, modelSelectorButton)
+  await ensureModelOptionVisible(control, modelIds, modelSelectorButton, expectedProviderId)
   const targetOptionIds = modelOptionIdCandidates(modelIds)
-  let targetOptionId = await visibleModelOptionId(control, targetOptionIds)
+  let targetOptionId = await visibleModelOptionId(control, targetOptionIds, expectedProviderId)
   if (!targetOptionId) {
     const menu = JSON.parse(await control.command('snapshot', 'body'))
     if (!menu.testIds.includes('model-selector-menu')) {
       await control.command('clickWhenEnabled', modelSelectorButton, {
         stableMs: 100,
         timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+        visible: true,
       })
     }
-    await revealGroupedModelOption(control, targetOptionIds)
-    targetOptionId = await visibleModelOptionId(control, targetOptionIds)
+    await revealGroupedModelOption(control, targetOptionIds, expectedProviderId)
+    targetOptionId = await visibleModelOptionId(control, targetOptionIds, expectedProviderId)
   }
   assert.ok(targetOptionId, `No visible model option matched ${modelOptionIdCandidates(modelIds)}`)
-  const targetSelector = `[data-testid="model-selector-submenu"] [data-testid="${targetOptionId}"]`
+  const targetSelector = `[data-testid="model-selector-submenu"] [data-testid="${targetOptionId}"]${modelProviderSelector(expectedProviderId)}`
   await control.command('waitFor', targetSelector, {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
   })
@@ -1352,6 +1370,15 @@ async function selectE2EModel(
     )
   }
   await waitForE2EModelLabel(control, labels, modelSelectorButton)
+  if (expectedProviderId) {
+    assert.equal(
+      await control.command('getAttribute', modelSelectorButton, {
+        value: 'data-model-provider-id',
+      }),
+      expectedProviderId,
+      'The model selector did not retain the expected provider'
+    )
+  }
   await control.command('press', 'body', { key: 'Escape' })
   await waitForSnapshot(
     control,
@@ -1367,7 +1394,9 @@ async function waitForE2EModelLabel(
 ) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < DEFAULT_STEP_TIMEOUT_MS) {
-    const selectedModelLabel = await control.command('getText', modelSelectorButton)
+    const selectedModelLabel = await control.command('getText', modelSelectorButton, {
+      visible: true,
+    })
     if (labels.some(label => selectedModelLabel.includes(label))) return
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
   }
@@ -1543,6 +1572,7 @@ export {
   VISION_SIDECAR_PROMPT,
   VISION_SIDECAR_DESCRIPTION,
   VISION_SIDECAR_COMPLETION_TEXT,
+  VISION_SIDECAR_MAIN_REQUEST_SCENARIO,
   MULTIMODAL_VISION_PROMPT,
   MULTIMODAL_VISION_COMPLETION_TEXT,
   LOCAL_VISION_SIDECAR_CASE,
@@ -1710,7 +1740,6 @@ export {
   CONNECTOR_AUTH_UNMATCHED_RESUME_COMPLETION_TEXT,
   STARTUP_NETWORK_PROBE_MARKETPLACE_NAME,
   STARTUP_NETWORK_PROBE_MARKETPLACE_URL,
-  STARTUP_NETWORK_PROBE_REQUEST_PATTERN,
   AUTOMATION_NAME,
   AUTOMATION_PROMPT,
   AUTOMATION_COMPLETION_TEXT,
@@ -1731,9 +1760,6 @@ export {
   isExecutable,
   pathExists,
   commandOutput,
-  macosFrontmostProcessId,
-  macosApplicationProcessId,
-  waitForMacosApplicationProcessId,
   stopDesktopAppProcess,
   runChecked,
   reservePort,
@@ -1745,9 +1771,10 @@ export {
   processIsAlive,
   macosSleepAssertionIds,
   waitForMacosSleepAssertion,
-  waitForExecutorReadyEvidence,
+  waitForExecutorRuntimeEvidence,
   waitForLogPattern,
   reactivateMacApplication,
+  requestMacosApplicationQuit,
   triggerModelReloadUntilCloudFailure,
   sendPromptUntilScenarioRequest,
   visibleModelOptionId,

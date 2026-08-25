@@ -1,6 +1,6 @@
 import type { ChatCancelAck, ChatCancelPayload, ChatGuideAck, ChatGuidePayload } from '@/types/api'
 import type { ChatStreamHandlers } from '@/stream/chatStream'
-import type { LocalExecutorEvent } from '@/tauri/localExecutor'
+import type { LocalExecutorEvent } from '@/desktop/localExecutor'
 import {
   createResponseApiStreamState,
   emitResponseApiEvent,
@@ -64,6 +64,11 @@ export function createRuntimeChatStream(deps: RuntimeChatStreamDeps) {
           if (event.event === 'project.task.assigned') {
             const payload = projectTaskAssignedPayload(event.payload)
             if (payload) subscription.handlers.onProjectTaskAssigned?.(payload)
+            continue
+          }
+          if (event.event === 'executor.event_lagged') {
+            const payload = runtimeEventLaggedPayload(event.payload)
+            if (payload) subscription.handlers.onRuntimeEventLagged?.(payload)
             continue
           }
           if (event.event === 'executor.runtime_replaced') {
@@ -197,9 +202,18 @@ function hasLocalExecutorResponseHandlers(handlers: ChatStreamHandlers): boolean
     handlers.onRuntimeSupervisorUpdated ||
     handlers.onRuntimePlanUpdated ||
     handlers.onGuidanceApplied ||
+    handlers.onRuntimeEventLagged ||
     handlers.onRuntimeTransportReplaced ||
     handlers.onProjectTaskAssigned
   )
+}
+
+function runtimeEventLaggedPayload(value: unknown): { skipped: number } | null {
+  const payload = asRecord(value)
+  const skipped = payload.skipped
+  return typeof skipped === 'number' && Number.isFinite(skipped) && skipped >= 0
+    ? { skipped }
+    : null
 }
 
 function projectTaskAssignedPayload(

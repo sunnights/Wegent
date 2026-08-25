@@ -8,28 +8,56 @@ use std::{
     env,
     path::{Path, PathBuf},
 };
+#[cfg(unix)]
+use std::{
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    path::Path,
+};
 
 use serde_json::{json, Value};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc},
+    io::{split, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    sync::{broadcast, mpsc, Mutex},
     time::{Duration, Instant},
 };
 
+use super::backend::runtime_rpc_encoding::encode_app_ipc_response;
 use crate::{
     agents::resolve_codex_binary,
+    local::bundled_plugins::{initialize_bundled_plugin_marketplace, BundledPluginMarketplace},
+    local::codex_home::{
+        codex_home_migration_status, initialize_codex_home, CodexHomeInitializeRequest,
+    },
     local::command::{CommandHandler, CommandRequest, CommandResult, DeviceCommandHandler},
     local::git_commit_message::generate_commit_message,
+    local::harnesses::{
+        list_local_harnesses, prepare_local_harness_launch, ListLocalHarnessesRequest,
+        PrepareLocalHarnessLaunchRequest,
+    },
     local::local_skills::list_local_skills,
+    local::plugin_import::{
+        delete_personal_plugin, finalize_plugin_import, import_plugin_package, link_plugin_release,
+        preview_plugin_import, read_plugin_cloud_links, rollback_plugin_import,
+        unlink_plugin_release, DeletePersonalPluginRequest, ImportPluginPackageRequest,
+        LinkPluginReleaseRequest, PluginImportMutationRequest, PreviewPluginImportRequest,
+        ReadPluginCloudLinksRequest, UnlinkPluginReleaseRequest,
+    },
     local::workspace_files::{
         execute_workspace_file_command_with_input, is_workspace_file_command, WORKSPACE_ROOTS_ENV,
     },
-    logging::{format_executor_log, reserve_executor_stdout_for_protocol, write_executor_log_line},
+    logging::{
+        format_executor_log, reserve_executor_stdout_for_protocol, write_executor_error_line,
+        write_executor_log_line,
+    },
     runtime_work::RuntimeWorkRpcHandler,
     task_runtime::{
-        BinaryInput, ChatAgentCreate, ChatAgentUpdate, DeliveryCreate, LocalCommentCreate,
-        LocalExecutionClaim, ProjectCreate, ProjectDescriptor, ProjectUpdate, RuntimeTaskAddress,
-        TaskCreate, TaskReorder, TaskRuntime, TaskUpdate,
+        BinaryInput, ChatAgentCreate, ChatAgentUpdate, DeliveryCreate, DeliveryFinalize,
+        LocalCommentCreate, LocalExecutionClaim, ProjectCreate, ProjectDescriptor, ProjectUpdate,
+        RuntimeTaskAddress, TaskCreate, TaskReorder, TaskRuntime, TaskUpdate,
     },
     version::get_version,
 };
@@ -38,9 +66,69 @@ use crate::{
 use crate::local::command::build_env;
 
 const DEFAULT_DEVICE_ID: &str = "local-device";
+pub const APP_IPC_PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_TIMEOUT_SECONDS: f64 = 60.0;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const APP_IPC_REQUEST_TIMEOUT_SECONDS: u64 = 75;
+const APP_IPC_AUTH_TIMEOUT_SECONDS: u64 = 5;
+const APP_IPC_MAX_AUTH_FRAME_BYTES: usize = 4096;
+const APP_IPC_BULK_WRITE_BUFFER_CAPACITY: usize = 512;
+const APP_IPC_CAPABILITIES: &[&str] = &[
+    "device.command",
+    "executor.backend",
+    "executor.codex_home",
+    "executor.harnesses",
+    "executor.health",
+    "executor.plugins",
+    "runtime.archives",
+    "runtime.automations",
+    "runtime.codex",
+    "runtime.connectors",
+    "runtime.harness",
+    "runtime.hooks",
+    "runtime.keybindings",
+    "runtime.projects",
+    "runtime.settings",
+    "runtime.sidebar",
+    "runtime.tasks",
+    "runtime.workspaces",
+    "runtime.worktrees",
+];
+const APP_IPC_RENDERER_METHODS: &[&str] = &[
+    "aitable.*",
+    "attachments.*",
+    "chat_agents.*",
+    "codex.app_server_request",
+    "deliveries.*",
+    "device.execute_command",
+    "dws.*",
+    "executions.*",
+    "executor.backend.configure",
+    "executor.backend.status",
+    "executor.codex_home.initialize",
+    "executor.codex_home.status",
+    "executor.harnesses.list",
+    "executor.harnesses.prepare_launch",
+    "executor.health",
+    "executor.plugins.initialize_bundled_marketplace",
+    "executor.plugins.import_package",
+    "executor.plugins.import_package.finalize",
+    "executor.plugins.import_package.preview",
+    "executor.plugins.import_package.rollback",
+    "executor.plugins.links.link",
+    "executor.plugins.links.list",
+    "executor.plugins.links.unlink",
+    "executor.plugins.personal.delete",
+    "external_attachments.*",
+    "external_projects.*",
+    "external_todos.*",
+    "files.*",
+    "projects.*",
+    "runtime.*",
+    "runtime_tasks.*",
+    "todos.*",
+];
+const APP_IPC_WRITE_BUFFER_CAPACITY: usize = 8192;
 const GIT_PUSH_SCRIPT: &str = r#"branch=$(git branch --show-current)
 if [ -z "$branch" ]; then
   echo "Cannot push detached HEAD" >&2
@@ -320,11 +408,12 @@ pub struct AppIpcServer {
     backend_connection_handler: Option<Arc<dyn BackendConnectionHandler>>,
     command_handler: Arc<dyn DeviceCommandHandler>,
     event_tx: broadcast::Sender<Value>,
+    bundled_plugin_marketplace: Arc<Mutex<Option<BundledPluginMarketplace>>>,
 }
 
 impl Default for AppIpcServer {
     fn default() -> Self {
-        let (event_tx, _) = broadcast::channel(512);
+        let (event_tx, _) = broadcast::channel(super::RUNTIME_EVENT_BUFFER_CAPACITY);
         Self {
             device_id: DEFAULT_DEVICE_ID.to_owned(),
             runtime_instance_id: None,
@@ -332,6 +421,7 @@ impl Default for AppIpcServer {
             backend_connection_handler: None,
             command_handler: Arc::new(CommandHandler),
             event_tx,
+            bundled_plugin_marketplace: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -438,8 +528,141 @@ impl AppIpcServer {
     }
 
     pub async fn dispatch(&self, method: &str, params: Value) -> Result<Value, AppIpcError> {
+        if method == "executor.protocol.describe" {
+            return Ok(self.protocol_description());
+        }
+
         if method == "executor.health" {
             return Ok(json!({"status": "healthy"}));
+        }
+
+        if method == "executor.harnesses.list" {
+            let request = serde_json::from_value::<ListLocalHarnessesRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            return serde_json::to_value(list_local_harnesses(request).await)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.codex_home.status" {
+            return serde_json::to_value(
+                codex_home_migration_status()
+                    .map_err(|error| AppIpcError::new("codex_home_status_failed", error))?,
+            )
+            .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.codex_home.initialize" {
+            let request = serde_json::from_value::<CodexHomeInitializeRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            return serde_json::to_value(
+                initialize_codex_home(request)
+                    .map_err(|error| AppIpcError::new("codex_home_initialize_failed", error))?,
+            )
+            .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.harnesses.prepare_launch" {
+            let request = serde_json::from_value::<PrepareLocalHarnessLaunchRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            let prepared = prepare_local_harness_launch(request)
+                .map_err(|error| AppIpcError::new("harness_launch_prepare_failed", error))?;
+            return serde_json::to_value(prepared)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.plugins.initialize_bundled_marketplace" {
+            let mut initialized = self.bundled_plugin_marketplace.lock().await;
+            if let Some(marketplace) = initialized.as_ref() {
+                return serde_json::to_value(marketplace)
+                    .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+            }
+            let marketplace = initialize_bundled_plugin_marketplace()
+                .map_err(|error| AppIpcError::new("bundled_plugins_initialize_failed", error))?;
+            *initialized = Some(marketplace.clone());
+            return serde_json::to_value(marketplace)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.plugins.import_package.preview" {
+            let request = serde_json::from_value::<PreviewPluginImportRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            let preview = tokio::task::spawn_blocking(move || preview_plugin_import(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_import_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_import_preview_failed", error))?;
+            return serde_json::to_value(preview)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.plugins.import_package" {
+            let request = serde_json::from_value::<ImportPluginPackageRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            let imported = tokio::task::spawn_blocking(move || import_plugin_package(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_import_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_import_failed", error))?;
+            return serde_json::to_value(imported)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.plugins.import_package.finalize"
+            || method == "executor.plugins.import_package.rollback"
+        {
+            let request = serde_json::from_value::<PluginImportMutationRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            let rollback = method.ends_with(".rollback");
+            tokio::task::spawn_blocking(move || {
+                if rollback {
+                    rollback_plugin_import(request)
+                } else {
+                    finalize_plugin_import(request)
+                }
+            })
+            .await
+            .map_err(|error| AppIpcError::new("plugin_import_task_failed", error.to_string()))?
+            .map_err(|error| AppIpcError::new("plugin_import_mutation_failed", error))?;
+            return Ok(Value::Null);
+        }
+
+        if method == "executor.plugins.links.list" {
+            let request = serde_json::from_value::<ReadPluginCloudLinksRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            let links = tokio::task::spawn_blocking(move || read_plugin_cloud_links(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_links_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_links_read_failed", error))?;
+            return serde_json::to_value(links)
+                .map_err(|error| AppIpcError::new("serialization_failed", error.to_string()));
+        }
+
+        if method == "executor.plugins.links.link" {
+            let request = serde_json::from_value::<LinkPluginReleaseRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            tokio::task::spawn_blocking(move || link_plugin_release(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_links_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_link_failed", error))?;
+            return Ok(Value::Null);
+        }
+
+        if method == "executor.plugins.links.unlink" {
+            let request = serde_json::from_value::<UnlinkPluginReleaseRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            tokio::task::spawn_blocking(move || unlink_plugin_release(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_links_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_unlink_failed", error))?;
+            return Ok(Value::Null);
+        }
+
+        if method == "executor.plugins.personal.delete" {
+            let request = serde_json::from_value::<DeletePersonalPluginRequest>(params)
+                .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
+            tokio::task::spawn_blocking(move || delete_personal_plugin(request))
+                .await
+                .map_err(|error| AppIpcError::new("plugin_delete_task_failed", error.to_string()))?
+                .map_err(|error| AppIpcError::new("plugin_delete_failed", error))?;
+            return Ok(Value::Null);
         }
 
         if method == "executor.backend.configure" {
@@ -600,11 +823,35 @@ impl AppIpcServer {
             "device_id": self.device_id,
             "ready": true,
             "version": get_version(),
+            "protocol_version": APP_IPC_PROTOCOL_VERSION,
+            "capabilities": APP_IPC_CAPABILITIES,
         });
         if let Some(runtime_instance_id) = &self.runtime_instance_id {
             payload["runtime_instance_id"] = Value::String(runtime_instance_id.clone());
         }
         self.event_message("executor.ready", payload)
+    }
+
+    fn protocol_description(&self) -> Value {
+        json!({
+            "protocol_version": APP_IPC_PROTOCOL_VERSION,
+            "device_id": self.device_id,
+            "runtime_instance_id": self.runtime_instance_id,
+            "capabilities": APP_IPC_CAPABILITIES,
+            "renderer_methods": APP_IPC_RENDERER_METHODS,
+            "transports": [
+                "stdio-ndjson",
+                "local-endpoint-ndjson",
+                "socketio-runtime-relay"
+            ],
+            "features": {
+                "request_response": true,
+                "events": true,
+                "structured_errors": true,
+                "compressed_responses": true,
+                "event_resume": false,
+            },
+        })
     }
 
     pub async fn serve_stdio(&self) -> Result<(), String> {
@@ -613,15 +860,100 @@ impl AppIpcServer {
         self.serve_io(tokio::io::stdin(), tokio::io::stdout()).await
     }
 
+    pub async fn serve_local_endpoint(&self, endpoint: &str, token: &str) -> Result<(), String> {
+        validate_local_endpoint_credentials(endpoint, token)?;
+        self.serve_platform_endpoint(endpoint, token).await
+    }
+
+    #[cfg(unix)]
+    async fn serve_platform_endpoint(&self, endpoint: &str, token: &str) -> Result<(), String> {
+        let path = Path::new(endpoint);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create app IPC socket directory: {error}"))?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("failed to secure app IPC socket directory: {error}"))?;
+        }
+        remove_stale_unix_socket(path).await?;
+        let listener = UnixListener::bind(path)
+            .map_err(|error| format!("failed to bind app IPC Unix socket: {error}"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to secure app IPC Unix socket: {error}"))?;
+        loop {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .map_err(|error| format!("failed to accept app IPC Unix socket: {error}"))?;
+            let server = self.clone();
+            let token = token.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = server.serve_authenticated_stream(stream, &token).await {
+                    write_executor_log_line(&format_executor_log(
+                        "app IPC local endpoint connection closed",
+                        &[("error", error)],
+                    ));
+                }
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    async fn serve_platform_endpoint(&self, endpoint: &str, token: &str) -> Result<(), String> {
+        if !endpoint.starts_with(r"\\.\pipe\") {
+            return Err("app IPC named pipe must use the \\\\.\\pipe\\ prefix".to_owned());
+        }
+        let mut first_instance = true;
+        let mut pipe = create_named_pipe_server(endpoint, first_instance)?;
+        loop {
+            pipe.connect()
+                .await
+                .map_err(|error| format!("failed to accept app IPC named pipe: {error}"))?;
+            let connected = pipe;
+            first_instance = false;
+            pipe = create_named_pipe_server(endpoint, first_instance)?;
+            let server = self.clone();
+            let token = token.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = server.serve_authenticated_stream(connected, &token).await {
+                    write_executor_log_line(&format_executor_log(
+                        "app IPC local endpoint connection closed",
+                        &[("error", error)],
+                    ));
+                }
+            });
+        }
+    }
+
+    async fn serve_authenticated_stream<S>(&self, mut stream: S, token: &str) -> Result<(), String>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let authenticated = authenticate_local_endpoint(&mut stream, token).await?;
+        if !authenticated {
+            return Ok(());
+        }
+        let (reader, writer) = split(stream);
+        self.serve_io(reader, writer).await
+    }
+
     pub async fn serve_io<R, W>(&self, reader: R, writer: W) -> Result<(), String>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (write_tx, mut write_rx) = mpsc::channel::<Value>(512);
+        let (priority_write_tx, mut priority_write_rx) =
+            mpsc::channel::<Value>(APP_IPC_WRITE_BUFFER_CAPACITY);
+        let (bulk_write_tx, mut bulk_write_rx) =
+            mpsc::channel::<Value>(APP_IPC_BULK_WRITE_BUFFER_CAPACITY);
         let mut writer_task = tokio::spawn(async move {
             let mut writer = writer;
-            while let Some(message) = write_rx.recv().await {
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    Some(message) = priority_write_rx.recv() => message,
+                    Some(message) = bulk_write_rx.recv() => message,
+                    else => break,
+                };
                 write_message(&mut writer, &message)
                     .await
                     .map_err(|error| format!("failed to write app IPC message: {error}"))?;
@@ -629,16 +961,17 @@ impl AppIpcServer {
             Ok::<(), String>(())
         });
 
-        write_tx
+        priority_write_tx
             .send(self.ready_event())
             .await
             .map_err(|error| format!("failed to queue app IPC ready event: {error}"))?;
 
         let mut reader = BufReader::new(reader);
         let mut events = self.event_tx.subscribe();
-        let mut line = String::new();
+        let mut frame = Vec::new();
+        let mut bulk_backpressure_reported = false;
         loop {
-            line.clear();
+            frame.clear();
             tokio::select! {
                 writer = &mut writer_task => {
                     return match writer {
@@ -647,16 +980,22 @@ impl AppIpcServer {
                         Err(error) => Err(format!("app IPC writer task failed: {error}")),
                     };
                 }
-                read = reader.read_line(&mut line) => {
+                read = reader.read_until(b'\n', &mut frame) => {
                     let bytes_read = read
                         .map_err(|error| format!("failed to read app IPC request: {error}"))?;
                     if bytes_read == 0 {
                         writer_task.abort();
                         return Ok(());
                     }
+                    let request_line = match std::str::from_utf8(&frame) {
+                        Ok(line) => line.to_owned(),
+                        Err(error) => {
+                            log_invalid_app_ipc_frame(&frame, error);
+                            continue;
+                        }
+                    };
                     let server = self.clone();
-                    let response_tx = write_tx.clone();
-                    let request_line = line.clone();
+                    let response_tx = priority_write_tx.clone();
                     let (request_id, method) = app_ipc_request_metadata(&request_line);
                     tokio::spawn(async move {
                         let started_at = Instant::now();
@@ -735,16 +1074,60 @@ impl AppIpcServer {
                 event = events.recv() => {
                     match event {
                         Ok(message) => {
-                            write_tx.send(message)
-                                .await
-                                .map_err(|error| format!("failed to queue app IPC event: {error}"))?;
+                            if is_bulk_app_ipc_event(&message) {
+                                match bulk_write_tx.try_send(message) {
+                                    Ok(()) => bulk_backpressure_reported = false,
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        if !bulk_backpressure_reported {
+                                            bulk_backpressure_reported = true;
+                                            write_executor_error_line(&format_executor_log(
+                                                "app IPC bulk event backpressure; transcript recovery requested",
+                                                &[(
+                                                    "capacity",
+                                                    APP_IPC_BULK_WRITE_BUFFER_CAPACITY.to_string(),
+                                                )],
+                                            ));
+                                            let lagged = self.event_message(
+                                                "executor.event_lagged",
+                                                json!({
+                                                    "skipped": 1,
+                                                    "reason": "ipc_backpressure",
+                                                }),
+                                            );
+                                            priority_write_tx.send(lagged)
+                                                .await
+                                                .map_err(|error| format!(
+                                                    "failed to queue app IPC backpressure event: {error}"
+                                                ))?;
+                                        }
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        return Err("app IPC bulk writer queue closed".to_owned());
+                                    }
+                                }
+                            } else {
+                                if priority_write_tx.capacity() == 0 {
+                                    write_executor_error_line(&format_executor_log(
+                                        "app IPC priority event backpressure",
+                                        &[(
+                                            "capacity",
+                                            APP_IPC_WRITE_BUFFER_CAPACITY.to_string(),
+                                        )],
+                                    ));
+                                }
+                                priority_write_tx.send(message)
+                                    .await
+                                    .map_err(|error| format!(
+                                        "failed to queue app IPC priority event: {error}"
+                                    ))?;
+                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             let message = self.event_message(
                                 "executor.event_lagged",
                                 json!({ "skipped": skipped }),
                             );
-                            write_tx.send(message)
+                            priority_write_tx.send(message)
                                 .await
                                 .map_err(|error| format!("failed to queue app IPC lag event: {error}"))?;
                         }
@@ -836,6 +1219,148 @@ impl AppIpcServer {
         serde_json::to_value(apply_post_processor(result, command.post_processor))
             .map_err(|error| AppIpcError::new("internal_error", error.to_string()))
     }
+}
+
+fn validate_local_endpoint_credentials(endpoint: &str, token: &str) -> Result<(), String> {
+    if endpoint.trim().is_empty() {
+        return Err("app IPC local endpoint is required".to_owned());
+    }
+    if token.len() < 32 || token.len() > 1024 {
+        return Err("app IPC local endpoint token must contain 32-1024 bytes".to_owned());
+    }
+    Ok(())
+}
+
+async fn authenticate_local_endpoint<S>(
+    stream: &mut S,
+    expected_token: &str,
+) -> Result<bool, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let frame = tokio::time::timeout(
+        Duration::from_secs(APP_IPC_AUTH_TIMEOUT_SECONDS),
+        read_auth_frame(stream),
+    )
+    .await
+    .map_err(|_| "app IPC local endpoint authentication timed out".to_owned())??;
+    let authenticated = parse_auth_token(&frame)
+        .is_some_and(|token| constant_time_equal(token.as_bytes(), expected_token.as_bytes()));
+    let response = if authenticated {
+        json!({
+            "type": "authenticated",
+            "ok": true,
+            "protocol_version": APP_IPC_PROTOCOL_VERSION,
+        })
+    } else {
+        json!({
+            "type": "authenticated",
+            "ok": false,
+            "error": {
+                "code": "authentication_failed",
+                "message": "Local executor authentication failed",
+            },
+        })
+    };
+    write_message(stream, &response)
+        .await
+        .map_err(|error| format!("failed to write app IPC authentication response: {error}"))?;
+    Ok(authenticated)
+}
+
+async fn read_auth_frame<S>(stream: &mut S) -> Result<Vec<u8>, String>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut frame = Vec::with_capacity(256);
+    let mut byte = [0_u8; 1];
+    while frame.len() < APP_IPC_MAX_AUTH_FRAME_BYTES {
+        let count = stream
+            .read(&mut byte)
+            .await
+            .map_err(|error| format!("failed to read app IPC authentication frame: {error}"))?;
+        if count == 0 {
+            return Err("app IPC local endpoint closed before authentication".to_owned());
+        }
+        if byte[0] == b'\n' {
+            return Ok(frame);
+        }
+        frame.push(byte[0]);
+    }
+    Err("app IPC authentication frame exceeds size limit".to_owned())
+}
+
+fn parse_auth_token(frame: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(frame).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("authenticate")
+        || value.get("protocol_version").and_then(Value::as_u64) != Some(APP_IPC_PROTOCOL_VERSION)
+    {
+        return None;
+    }
+    value
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    let length = left.len().max(right.len());
+    for index in 0..length {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or_default()
+                ^ right.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
+}
+
+#[cfg(unix)]
+async fn remove_stale_unix_socket(path: &Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to inspect app IPC Unix socket: {error}")),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err("refusing to replace a non-socket app IPC endpoint".to_owned());
+    }
+    std::fs::remove_file(path)
+        .map_err(|error| format!("failed to remove stale app IPC Unix socket: {error}"))
+}
+
+#[cfg(windows)]
+fn create_named_pipe_server(endpoint: &str, first: bool) -> Result<NamedPipeServer, String> {
+    ServerOptions::new()
+        .first_pipe_instance(first)
+        .reject_remote_clients(true)
+        .create(endpoint)
+        .map_err(|error| format!("failed to create app IPC named pipe: {error}"))
+}
+
+fn is_bulk_app_ipc_event(message: &Value) -> bool {
+    match message.get("event").and_then(Value::as_str) {
+        Some("runtime.plan.updated") => true,
+        Some("response.block.created") => {
+            app_ipc_event_data(message)
+                .and_then(|data| data.get("block"))
+                .and_then(|block| block.get("type"))
+                .and_then(Value::as_str)
+                == Some("file_changes")
+        }
+        Some("response.block.updated") => app_ipc_event_data(message)
+            .and_then(|data| data.get("updates"))
+            .is_some_and(|updates| {
+                updates.get("tool_output_delta").is_some() || updates.get("file_changes").is_some()
+            }),
+        _ => false,
+    }
+}
+
+fn app_ipc_event_data(message: &Value) -> Option<&Value> {
+    message
+        .get("payload")
+        .and_then(|payload| payload.get("data"))
 }
 
 async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Value, AppIpcError> {
@@ -1245,6 +1770,14 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                     .map_err(task_runtime_error)?,
             )
         }
+        "todos.bindings.batch" => {
+            let task_ids = string_list_field(params.get("task_ids"), "task_ids")?;
+            serialize_task_value(
+                runtime
+                    .list_task_bindings_batch(&task_ids)
+                    .map_err(task_runtime_error)?,
+            )
+        }
         "todos.bind" | "projects.bind_task" => {
             let project_id = required_task_string(&params, "project_id")?;
             let item_id = params.get("item_id").and_then(Value::as_str);
@@ -1271,11 +1804,30 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                     .map_err(task_runtime_error)?,
             )
         }
+        "runtime_tasks.system_context" => {
+            let device_id = required_task_string(&params, "device_id")?;
+            let runtime_task_id = required_task_string(&params, "task_id")?;
+            serialize_task_value(
+                runtime
+                    .find_system_task_binding(device_id, runtime_task_id)
+                    .map_err(task_runtime_error)?,
+            )
+        }
+        "runtime_tasks.user_context" => {
+            let device_id = required_task_string(&params, "device_id")?;
+            let runtime_task_id = required_task_string(&params, "task_id")?;
+            serialize_task_value(
+                runtime
+                    .find_user_task_binding(device_id, runtime_task_id)
+                    .map_err(task_runtime_error)?,
+            )
+        }
         "runtime_tasks.unbind" => {
             let device_id = required_task_string(&params, "device_id")?;
             let runtime_task_id = required_task_string(&params, "task_id")?;
+            let item_id = params.get("item_id").and_then(Value::as_str);
             runtime
-                .unbind_task(device_id, runtime_task_id)
+                .unbind_task(device_id, runtime_task_id, item_id)
                 .map_err(task_runtime_error)?;
             Ok(json!({"unbound": true}))
         }
@@ -1590,9 +2142,21 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
         "deliveries.finalize" => {
             let item_id = required_task_string(&params, "item_id")?;
             let delivery_id = required_task_string(&params, "delivery_id")?;
+            let input = params
+                .get("finalize")
+                .cloned()
+                .map(serde_json::from_value::<DeliveryFinalize>)
+                .transpose()
+                .map_err(|error| {
+                    AppIpcError::new(
+                        "invalid_request",
+                        format!("invalid finalize input: {error}"),
+                    )
+                })?
+                .unwrap_or_default();
             serialize_task_value(
                 runtime
-                    .finalize_delivery(item_id, delivery_id)
+                    .finalize_delivery(item_id, delivery_id, input)
                     .map_err(task_runtime_error)?,
             )
         }
@@ -1935,6 +2499,20 @@ fn log_app_ipc_request(
     write_executor_log_line(&format_executor_log(event, &fields));
 }
 
+fn log_invalid_app_ipc_frame(frame: &[u8], error: std::str::Utf8Error) {
+    let mut fields = vec![
+        ("bytes", frame.len().to_string()),
+        ("valid_up_to", error.valid_up_to().to_string()),
+    ];
+    if let Some(error_len) = error.error_len() {
+        fields.push(("invalid_sequence_bytes", error_len.to_string()));
+    }
+    write_executor_log_line(&format_executor_log(
+        "invalid app IPC frame discarded",
+        &fields,
+    ));
+}
+
 fn log_app_ipc_response_error(
     request_id: Option<&str>,
     method: Option<&str>,
@@ -1967,6 +2545,7 @@ pub async fn serve_app_ipc_sidecar(
     device_id: String,
     runtime_instance_id: String,
 ) -> Result<(), String> {
+    crate::task_runtime::mcp_http::ensure_space_mcp_http_endpoint().await?;
     let server = AppIpcServer::new()
         .with_device_id(normalize_device_id(device_id))
         .with_runtime_instance_id(runtime_instance_id)
@@ -2030,18 +2609,18 @@ fn local_app_command(command_key: &str) -> Option<LocalAppCommandDefinition> {
             None,
         )),
         "git_diff" => Some(command_definition(
-            "bash -lc <git_workspace_diff>",
-            &["bash", "-lc", GIT_WORKSPACE_DIFF_SCRIPT],
+            "bash -c <git_workspace_diff>",
+            &["bash", "-c", GIT_WORKSPACE_DIFF_SCRIPT],
             None,
         )),
         "git_branch_diff" => Some(command_definition(
-            "bash -lc <git_branch_diff>",
-            &["bash", "-lc", GIT_BRANCH_DIFF_SCRIPT],
+            "bash -c <git_branch_diff>",
+            &["bash", "-c", GIT_BRANCH_DIFF_SCRIPT],
             None,
         )),
         "git_branch_diff_shortstat" => Some(command_definition(
-            "bash -lc <git_branch_diff_shortstat>",
-            &["bash", "-lc", GIT_BRANCH_DIFF_SHORTSTAT_SCRIPT],
+            "bash -c <git_branch_diff_shortstat>",
+            &["bash", "-c", GIT_BRANCH_DIFF_SHORTSTAT_SCRIPT],
             None,
         )),
         "git_diff_unstaged" => Some(command_definition(
@@ -2095,6 +2674,22 @@ fn local_app_command(command_key: &str) -> Option<LocalAppCommandDefinition> {
             ],
             Some(PostProcessor::Json),
         )),
+        "git_github_pull_requests_batch" => Some(command_definition(
+            "gh api --method GET repos/{owner}/{repo}/pulls?state=all&per_page=100",
+            &[
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                "repos/{owner}/{repo}/pulls?state=all&per_page=100",
+                "--jq",
+                concat!(
+                    "[.[] | {number, html_url, title, state, draft, ",
+                    "head: {ref: .head.ref}, updated_at, merged_at}]"
+                ),
+            ],
+            Some(PostProcessor::Json),
+        )),
         "git_github_pull_request_merge_queue" => Some(command_definition(
             "gh api graphql <pull-request-merge-queue-query>",
             &[
@@ -2104,6 +2699,11 @@ fn local_app_command(command_key: &str) -> Option<LocalAppCommandDefinition> {
                 "-f",
                 "query=query($url:URI!){resource(url:$url){... on PullRequest{mergeQueueEntry{id}}}}",
             ],
+            Some(PostProcessor::Json),
+        )),
+        "git_github_pull_request_merge_queue_batch" => Some(command_definition(
+            "gh api graphql",
+            &["gh", "api", "graphql"],
             Some(PostProcessor::Json),
         )),
         "git_gitlab_merge_requests" => Some(command_definition(
@@ -2122,6 +2722,24 @@ fn local_app_command(command_key: &str) -> Option<LocalAppCommandDefinition> {
                 "--output",
                 "json",
                 "--source-branch",
+            ],
+            Some(PostProcessor::Json),
+        )),
+        "git_gitlab_merge_requests_batch" => Some(command_definition(
+            "glab mr list --all",
+            &[
+                "glab",
+                "mr",
+                "list",
+                "--all",
+                "--per-page",
+                "100",
+                "--order",
+                "updated_at",
+                "--sort",
+                "desc",
+                "--output",
+                "json",
             ],
             Some(PostProcessor::Json),
         )),
@@ -2269,7 +2887,7 @@ fn response_message(request_id: &str, result: Value) -> Value {
         "type": "response",
         "id": request_id,
         "ok": true,
-        "result": result,
+        "result": encode_app_ipc_response("app_ipc_request", result),
     })
 }
 
@@ -2295,19 +2913,26 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 }
 
 fn string_list(value: Option<&Value>) -> Result<Vec<String>, AppIpcError> {
+    string_list_field(value, "args")
+}
+
+fn string_list_field(value: Option<&Value>, field: &str) -> Result<Vec<String>, AppIpcError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
-        return Err(AppIpcError::new("bad_request", "args must be a list"));
+        return Err(AppIpcError::new(
+            "bad_request",
+            format!("{field} must be a list"),
+        ));
     };
 
     items
         .iter()
         .map(|item| {
-            item.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| AppIpcError::new("bad_request", "args must contain only strings"))
+            item.as_str().map(str::to_owned).ok_or_else(|| {
+                AppIpcError::new("bad_request", format!("{field} must contain only strings"))
+            })
         })
         .collect()
 }
@@ -2417,4 +3042,247 @@ where
     bytes.push(b'\n');
     writer.write_all(&bytes).await?;
     writer.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+    use tokio::io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[cfg(unix)]
+    use tokio::net::UnixStream;
+    #[cfg(unix)]
+    use tokio::time::Duration;
+
+    use super::{is_bulk_app_ipc_event, local_app_command, AppIpcServer};
+
+    #[test]
+    fn prioritizes_chat_events_over_diagnostic_blocks() {
+        assert!(is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.block.updated",
+            "payload": {
+                "data": {
+                    "updates": {
+                        "tool_output_delta": "diagnostic output"
+                    }
+                }
+            }
+        })));
+        assert!(is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.block.created",
+            "payload": {
+                "data": {
+                    "block": {
+                        "type": "file_changes"
+                    }
+                }
+            }
+        })));
+        assert!(is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "runtime.plan.updated",
+        })));
+        assert!(!is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.block.created",
+            "payload": {
+                "data": {
+                    "block": {
+                        "type": "text"
+                    }
+                }
+            }
+        })));
+        assert!(!is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.block.updated",
+            "payload": {
+                "data": {
+                    "updates": {
+                        "status": "done"
+                    }
+                }
+            }
+        })));
+        assert!(!is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.output_text.delta",
+        })));
+        assert!(!is_bulk_app_ipc_event(&json!({
+            "type": "event",
+            "event": "response.completed",
+        })));
+    }
+
+    #[test]
+    fn git_diff_commands_do_not_start_a_login_shell() {
+        for command_key in ["git_diff", "git_branch_diff", "git_branch_diff_shortstat"] {
+            let command = local_app_command(command_key).expect("command must be registered");
+
+            assert_eq!(command.argv.first(), Some(&"bash"));
+            assert_eq!(command.argv.get(1), Some(&"-c"));
+            assert!(!command.argv.contains(&"-l"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_frame_does_not_stop_app_ipc() {
+        let server = AppIpcServer::new();
+        let (client, executor) = duplex(4096);
+        let (client_reader, mut client_writer) = split(client);
+        let (executor_reader, executor_writer) = split(executor);
+        let serving = tokio::spawn(async move {
+            server
+                .serve_io(executor_reader, executor_writer)
+                .await
+                .expect("app IPC should stay available after a malformed frame");
+        });
+
+        client_writer
+            .write_all(b"\xff\n")
+            .await
+            .expect("invalid frame should be written");
+        client_writer
+            .write_all(
+                br#"{"type":"request","id":"health-after-invalid","method":"executor.health","params":{}}
+"#,
+            )
+            .await
+            .expect("health request should be written");
+        let mut client_reader = BufReader::new(client_reader);
+        let mut output = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            client_reader
+                .read_line(&mut line)
+                .await
+                .expect("app IPC output should remain valid UTF-8");
+            output.push(line);
+        }
+        client_writer
+            .shutdown()
+            .await
+            .expect("client input should close");
+        serving.await.expect("app IPC task should finish");
+
+        let messages = output
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid app IPC JSON"))
+            .collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| {
+            message.get("event") == Some(&Value::String("executor.ready".to_owned()))
+        }));
+        assert!(messages.iter().any(|message| {
+            message.get("id") == Some(&Value::String("health-after-invalid".to_owned()))
+                && message.get("ok") == Some(&Value::Bool(true))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_endpoint_authenticates_before_serving_requests() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let endpoint = directory.path().join("executor.sock");
+        let token = "0123456789abcdef0123456789abcdef";
+        let server = AppIpcServer::new();
+        let endpoint_for_server = endpoint.clone();
+        let serving = tokio::spawn(async move {
+            server
+                .serve_local_endpoint(endpoint_for_server.to_str().unwrap(), token)
+                .await
+        });
+        for _ in 0..100 {
+            if endpoint.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(endpoint.exists(), "executor socket should be created");
+        assert_eq!(
+            std::fs::metadata(&endpoint)
+                .expect("socket metadata should be readable")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let invalid = UnixStream::connect(&endpoint)
+            .await
+            .expect("invalid client should connect");
+        let (invalid_reader, mut invalid_writer) = split(invalid);
+        invalid_writer
+            .write_all(
+                br#"{"type":"authenticate","protocol_version":1,"token":"invalid-invalid-invalid-invalid"}
+"#,
+            )
+            .await
+            .expect("invalid authentication should be written");
+        let mut invalid_reader = BufReader::new(invalid_reader);
+        let mut invalid_line = String::new();
+        invalid_reader
+            .read_line(&mut invalid_line)
+            .await
+            .expect("authentication rejection should be read");
+        let invalid_message: Value =
+            serde_json::from_str(&invalid_line).expect("authentication rejection should be JSON");
+        assert_eq!(invalid_message["ok"], false);
+        assert_eq!(
+            invalid_message["error"]["code"],
+            Value::String("authentication_failed".to_owned())
+        );
+
+        let valid = UnixStream::connect(&endpoint)
+            .await
+            .expect("valid client should connect");
+        let (valid_reader, mut valid_writer) = split(valid);
+        valid_writer
+            .write_all(
+                format!(
+                    "{{\"type\":\"authenticate\",\"protocol_version\":1,\"token\":\"{token}\"}}\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("authentication should be written");
+        let mut valid_reader = BufReader::new(valid_reader);
+        let mut authentication = String::new();
+        valid_reader
+            .read_line(&mut authentication)
+            .await
+            .expect("authentication response should be read");
+        let authentication: Value =
+            serde_json::from_str(&authentication).expect("authentication response should be JSON");
+        assert_eq!(authentication["ok"], true);
+        valid_writer
+            .write_all(
+                br#"{"type":"request","id":"health","method":"executor.health","params":{}}
+"#,
+            )
+            .await
+            .expect("health request should be written");
+        let mut messages = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            valid_reader
+                .read_line(&mut line)
+                .await
+                .expect("executor message should be read");
+            messages.push(
+                serde_json::from_str::<Value>(&line).expect("executor message should be JSON"),
+            );
+        }
+        assert!(messages
+            .iter()
+            .any(|message| { message["event"] == Value::String("executor.ready".to_owned()) }));
+        assert!(messages.iter().any(|message| {
+            message["id"] == Value::String("health".to_owned()) && message["ok"] == true
+        }));
+
+        serving.abort();
+        let _ = serving.await;
+    }
 }
