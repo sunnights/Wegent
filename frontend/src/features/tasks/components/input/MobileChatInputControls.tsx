@@ -209,6 +209,7 @@ export function MobileChatInputControls({
 }: MobileChatInputControlsProps) {
   const { t } = useTranslation('chat')
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+  const [contextSelectorOpen, setContextSelectorOpen] = useState(false)
   const moreMenuButtonRef = useRef<HTMLButtonElement>(null)
   const moreMenuRef = useRef<HTMLDivElement>(null)
   const [moreMenuStyle, setMoreMenuStyle] = useState<React.CSSProperties>({})
@@ -242,12 +243,27 @@ export function MobileChatInputControls({
     effectiveRequiresWorkspace !== false
   const showBranchAction = showRepositoryAction && Boolean(selectedRepo)
   const hasSecondaryActions = showAttachmentAction || showChatContexts || showSkillAction
+  const closeMoreMenu = useCallback(() => {
+    setMoreMenuOpen(false)
+    setContextSelectorOpen(false)
+  }, [])
   const handleAttachmentFileSelect = useCallback(
     (files: File | File[]) => {
-      setMoreMenuOpen(false)
+      closeMoreMenu()
       onFileSelect(files)
     },
-    [onFileSelect]
+    [closeMoreMenu, onFileSelect]
+  )
+  const handleContextSelectorOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) {
+        setContextSelectorOpen(true)
+        return
+      }
+      closeMoreMenu()
+      moreMenuButtonRef.current?.focus()
+    },
+    [closeMoreMenu]
   )
 
   const updateMoreMenuPosition = useCallback(() => {
@@ -314,12 +330,12 @@ export function MobileChatInputControls({
         return
       }
       if (isOwnedPopoverTarget(target)) return
-      setMoreMenuOpen(false)
+      closeMoreMenu()
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || isOwnedPopoverTarget(event.target))
         return
-      setMoreMenuOpen(false)
+      closeMoreMenu()
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
@@ -328,7 +344,7 @@ export function MobileChatInputControls({
       document.removeEventListener('pointerdown', handlePointerDown)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [moreMenuOpen])
+  }, [closeMoreMenu, moreMenuOpen])
 
   // Render send button based on state
   const renderSendButton = () => {
@@ -445,7 +461,13 @@ export function MobileChatInputControls({
           aria-label="More actions"
           data-testid="mobile-input-more-actions-button"
           title="More actions"
-          onClick={() => setMoreMenuOpen(open => !open)}
+          onClick={() => {
+            if (moreMenuOpen) {
+              closeMoreMenu()
+              return
+            }
+            setMoreMenuOpen(true)
+          }}
           className="h-8 w-8 p-0 rounded-full border border-border bg-base text-text-muted hover:text-text-primary hover:bg-hover"
         >
           <Plus className="h-4 w-4" />
@@ -455,7 +477,7 @@ export function MobileChatInputControls({
           <div
             ref={moreMenuRef}
             data-testid="mobile-input-more-actions-menu"
-            className="fixed z-50 w-56 overflow-y-auto overscroll-contain rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
+            className={`fixed z-50 w-56 overflow-y-auto overscroll-contain rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md ${contextSelectorOpen ? 'invisible pointer-events-none' : ''}`}
             style={moreMenuStyle}
           >
             {hasSecondaryActions && (
@@ -474,6 +496,7 @@ export function MobileChatInputControls({
                     onContextsChange={setSelectedContexts}
                     excludeKnowledgeBaseId={knowledgeBaseId}
                     triggerVariant="menu-item"
+                    onSelectorOpenChange={handleContextSelectorOpenChange}
                   />
                 )}
                 {showSkillAction && onToggleSkill && (
