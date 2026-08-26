@@ -11,6 +11,7 @@ core_segments=(
   project-automation
   project-assignment-notification
   offline-local-project-space
+  core-dsh-plugin-management
   project-ai-settings
   model-routing
   permission-modes
@@ -24,6 +25,7 @@ core_segments=(
   runtime-terminal-convergence
   running-conversation-history
   codex-notification-isolation
+  executor-stream-recovery
   context-compaction
   split-workbench
   native-window-startup
@@ -74,33 +76,51 @@ cloud_segments=(
   automation-lifecycle
   project-automation
   plugin-auto-update
+  plugin-workspace-publication
 )
-# Group checkpoints by observed Cloud CI duration and order each shard from
-# longest to shortest so the eight serial runners finish at similar times.
+# Group checkpoints by observed Cloud CI duration so every serial shard stays
+# below the desktop suite's critical-path budget. Keep 15 Cloud shards so the
+# 17 Core shards and Plugins job fit the observed 33-runner Linux capacity.
 # shellcheck disable=SC2054 # Each element is one comma-joined shard.
 cloud_shards=(
-  goal-lifecycle,telemetry-consent,cloud-worktree-capability
-  model-routing,plugin-auto-update,priority-filter
+  core-task-flow
   embedded-browser,cloud-worktree-device-restart,cloud-project-creation
-  resilience,cloud-worktree-queued-cancel,browser-multi-tabs
-  core-task-flow,supervisor-lifecycle,automation-lifecycle
-  window-lifecycle,cloud-worktree-tools,cloud-worktree-archive-restore
-  project-automation,workspace-attachments,cloud-worktree-create
-  conversation-state,rendering-extensions,workspace-tabs
+  goal-lifecycle,cloud-worktree-archive-restore
+  rendering-extensions
+  project-automation
+  window-lifecycle
+  priority-filter,cloud-worktree-tools
+  resilience,telemetry-consent
+  cloud-worktree-create,automation-lifecycle,browser-multi-tabs
+  workspace-tabs,cloud-worktree-capability
+  supervisor-lifecycle,conversation-state
+  model-routing
+  plugin-auto-update,plugin-workspace-publication
+  cloud-worktree-queued-cancel
+  workspace-attachments
 )
-# Group checkpoints by observed Core CI duration and order each shard so the
-# eight serial runners stay balanced while reusing the same prebuilt
-# application.
+# Group checkpoints by observed Core CI duration so every serial shard stays
+# below the desktop suite's critical-path budget while reusing the same
+# prebuilt application.
 # shellcheck disable=SC2054 # Each element is one comma-joined shard.
 core_shards=(
-  rendering-extensions,runtime-task-queue,local-file-preview,context-compaction
-  project-ai-settings,window-lifecycle,permission-modes,cloud-space-mention,project-assignment-notification
-  core-task-flow,temporary-chat,codex-notification-isolation,task-attachments
-  claude-runtime,workspace-attachments,local-harness,harness-apps
-  conversation-state,goal-lifecycle,workspace-tabs,running-conversation-history
-  resilience,supervisor-lifecycle,runtime-terminal-convergence
-  model-routing,project-automation,automation-lifecycle,offline-local-project-space
-  embedded-browser,browser-toolbar-actions,priority-filter,remote-device-onboarding,split-workbench,native-window-startup,native-window-chrome,tray-lifecycle,change-request-status
+  harness-apps
+  supervisor-lifecycle,remote-device-onboarding
+  temporary-chat,local-file-preview
+  goal-lifecycle,embedded-browser,permission-modes,tray-lifecycle
+  conversation-state,project-ai-settings,offline-local-project-space,cloud-space-mention
+  claude-runtime,workspace-tabs,task-attachments
+  core-task-flow,change-request-status,context-compaction
+  window-lifecycle,runtime-terminal-convergence,browser-toolbar-actions
+  project-automation
+  resilience
+  workspace-attachments,automation-lifecycle
+  project-assignment-notification,split-workbench,priority-filter
+  rendering-extensions
+  runtime-task-queue,native-window-startup
+  local-harness,running-conversation-history,native-window-chrome
+  codex-notification-isolation,core-dsh-plugin-management,executor-stream-recovery
+  model-routing
 )
 
 validate_core_shards() {
@@ -234,6 +254,18 @@ classify_wework_path() {
   local path="$1"
 
   case "$path" in
+    # Documentation does not change the packaged desktop application.
+    wework/*.md)
+      return
+      ;;
+
+    # The native startup checkpoint owns splash-window creation and teardown.
+    wework/electron/src/host/startup-splash* | \
+      wework/electron/src/shell/startup-splash/*)
+      select_target "core:native-window-startup"
+      return
+      ;;
+
     # Browser-runner changes do not require a real desktop application.
     wework/e2e/tests/* | \
       wework/e2e/fixtures/* | \
@@ -246,6 +278,20 @@ classify_wework_path() {
       ;;
     wework/e2e/utils/mcp-elicitation-server.mjs)
       select_target "core:permission-modes"
+      return
+      ;;
+
+    # Core DSH plugin management owns an Electron-backed desktop checkpoint.
+    wework/src/components/plugins/CoreDshPluginManagementSection* | \
+      wework/src/features/dsh-plugins/* | \
+      wework/electron/src/runtime/core-dsh-plugin-manager*)
+      select_target "core:core-dsh-plugin-management"
+      return
+      ;;
+    wework/src/components/plugins/PluginManagementWorkspace*)
+      select_target "core:core-dsh-plugin-management"
+      select_target "core:project-ai-settings"
+      select_target "plugins:plugin-lifecycle"
       return
       ;;
 
@@ -485,6 +531,20 @@ classify_wework_path() {
       ;;
     wework/e2e/desktop/scenarios/codex-notification-isolation.scenario.mjs)
       select_target "core:codex-notification-isolation"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/executor-stream-recovery.scenario.mjs)
+      select_target "core:executor-stream-recovery"
+      return
+      ;;
+
+    # Git hosting preferences and explicit device synchronization share one
+    # independently bootstrapped real-Tauri checkpoint.
+    wework/src/api/devices* | \
+      wework/src/components/settings/GitHostingSettingsPage* | \
+      wework/src/types/gitCredentials.ts | \
+      wework/e2e/desktop/scenarios/change-request-status.scenario.mjs)
+      select_target "core:change-request-status"
       return
       ;;
 

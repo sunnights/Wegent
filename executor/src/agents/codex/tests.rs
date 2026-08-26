@@ -121,6 +121,15 @@ async fn notification_hub_delivers_unscoped_process_exit_to_each_thread() {
     }
 }
 
+#[test]
+fn shared_notification_lag_is_recoverable() {
+    let notification =
+        shared_notification_result(Err(broadcast::error::RecvError::Lagged(37)), None)
+            .expect("lagged notifications should keep the turn alive");
+
+    assert!(matches!(notification, SharedNotification::Lagged(37)));
+}
+
 #[tokio::test]
 async fn interaction_answer_router_matches_reverse_order_answers() {
     let (sender, receiver) = mpsc::channel(2);
@@ -387,6 +396,59 @@ fn mcp_form_elicitation_returns_accepted_form_content() {
             "_meta": Value::Null
         })
     );
+}
+
+#[test]
+fn mcp_tool_call_elicitation_can_be_auto_approved() {
+    let message = json!({
+        "id": 74,
+        "method": "mcpServer/elicitation/request",
+        "params": {
+            "serverName": "GitHub",
+            "mode": "form",
+            "message": "Allow GitHub to enable pull request auto-merge?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "_meta": {
+                "codex_approval_kind": "mcp_tool_call",
+                "persist": ["session"]
+            }
+        }
+    });
+
+    assert!(is_mcp_tool_call_approval(message_params(&message)));
+    assert_eq!(
+        mcp_server_tool_call_approval_response(&message)
+            .expect("MCP tool call approval should be accepted"),
+        json!({
+            "action": "accept",
+            "content": Value::Null,
+            "_meta": Value::Null
+        })
+    );
+}
+
+#[test]
+fn mcp_business_form_is_not_treated_as_tool_call_approval() {
+    let params = json!({
+        "serverName": "wegent-sites",
+        "mode": "form",
+        "message": "请选择内网访问范围。",
+        "requestedSchema": {
+            "type": "object",
+            "properties": {
+                "audience": {
+                    "type": "string",
+                    "enum": ["all", "owner"]
+                }
+            }
+        }
+    });
+
+    assert!(!is_mcp_tool_call_approval(&params));
+    assert!(mcp_server_elicitation_request_user_input_params(&params).is_some());
 }
 
 #[test]
@@ -707,6 +769,19 @@ fn non_project_launch_keeps_global_plugin_configuration() {
     let request = ExecutionRequest::default();
 
     assert!(project_plugin_config_overrides(&request).is_empty());
+}
+
+#[test]
+fn standalone_robot_launch_enables_configured_plugins() {
+    let mut request = ExecutionRequest::default();
+    request
+        .extra
+        .insert("project_plugin_ids".to_owned(), json!(["robot-tool@team"]));
+
+    assert_eq!(
+        project_plugin_config_overrides(&request),
+        vec!["plugins.\"robot-tool@team\".enabled=true"]
+    );
 }
 
 #[test]
@@ -2512,6 +2587,24 @@ fn codex_full_access_permission_profile_is_applied_by_default() {
         );
         assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("sandbox").is_none());
+    }
+}
+
+#[test]
+fn codex_only_auto_approves_mcp_tool_calls_with_full_access() {
+    let full_access = ExecutionRequest::default();
+    assert!(codex_auto_approve_mcp_tool_calls(&full_access));
+
+    for profile in [
+        CODEX_WORKSPACE_PERMISSION_PROFILE,
+        CODEX_READ_ONLY_PERMISSION_PROFILE,
+    ] {
+        let mut request = ExecutionRequest::default();
+        request.extra.insert(
+            "runtime_permission_profile".to_owned(),
+            Value::String(profile.to_owned()),
+        );
+        assert!(!codex_auto_approve_mcp_tool_calls(&request));
     }
 }
 

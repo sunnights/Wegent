@@ -1,18 +1,18 @@
 import { readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { createStartupSplash, type StartupSplashWindow } from './startup-splash.js'
+import {
+  createStartupSplash,
+  resolveStartupSplashTheme,
+  type StartupSplashTheme,
+  type StartupSplashWindow,
+} from './startup-splash.js'
 
 class FakeSplashWindow implements StartupSplashWindow {
   private readonly listeners = new Map<string, () => void>()
   private destroyed = false
   private visible = false
 
-  readonly close = vi.fn(() => {
-    this.destroyed = true
-    this.visible = false
-    this.listeners.get('closed')?.()
-  })
   readonly isDestroyed = vi.fn(() => this.destroyed)
   readonly isVisible = vi.fn(() => this.visible)
   readonly show = vi.fn(() => {
@@ -25,80 +25,82 @@ class FakeSplashWindow implements StartupSplashWindow {
     executeJavaScript: vi.fn(async () => true),
     isDestroyed: vi.fn(() => false),
   }
-  readonly loadFile = vi.fn(async () => {
-    this.listeners.get('ready-to-show')?.()
-  })
 
   once(event: 'closed' | 'ready-to-show', listener: () => void): void {
     this.listeners.set(event, listener)
   }
+
+  ready(): void {
+    this.listeners.get('ready-to-show')?.()
+  }
 }
 
-function createFixture() {
+function createFixture(theme: StartupSplashTheme = 'light') {
   const target = new FakeSplashWindow()
-  const createWindow = vi.fn(() => target)
   const writePng = vi.fn(async () => undefined)
   let timestamp = 100
   const splash = createStartupSplash({
-    createWindow,
-    htmlPath: '/app/startup-splash/index.html',
+    window: target,
+    theme,
     now: () => timestamp++,
     writePng,
   })
-  return { createWindow, splash, target, writePng }
+  const show = async () => {
+    const shown = splash.show()
+    target.ready()
+    return shown
+  }
+  return { show, splash, target, writePng }
 }
 
 describe('StartupSplash', () => {
   test('ships a visible loading animation that reports readiness after two frames', async () => {
     const electronRoot =
       basename(process.cwd()) === 'electron' ? process.cwd() : join(process.cwd(), 'electron')
-    const asset = (name: string) =>
+    const shellAsset = (name: string) => readFile(join(electronRoot, 'src', 'shell', name), 'utf8')
+    const splashAsset = (name: string) =>
       readFile(join(electronRoot, 'src', 'shell', 'startup-splash', name), 'utf8')
 
     const [html, styles, script] = await Promise.all([
-      asset('index.html'),
-      asset('styles.css'),
-      asset('splash.js'),
+      shellAsset('index.html'),
+      splashAsset('styles.css'),
+      splashAsset('splash.js'),
     ])
 
-    expect(html).toContain('class="loading-track"')
-    expect(html).toContain('class="loading-bar"')
-    expect(styles).toContain('@keyframes loading-slide')
-    expect(styles).toContain('animation: loading-slide')
-    expect(script.match(/requestAnimationFrame/g)).toHaveLength(2)
-    expect(script).toContain("dataset.animationReady = 'true'")
+    expect(html).toContain('class="workbench-scene"')
+    expect(html).toContain('id="morph-primary"')
+    expect(html).toContain('class="stage-indicator"')
+    expect(html).toContain('class="robot"')
+    expect(html).toContain('class="human"')
+    expect(html).toContain('class="human-working-arm"')
+    expect(html).toContain('class="robot-working-arm"')
+    expect(html).toContain('aria-valuemax="3"')
+    expect(styles).toContain('@keyframes robot-bob')
+    expect(styles).toContain('@keyframes human-bob')
+    expect(html).toContain('document.documentElement.dataset.theme = theme')
+    expect(styles).toContain(":root[data-theme='dark']")
+    expect(styles).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(script).toContain('const stages =')
+    expect(script).toContain('requestAnimationFrame(animateMorph)')
+    expect(script).toContain("navigator.language.toLowerCase().startsWith('zh')")
+    expect(script).toContain("stageIndicator.setAttribute('aria-valuenow'")
+    expect(script).toMatch(
+      /requestAnimationFrame\(\(\) => \{\s+requestAnimationFrame\(\(\) => \{\s+document\.documentElement\.dataset\.animationReady = 'true'/
+    )
   })
 
-  test('creates a secure branded splash and records its visible animation timeline', async () => {
-    const { createWindow, splash, target } = createFixture()
+  test('shows the branded animation in the main startup window and records its timeline', async () => {
+    const { show, target } = createFixture()
 
-    const snapshot = await splash.show()
+    const snapshot = await show()
 
-    expect(createWindow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        width: 420,
-        height: 260,
-        show: false,
-        frame: false,
-        transparent: true,
-        resizable: false,
-        alwaysOnTop: true,
-        skipTaskbar: true,
-        backgroundColor: '#00000000',
-        webPreferences: {
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      })
-    )
-    expect(target.loadFile).toHaveBeenCalledWith('/app/startup-splash/index.html')
     expect(target.show).toHaveBeenCalledOnce()
     expect(target.webContents.executeJavaScript).toHaveBeenCalledWith(
       expect.stringContaining('dataset.animationReady')
     )
     expect(snapshot).toEqual({
       state: 'visible',
+      theme: 'light',
       events: [
         { name: 'created', timestamp: 100 },
         { name: 'shown', timestamp: 101 },
@@ -112,27 +114,42 @@ describe('StartupSplash', () => {
     })
   })
 
+  test('retains the saved dark appearance in the embedded splash snapshot', async () => {
+    const { show } = createFixture('dark')
+
+    const snapshot = await show()
+
+    expect(snapshot.theme).toBe('dark')
+  })
+
+  test('resolves explicit appearance modes before falling back to the system theme', () => {
+    expect(resolveStartupSplashTheme('light', true)).toBe('light')
+    expect(resolveStartupSplashTheme('dark', false)).toBe('dark')
+    expect(resolveStartupSplashTheme('system', true)).toBe('dark')
+    expect(resolveStartupSplashTheme('system', false)).toBe('light')
+    expect(resolveStartupSplashTheme(undefined, true)).toBe('dark')
+  })
+
   test('does not capture or write files during a production close', async () => {
-    const { splash, target, writePng } = createFixture()
-    await splash.show()
+    const { show, splash, target, writePng } = createFixture()
+    await show()
 
     const snapshot = await splash.close()
 
     expect(target.webContents.capturePage).not.toHaveBeenCalled()
     expect(writePng).not.toHaveBeenCalled()
-    expect(target.close).toHaveBeenCalledOnce()
     expect(snapshot.state).toBe('closed')
     expect(snapshot.events.at(-1)).toEqual({ name: 'closed', timestamp: 103 })
     expect(snapshot.window).toEqual({
       exists: true,
-      destroyed: true,
-      visible: false,
+      destroyed: false,
+      visible: true,
     })
   })
 
   test('captures and persists the rendered splash before closing when requested by E2E', async () => {
-    const { splash, target, writePng } = createFixture()
-    await splash.show()
+    const { show, splash, target, writePng } = createFixture()
+    await show()
 
     await splash.close({ capturePath: '/tmp/wework-e2e/startup-splash.png' })
 
@@ -141,17 +158,17 @@ describe('StartupSplash', () => {
       '/tmp/wework-e2e/startup-splash.png',
       Buffer.from('splash-png')
     )
-    expect(writePng.mock.invocationCallOrder[0]).toBeLessThan(
-      target.close.mock.invocationCallOrder[0]
-    )
   })
 
-  test('creates only one native window when show is called concurrently', async () => {
-    const { createWindow, splash } = createFixture()
+  test('shows the main startup window only once when show is called concurrently', async () => {
+    const { splash, target } = createFixture()
 
-    const [first, second] = await Promise.all([splash.show(), splash.show()])
+    const firstPromise = splash.show()
+    const secondPromise = splash.show()
+    target.ready()
+    const [first, second] = await Promise.all([firstPromise, secondPromise])
 
-    expect(createWindow).toHaveBeenCalledOnce()
+    expect(target.show).toHaveBeenCalledOnce()
     expect(first).toEqual(second)
   })
 })

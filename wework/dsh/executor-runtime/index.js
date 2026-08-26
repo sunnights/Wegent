@@ -1,4 +1,5 @@
 import { ExecutorRuntimeClient, ExecutorRuntimeError } from './executor-runtime-client.js'
+import { LocalEndpointEventStream } from './local-endpoint-event-stream.js'
 
 export const name = 'wework-executor-runtime'
 export const inject = ['webServer']
@@ -12,7 +13,7 @@ export async function apply(ctx) {
   ctx.effect(() => () => client.stop(), 'wework-executor-runtime: transport')
   register(ctx, BASE_PATH, (req, res) => describe(req, res, client))
   register(ctx, `${BASE_PATH}/rpc`, (req, res) => rpc(req, res, client))
-  register(ctx, `${BASE_PATH}/events`, (req, res) => handleExecutorEvents(req, res, client))
+  register(ctx, `${BASE_PATH}/events`, (req, res) => handleExecutorEvents(req, res))
 }
 
 function register(ctx, path, handler) {
@@ -59,33 +60,70 @@ async function rpc(req, res, client) {
   }
 }
 
-export async function handleExecutorEvents(req, res, client) {
+export async function handleExecutorEvents(
+  req,
+  res,
+  createEventStream = options => LocalEndpointEventStream.fromEnvironment(options)
+) {
   if (!trustedBrowserRequest(req)) return forbidden(res)
   if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
   const after = eventCursor(req)
+  let active = true
+  let eventStream = null
+  const disconnect = () => {
+    if (!active) return
+    active = false
+    eventStream?.stop()
+  }
+  req.once('close', disconnect)
+  res.once('close', disconnect)
+  res.on('error', disconnect)
   try {
-    const replay = client.replay(after)
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache, no-store',
       connection: 'keep-alive',
     })
-    let dispose = () => {}
-    const write = event => {
-      const writable = res.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
-      if (!writable) {
-        dispose()
-        res.end()
+    const writeChunk = chunk => {
+      if (!active || res.writableEnded || res.destroyed) {
+        disconnect()
+        return false
       }
+      const writable = res.write(chunk)
+      if (!writable) {
+        disconnect()
+        if (!res.writableEnded && !res.destroyed) res.end()
+      }
+      return writable
     }
-    for (const event of replay) write(event)
-    if (res.writableEnded) return
-    dispose = client.listen(write)
-    req.on('close', dispose)
-    res.write(': connected\n\n')
+    writeChunk(': connected\n\n')
+    if (!active) return
+    eventStream = createEventStream({
+      afterSequence: after,
+      onEvent(event) {
+        if (
+          event.protocolVersion !== 1 ||
+          !Number.isSafeInteger(event.sequence) ||
+          typeof event.event !== 'string'
+        ) {
+          disconnect()
+          if (!res.writableEnded && !res.destroyed) res.end()
+          return
+        }
+        writeChunk(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
+      },
+      onClose() {
+        disconnect()
+        if (!res.writableEnded && !res.destroyed) res.end()
+      },
+    })
+    await eventStream.start()
   } catch (error) {
+    disconnect()
     if (!res.headersSent) sendError(res, error)
-    else res.end(`event: error\ndata: ${JSON.stringify(errorBody(error))}\n\n`)
+    else if (!res.writableEnded && !res.destroyed) {
+      res.end(`event: error\ndata: ${JSON.stringify(errorBody(error))}\n\n`)
+    }
   }
 }
 

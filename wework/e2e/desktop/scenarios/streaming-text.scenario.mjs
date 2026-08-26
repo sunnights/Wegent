@@ -122,7 +122,8 @@ function responseCompleted(id) {
   }
 }
 
-function assistantMessage(text) {
+function assistantMessage(text, phase) {
+  const phaseFields = phase ? { phase } : {}
   return {
     type: 'response.output_item.done',
     item: {
@@ -130,6 +131,7 @@ function assistantMessage(text) {
       type: 'message',
       role: 'assistant',
       content: [{ type: 'output_text', text, annotations: [] }],
+      ...phaseFields,
     },
   }
 }
@@ -156,7 +158,8 @@ function functionCall(callId, name, argumentsValue) {
   ]
 }
 
-function reasoningEvents(itemId, text) {
+function reasoningEvents(itemId, text, deltaChunkSize = text.length) {
+  const deltas = text.match(new RegExp(`[\\s\\S]{1,${deltaChunkSize}}`, 'g')) ?? []
   return [
     {
       type: 'response.output_item.added',
@@ -175,13 +178,13 @@ function reasoningEvents(itemId, text) {
       summary_index: 0,
       part: { type: 'summary_text', text: '' },
     },
-    {
+    ...deltas.map(delta => ({
       type: 'response.reasoning_summary_text.delta',
       item_id: itemId,
       output_index: 0,
       summary_index: 0,
-      delta: text,
-    },
+      delta,
+    })),
     {
       type: 'response.reasoning_summary_text.done',
       item_id: itemId,
@@ -787,8 +790,8 @@ export function createDesktopScenario({
         response.end(
           sse([
             responseCreated(responseId),
-            ...reasoningEvents('wework-long-code-reasoning', LONG_CODE_REASONING),
-            assistantMessage(LONG_CODE_COMPLETION),
+            ...reasoningEvents('wework-long-code-reasoning', LONG_CODE_REASONING, 4),
+            assistantMessage(LONG_CODE_COMPLETION, 'final_answer'),
             responseCompleted(responseId),
           ])
         )

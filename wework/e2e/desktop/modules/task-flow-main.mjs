@@ -3,6 +3,8 @@ import {
   verifyLocalExecutorUsesCloudSocketUrl,
 } from './cloud-environment.mjs'
 
+import { tmpdir } from 'node:os'
+
 import { verifyCloudCheckpoint } from './cloud-checkpoint-flows.mjs'
 
 import {
@@ -77,10 +79,12 @@ import {
 } from './path-attachment-flows.mjs'
 
 import {
+  createCoreDshPluginFixture,
   initializeBlankCodexHome,
   installOfficialPluginFixture,
   uninstallOfficialPlugin,
   verifyCloudWorkPage,
+  verifyCoreDshPluginManagement,
   verifyMarketplacePluginLifecycle,
   verifyPluginLifecycle,
   verifySkillMentionRendering,
@@ -141,6 +145,7 @@ import {
   E2E_TRANSCRIPT_PAGE_SIZE,
   FILE_PANEL_ANCHOR_MARKER,
   FILE_PANEL_ANCHOR_PROMPT,
+  FILE_PANEL_LINK_NAME,
   FILE_PREVIEW_RESTORE_MARKER,
   GIT_SEED_CONTENT,
   GIT_SEED_NAME,
@@ -239,6 +244,7 @@ import {
   triggerModelReloadUntilCloudFailure,
   validateDesktopSegmentOptions,
   waitForE2EModelLabel,
+  waitForLogPattern,
   weworkDir,
   withTimeout,
   writeFile,
@@ -283,6 +289,9 @@ const PROJECT_AI_MODEL_ID = 'wework-deepseek-v4-pro'
 const PROJECT_AI_MODEL_LABEL = 'wework-deepseek-v4-pro'
 const PROJECT_AI_MODEL_VALUE = `runtime:${PROJECT_AI_MODEL_ID}`
 const PROJECT_AI_UPSTREAM_MODEL_ID = 'deepseek-v4-pro'
+const REMEMBERED_TASK_MODEL_ID = 'gpt-5.6-sol'
+const REMEMBERED_TASK_MODEL_LABEL = 'GPT 5.6 Sol'
+const REMEMBERED_TASK_REASONING = 'high'
 const PROJECT_QUICK_PHRASE_TITLE = 'Project constraint review'
 const PROJECT_QUICK_PHRASE_CONTENT = 'Review the project constraints before implementation.'
 
@@ -425,6 +434,23 @@ async function waitForProjectComposerPlugin(control) {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
   return itemTestId
+}
+
+async function selectRememberedTaskModel(control) {
+  await selectE2EModel(control, REMEMBERED_TASK_MODEL_ID, REMEMBERED_TASK_MODEL_LABEL)
+  await control.command('click', '[data-testid="model-selector-button"]')
+  await control.command('click', '[data-testid="model-control-menu-reasoning"]')
+  await control.command('waitFor', '[data-testid="model-control-reasoning-high"]', {
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    visible: true,
+  })
+  await control.command('click', '[data-testid="model-control-reasoning-high"]')
+  assert.match(
+    await control.command('getText', '[data-testid="model-control-menu-reasoning"]'),
+    /High|高/,
+    'The task composer did not select GPT 5.6 Sol with high reasoning'
+  )
+  await control.command('press', 'body', { key: 'Escape' })
 }
 
 async function verifyProjectAiSettings({
@@ -639,6 +665,50 @@ async function verifyProjectAiSettings({
     'A new conversation retained obsolete project instructions'
   )
   await captureVerificationScreenshot(control, 'project-ai-settings-10-next-conversation.png')
+
+  setPhase('project-ai-settings-remember-task-model')
+  await control.command('clickWhenEnabled', newConversationSelector)
+  await control.command('waitFor', composerSelector, {
+    timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+  })
+  await selectRememberedTaskModel(control)
+  const overriddenConversationRequest = await sendProjectAiCheckpointPrompt(
+    control,
+    composerSelector,
+    { createsConversation: true }
+  )
+  assert.equal(
+    overriddenConversationRequest.body.model,
+    REMEMBERED_TASK_MODEL_ID,
+    'The task-specific model override was not forwarded to Codex'
+  )
+  assert.equal(
+    overriddenConversationRequest.body.reasoning?.effort,
+    REMEMBERED_TASK_REASONING,
+    'The task-specific reasoning effort was not forwarded to Codex'
+  )
+  assert.ok(
+    JSON.stringify(overriddenConversationRequest.body).includes(PROJECT_AI_UPDATED_INSTRUCTIONS),
+    'The task-specific model override dropped the project instructions'
+  )
+
+  setPhase('project-ai-settings-next-task-remembers-model')
+  await control.command('clickWhenEnabled', newConversationSelector)
+  await control.command('waitFor', composerSelector, {
+    timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+  })
+  await waitForE2EModelLabel(control, [REMEMBERED_TASK_MODEL_LABEL])
+  await control.command('click', '[data-testid="model-selector-button"]')
+  assert.match(
+    await control.command('getText', '[data-testid="model-control-menu-reasoning"]'),
+    /High|高/,
+    'The next task did not remember the selected model and reasoning effort'
+  )
+  await captureVerificationScreenshot(
+    control,
+    'project-ai-settings-11-next-task-model-remembered.png'
+  )
+  await control.command('press', 'body', { key: 'Escape' })
 }
 
 async function verifyLocalModelRouting({
@@ -804,10 +874,12 @@ async function main() {
   const homePath = join(resultDir, 'home')
   const executorHome = join(resultDir, 'executor-home')
   const codexHome = join(executorHome, 'codex')
+  const codexSqliteHome = join(tmpdir(), 'wework-desktop-e2e', String(process.pid), 'codex-sqlite')
   const nativeCodexHome = join(resultDir, 'native-codex')
   const pluginMarketplacePath = join(resultDir, 'plugin-marketplace')
   const marketplacePluginPath = join(resultDir, 'marketplace-plugin')
   const officialPluginRepositoryPath = join(resultDir, 'openai-plugins')
+  const electronUserDataDirectory = join(resultDir, 'electron-user-data')
   const appLogPath = join(resultDir, 'app.log')
   const executorLogPath = join(resultDir, 'executor.log')
   await Promise.all([
@@ -815,8 +887,15 @@ async function main() {
     mkdir(secondaryProjectPath, { recursive: true }),
     mkdir(composerProjectPath, { recursive: true }),
     mkdir(homePath, { recursive: true }),
+    mkdir(codexSqliteHome, { recursive: true }),
   ])
-  await writeFile(join(workspacePath, GIT_SEED_NAME), GIT_SEED_CONTENT)
+  await Promise.all([
+    writeFile(join(workspacePath, GIT_SEED_NAME), GIT_SEED_CONTENT),
+    writeFile(
+      join(workspacePath, FILE_PANEL_LINK_NAME),
+      `${GIT_SEED_CONTENT}${FILE_PREVIEW_RESTORE_MARKER}\n`
+    ),
+  ])
   await writeFile(join(workspacePath, 'auth.ts'), 'export const authenticated = true\n')
   await writeFile(
     join(workspacePath, IMAGE_ARTIFACT_NAME),
@@ -838,6 +917,9 @@ async function main() {
       })
     }
     await createPluginMarketplaceFixture(marketplacePluginPath)
+    if (shouldRunPluginSegment('core-dsh-plugin-management')) {
+      await createCoreDshPluginFixture(resultDir)
+    }
     await mkdir(nativeCodexHome, { recursive: true })
     await writeFile(
       join(nativeCodexHome, 'config.toml'),
@@ -851,9 +933,13 @@ async function main() {
   await runChecked('git', ['config', 'user.email', 'desktop-e2e@wework.local'], {
     cwd: workspacePath,
   })
-  await runChecked('git', ['add', GIT_SEED_NAME, 'auth.ts', IMAGE_ARTIFACT_NAME], {
-    cwd: workspacePath,
-  })
+  await runChecked(
+    'git',
+    ['add', GIT_SEED_NAME, FILE_PANEL_LINK_NAME, 'auth.ts', IMAGE_ARTIFACT_NAME],
+    {
+      cwd: workspacePath,
+    }
+  )
   await runChecked('git', ['commit', '-m', 'test: initialize desktop e2e workspace'], {
     cwd: workspacePath,
   })
@@ -988,7 +1074,9 @@ async function main() {
     }
 
     const harnessRuntimes =
-      SELECTED_DESKTOP_SEGMENT === 'harness-apps' ? await prepareHarnessRuntimeRoots() : null
+      SELECTED_DESKTOP_SEGMENT === 'harness-apps'
+        ? await prepareHarnessRuntimeRoots(appBinary)
+        : null
     const electronCoreRuntimeRoot = process.env.WEWORK_HARNESS_RUNTIME_ROOT?.trim() || null
     if (electronCoreRuntimeRoot) {
       assert.equal(
@@ -1001,6 +1089,7 @@ async function main() {
       ...process.env,
       CODEX_BINARY_PATH: resolvedAppCodexBinary,
       CODEX_BIN: resolvedAppCodexBinary,
+      CODEX_SQLITE_HOME: codexSqliteHome,
       HOME: homePath,
       WEGENT_CODEX_HOME: codexHome,
       WEGENT_EXECUTOR_HOME: executorHome,
@@ -1036,7 +1125,7 @@ async function main() {
       WEWORK_EXECUTOR_SIDECAR: executorBinary,
       WEWORK_DESKTOP_RUNTIME: 'electron',
       WEWORK_EXECUTOR_PATH: executorBinary,
-      WEWORK_USER_DATA_DIR: join(resultDir, 'electron-user-data'),
+      WEWORK_USER_DATA_DIR: electronUserDataDirectory,
       ...(electronCoreRuntimeRoot ? { WEWORK_HARNESS_RUNTIME_ROOT: electronCoreRuntimeRoot } : {}),
       ...(harnessRuntimes
         ? {
@@ -1053,6 +1142,7 @@ async function main() {
           }
         : {}),
     }
+    delete appEnvironment.WEGENT_APP_IPC_DEVICE_ID
     const electronLaunchArguments =
       process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0
         ? (() => {
@@ -1080,6 +1170,13 @@ async function main() {
     app = await startDesktopAppProcess()
     const restartDesktopApp = async (options = null) => {
       const beforeStart = typeof options === 'function' ? options : options?.afterStop
+      const desktopDeviceIdPath = join(resultDir, 'electron-user-data', 'desktop-device-id')
+      const desktopDeviceIdBeforeRestart = (await readFile(desktopDeviceIdPath, 'utf8')).trim()
+      assert.match(
+        desktopDeviceIdBeforeRestart,
+        /^electron-/,
+        'Wework did not persist a valid Electron device identity before restart'
+      )
       const readyCountBeforeRestart = control.readyCount
       await stopDesktopAppProcess(app)
       await beforeStart?.()
@@ -1088,6 +1185,12 @@ async function main() {
         control.awaitReadyAfter(readyCountBeforeRestart),
         WORKBENCH_READY_TIMEOUT_MS,
         'The restarted Wework application did not reconnect to the desktop controller'
+      )
+      const desktopDeviceIdAfterRestart = (await readFile(desktopDeviceIdPath, 'utf8')).trim()
+      assert.equal(
+        desktopDeviceIdAfterRestart,
+        desktopDeviceIdBeforeRestart,
+        'Restarting Wework changed the persisted Electron device identity'
       )
       return app
     }
@@ -1555,6 +1658,15 @@ last_updated = "2026-07-30T00:00:00Z"`
         return officialPluginFixture
       }
 
+      if (shouldRunPluginSegment('core-dsh-plugin-management')) {
+        phase = 'core-dsh-plugin-management'
+        await verifyCoreDshPluginManagement({
+          control,
+          pluginRoot: join(resultDir, 'core-dsh-e2e-plugin'),
+          restartDesktopApp,
+          userDataDirectory: electronUserDataDirectory,
+        })
+      }
       if (shouldRunPluginSegment('plugin-marketplace-lifecycle')) {
         phase = 'plugin-marketplace-lifecycle'
         await verifyMarketplacePluginLifecycle({
@@ -2809,15 +2921,28 @@ last_updated = "2026-07-30T00:00:00Z"`
       await control.command('waitFor', '[data-testid="pause-response-button"]', {
         timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
       })
-      await control.command('click', '[data-testid="pause-response-button"]')
-      await control.command('waitFor', '[data-testid="assistant-stopped-notice"]', {
-        timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
-      })
-      const cancelledTaskSnapshot = JSON.parse(
+      const cancellationTaskSnapshot = JSON.parse(
         await control.command('getWorkbenchDebugSnapshot', 'body')
       )
-      const cancelledTaskId = cancelledTaskSnapshot.workbench?.currentRuntimeTask?.taskId
-      assert.ok(cancelledTaskId, 'The cancelled task did not expose its runtime task ID')
+      const cancelledTaskId = cancellationTaskSnapshot.workbench?.currentRuntimeTask?.taskId
+      assert.ok(cancelledTaskId, 'The running cancellation task did not expose its runtime task ID')
+      const cancellationExecutorLogOffset = (
+        await readFile(executorLogPath, 'utf8').catch(() => '')
+      ).length
+      await control.command('click', '[data-testid="pause-response-button"]')
+      await waitForLogPattern(
+        executorLogPath,
+        /app IPC request finished .* method=runtime\.tasks\.cancel .* ok=true/,
+        { fromOffset: cancellationExecutorLogOffset }
+      )
+      await waitForWorkbenchDebugState(
+        control,
+        snapshot =>
+          snapshot.workbench?.currentRuntimeTask?.taskId === cancelledTaskId &&
+          snapshot.workbench?.lifecycleCurrentTaskRunning === false &&
+          snapshot.pane?.status?.taskExecution?.status === 'cancelled',
+        'The current cancellation did not settle before releasing the upstream response'
+      )
       const cancelledTaskUnreadTestId = `runtime-local-task-unread-dot-${cancelledTaskId}`
       await waitForSnapshot(
         control,
@@ -2982,6 +3107,11 @@ last_updated = "2026-07-30T00:00:00Z"`
       await control.command('waitFor', '[data-testid="right-workspace-file-tab"]', {
         timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
       })
+      assert.equal(
+        await control.command('getText', '[data-testid="workspace-file-path"]'),
+        join(workspacePath, FILE_PANEL_LINK_NAME),
+        'The encoded Markdown file link did not resolve to the workspace file path'
+      )
       await control.command('finishAnimations', 'body')
       await new Promise(resolvePromise => setTimeout(resolvePromise, 500))
       const filePanelScrollerAfterOpen = await getSingleElementMetrics(
@@ -3107,7 +3237,7 @@ last_updated = "2026-07-30T00:00:00Z"`
           'getText',
           `${activeTaskWorkbenchSelector} [data-testid="workspace-file-path"]`
         ),
-        join(workspacePath, GIT_SEED_NAME),
+        join(workspacePath, FILE_PANEL_LINK_NAME),
         'The linked absolute file opened from the wrong workspace target'
       )
       await control.command('click', '[data-testid="right-workspace-new-tab-button"]')
@@ -3275,7 +3405,7 @@ last_updated = "2026-07-30T00:00:00Z"`
           'getText',
           `${activeTaskWorkbenchSelector} [data-testid="workspace-file-path"]`
         ),
-        join(workspacePath, GIT_SEED_NAME),
+        join(workspacePath, FILE_PANEL_LINK_NAME),
         'The linked absolute file path was lost after switching conversations'
       )
       await control.command('click', rightBrowserTabSelector)
@@ -3712,6 +3842,7 @@ last_updated = "2026-07-30T00:00:00Z"`
     await blockingNetworkProxy?.stop()
     await stopDesktopAppProcess(app)
     await control.close()
+    await rm(codexSqliteHome, { recursive: true, force: true })
     if (appBundlePath && process.platform === 'darwin') {
       spawnSync(MACOS_LAUNCH_SERVICES_REGISTER, ['-u', appBundlePath])
     }

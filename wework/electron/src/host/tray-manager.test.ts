@@ -30,7 +30,10 @@ function state(overrides: Partial<TrayMenuState> = {}): TrayMenuState {
   }
 }
 
-function setup(platform: NodeJS.Platform = 'darwin') {
+function setup(
+  platform: NodeJS.Platform = 'darwin',
+  applyIcon?: TrayManagerDependencies['applyIcon']
+) {
   const listeners = new Map<'click' | 'double-click', () => void>()
   const tray: TrayAdapter = {
     on: vi.fn((event, listener) => {
@@ -47,6 +50,7 @@ function setup(platform: NodeJS.Platform = 'darwin') {
     createTray: vi.fn(() => tray),
     buildMenu,
     dispatchAction,
+    applyIcon,
     platform,
   }
   const manager = new ElectronTrayManager(dependencies)
@@ -204,6 +208,55 @@ describe('ElectronTrayManager', () => {
       titleSupported: false,
       tooltip: 'Codex: 42%',
     })
+  })
+
+  test('uses the platform icon renderer when one is provided', () => {
+    const applyIcon = vi.fn()
+    const { manager, tray } = setup('darwin', applyIcon)
+
+    manager.setState(state({ usageTitle: 'Codex  79%\nAIGC 845.21' }))
+    manager.create()
+
+    expect(applyIcon).toHaveBeenCalledWith(
+      tray,
+      expect.objectContaining({ usageTitle: 'Codex  79%\nAIGC 845.21' })
+    )
+    expect(tray.setTitle).not.toHaveBeenCalled()
+  })
+
+  test('keeps renderer menu items while native status owns usage and running count', () => {
+    const applyIcon = vi.fn()
+    const { manager, tray } = setup('darwin', applyIcon)
+    manager.setState(
+      state({
+        usageTitle: 'renderer',
+        usageTooltip: null,
+        running: [{ id: 'task-1', title: 'Task', projectName: 'Project' }],
+      })
+    )
+    manager.setNativeStatus({
+      usageTitle: '5h 80%\n7d 60%',
+      usageTooltip: '1 个任务运行中',
+      runningCount: 1,
+      showRunningStatus: true,
+    })
+    manager.create()
+
+    expect(manager.snapshot()).toMatchObject({
+      title: '5h 80%\n7d 60%',
+      tooltip: '1 个任务运行中',
+    })
+    expect(applyIcon).toHaveBeenCalledWith(
+      tray,
+      expect.objectContaining({
+        runningCount: 1,
+        showRunningStatus: true,
+        usageTitle: '5h 80%\n7d 60%',
+      })
+    )
+    expect(manager.snapshot().menu).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'task:task-1' })])
+    )
   })
 
   test('updates the native menu and visual state after creation', () => {

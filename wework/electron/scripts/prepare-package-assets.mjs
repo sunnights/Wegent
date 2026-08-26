@@ -9,11 +9,16 @@ const repositoryRoot = resolve(weworkRoot, '..')
 const executorRoot = join(repositoryRoot, 'executor')
 const resourcesRoot = join(electronRoot, 'resources')
 const sharedResourcesRoot = join(weworkRoot, 'resources')
+const executorProfile = resolveExecutorProfile()
 
-await run('pnpm', ['prepare:harness-runtime', '--materialize'], weworkRoot)
-await run('pnpm', ['prepare:execution-runtime', '--materialize'], weworkRoot)
-
-const executorPath = process.env.WEWORK_EXECUTOR_PATH?.trim() || (await buildExecutor())
+const configuredExecutorPath = process.env.WEWORK_EXECUTOR_PATH?.trim()
+const [executorPath] = await Promise.all([
+  configuredExecutorPath
+    ? Promise.resolve(resolve(configuredExecutorPath))
+    : buildExecutor(executorProfile),
+  run('pnpm', ['prepare:harness-runtime', '--materialize'], weworkRoot),
+  run('pnpm', ['prepare:execution-runtime', '--materialize'], weworkRoot),
+])
 
 await rm(resourcesRoot, { recursive: true, force: true })
 await mkdir(join(resourcesRoot, 'bin'), { recursive: true, mode: 0o700 })
@@ -48,24 +53,29 @@ await cp(
 )
 const executorName = process.platform === 'win32' ? 'wegent-executor.exe' : 'wegent-executor'
 const packagedExecutor = join(resourcesRoot, 'bin', executorName)
-await cp(resolve(executorPath), packagedExecutor)
+await cp(executorPath, packagedExecutor)
 if (process.platform !== 'win32') await chmod(packagedExecutor, 0o755)
 
 console.log(`Electron package resources: ${resourcesRoot}`)
 
-async function buildExecutor() {
-  await run(
-    'cargo',
-    [
-      'build',
-      '--manifest-path',
-      join(executorRoot, 'Cargo.toml'),
-      '--release',
-      '--bin',
-      'wegent-executor',
-    ],
-    repositoryRoot
-  )
+function resolveExecutorProfile() {
+  const configured = process.env.WEWORK_EXECUTOR_PROFILE?.trim() || 'release'
+  if (configured === 'debug' || configured === 'release') return configured
+  throw new Error(`Unsupported Wework executor profile: ${configured}`)
+}
+
+async function buildExecutor(profile) {
+  const target = process.env.CARGO_BUILD_TARGET?.trim()
+  const buildArgs = [
+    'build',
+    '--manifest-path',
+    join(executorRoot, 'Cargo.toml'),
+    ...(profile === 'release' ? ['--release'] : []),
+    '--bin',
+    'wegent-executor',
+  ]
+  if (target) buildArgs.push('--target', target)
+  await run('cargo', buildArgs, repositoryRoot)
   const metadata = JSON.parse(
     await capture(
       'cargo',
@@ -82,7 +92,8 @@ async function buildExecutor() {
   )
   return join(
     metadata.target_directory,
-    'release',
+    ...(target ? [target] : []),
+    profile,
     process.platform === 'win32' ? 'wegent-executor.exe' : 'wegent-executor'
   )
 }

@@ -407,12 +407,17 @@ function mergeRuntimeConversationItems(
   snapshotItems: RuntimeConversationItem[],
   preserveLocalTerminal = false
 ): RuntimeConversationItem[] {
-  const reconciledLocalItems = localItems.filter(
-    localItem =>
-      !snapshotItems.some(snapshotItem =>
+  const matchedSnapshotIndexes = new Set<number>()
+  const reconciledLocalItems = localItems.filter(localItem => {
+    const snapshotIndex = snapshotItems.findIndex(
+      (snapshotItem, index) =>
+        !matchedSnapshotIndexes.has(index) &&
         isEquivalentAssistantTextRepresentation(localItem, snapshotItem)
-      )
-  )
+    )
+    if (snapshotIndex < 0) return true
+    matchedSnapshotIndexes.add(snapshotIndex)
+    return false
+  })
   const localById = new Map(reconciledLocalItems.map(item => [item.id, item]))
   const mergedSnapshotItems = snapshotItems.map(item =>
     mergeRuntimeConversationItem(localById.get(item.id), item, preserveLocalTerminal)
@@ -449,7 +454,11 @@ function isEquivalentAssistantTextRepresentation(
   local: RuntimeConversationItem,
   snapshot: RuntimeConversationItem
 ): boolean {
-  if (local.id === snapshot.id || local.type === snapshot.type) return false
+  if (local.id === snapshot.id) return false
+  if (local.type === 'assistant_text' && snapshot.type === 'assistant_text') {
+    return local.content === snapshot.content
+  }
+  if (local.type === snapshot.type) return false
   const localContent = assistantTextRepresentationContent(local)
   const snapshotContent = assistantTextRepresentationContent(snapshot)
   return localContent !== undefined && localContent === snapshotContent
@@ -594,6 +603,7 @@ function updateStartedTurn(
   if (!action.subtaskId) return turns
   const existingIndex = turns.findIndex(turn => turn.id === action.subtaskId)
   if (existingIndex >= 0) {
+    if (turns[existingIndex].status === 'cancelled') return turns
     return replaceAt(turns, existingIndex, {
       ...turns[existingIndex],
       status: 'streaming',
@@ -612,18 +622,20 @@ function updateStartedTurn(
           )
       )
     : turns.findLastIndex(
-        turn => turn.id === null && (turn.status === 'pending' || turn.status === 'streaming')
+        turn =>
+          turn.id === null &&
+          (turn.status === 'pending' || turn.status === 'streaming' || turn.status === 'cancelled')
       )
   if (optimisticIndex >= 0) {
     const optimistic = turns[optimisticIndex]
     return replaceAt(turns, optimisticIndex, {
       ...optimistic,
       id: action.subtaskId,
-      status: 'streaming',
-      completedAt: undefined,
-      error: undefined,
-      errorType: undefined,
-      stoppedNotice: undefined,
+      status: optimistic.status === 'cancelled' ? 'cancelled' : 'streaming',
+      completedAt: optimistic.status === 'cancelled' ? optimistic.completedAt : undefined,
+      error: optimistic.status === 'cancelled' ? optimistic.error : undefined,
+      errorType: optimistic.status === 'cancelled' ? optimistic.errorType : undefined,
+      stoppedNotice: optimistic.status === 'cancelled' ? optimistic.stoppedNotice : undefined,
       items: optimistic.items.map(item =>
         item.type === 'user_message'
           ? {
@@ -656,6 +668,7 @@ function updateTurn(
   if (!turnId) return turns
   const index = turns.findIndex(turn => turn.id === turnId)
   if (index < 0) return turns
+  if (turns[index].status === 'cancelled') return turns
   return replaceAt(turns, index, update(turns[index]))
 }
 
@@ -667,6 +680,7 @@ function updateFailedTurn(
   if (!turnId) return turns
   const existingIndex = turns.findIndex(turn => turn.id === turnId)
   if (existingIndex >= 0) {
+    if (turns[existingIndex].status === 'cancelled') return turns
     return replaceAt(turns, existingIndex, update(turns[existingIndex]))
   }
   const optimisticIndex = turns.findLastIndex(
@@ -904,7 +918,10 @@ function upsertRuntimeBlock(
 
   const existingIndex = items.findIndex(item => item.id === block.id)
   if (existingIndex >= 0) {
-    if (items[existingIndex]?.type === 'assistant_text' && turnStatus === 'done') {
+    if (
+      items[existingIndex]?.type === 'assistant_text' &&
+      (turnStatus === 'done' || block.type === 'text')
+    ) {
       return items
     }
     return upsertBlocks(items, [block])
@@ -1103,7 +1120,7 @@ function mergeProcessingBlockUpdate(
   block: ProcessingBlock,
   updates: Extract<RuntimePaneMessageAction, { type: 'block_updated' }>['updates']
 ): ProcessingBlock {
-  const { durationMs, ...directUpdates } = updates
+  const { contentDelta, durationMs, ...directUpdates } = updates
   let merged = {
     ...block,
     ...directUpdates,
@@ -1112,6 +1129,15 @@ function mergeProcessingBlockUpdate(
       completedAt: block.createdAt + Math.max(0, durationMs),
     }),
   } as ProcessingBlock
+  if (
+    typeof contentDelta === 'string' &&
+    (merged.type === 'thinking' || merged.type === 'text' || merged.type === 'plan')
+  ) {
+    merged = {
+      ...merged,
+      content: `${merged.content}${contentDelta}`,
+    } as ProcessingBlock
+  }
   if (merged.type === 'tool' && block.type === 'tool') {
     merged.toolInput = updates.toolInput ?? block.toolInput
   }

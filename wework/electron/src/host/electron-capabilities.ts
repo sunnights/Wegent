@@ -34,14 +34,30 @@ import { WorkbenchPluginManager } from './workbench-plugin-manager.js'
 import { captureWebContentsDataUrl } from './web-contents-capture.js'
 import type { TrayActivation, TrayAction, TrayMenuState, TraySnapshot } from './tray-manager.js'
 import type { StartupSplashSnapshot } from './startup-splash.js'
+import type { AppUpdateService, WeworkUpdateChannel } from './app-update-service.js'
+import {
+  listLocalWorkspaceOpeners,
+  openLocalWorkspace,
+  saveCustomWorkspaceOpener,
+} from './local-workspace-openers.js'
 
 export { captureWebContentsDataUrl } from './web-contents-capture.js'
 
 export const WEWORK_APP_PRINCIPAL = '@wegent/dsh-app-wework'
 
 export interface ElectronDesktopServices {
+  appUpdates?: AppUpdateService
   feedback: FeedbackBundleManager
   plugins: WorkbenchPluginManager
+  coreDshPlugins: () => CoreDshPluginService | null
+}
+
+export interface CoreDshPluginService {
+  listCoreDshPlugins(): Promise<unknown>
+  installCoreDshPlugin(spec: string): Promise<unknown>
+  updateCoreDshPlugin(name: string): Promise<unknown>
+  setCoreDshPluginEnabled(name: string, enabled: boolean): Promise<unknown>
+  uninstallCoreDshPlugin(name: string): Promise<unknown>
 }
 
 export interface ElectronE2EHost {
@@ -151,6 +167,7 @@ export function createElectronCapabilityRouter(
   router.grant(WEWORK_APP_PRINCIPAL, HOST_CAPABILITIES)
 
   router.register('app.getVersion', () => ({ version: app.getVersion() }))
+  registerAppUpdateCapabilities(router, desktopServices.appUpdates)
   router.register('attachment.begin', params =>
     attachments.begin(stringParam(params, 'filename'), requiredIntegerParam(params, 'size'))
   )
@@ -339,6 +356,7 @@ export function createElectronCapabilityRouter(
   })
   router.register('e2e.getProcessSnapshot', () => getElectronProcessSnapshot())
   router.register('e2e.getRuntimeDiagnostics', () => e2eHost.runtimeDiagnostics())
+  router.register('e2e.getClipboardText', () => clipboard.readText())
   router.register('e2e.getWindowFocusSnapshot', () => {
     const target = requiredWindow(window)
     const popout = e2eHost.popoutWindowSnapshot()
@@ -456,6 +474,7 @@ export function createElectronCapabilityRouter(
     return updated
   })
   router.register('rendererHealth.getState', () => rendererHealth())
+  registerCoreDshPluginCapabilities(router, desktopServices)
   router.register('runtime.restartCoreDsh', () => {
     e2eHost.scheduleCoreDshRestart()
     return { scheduled: true }
@@ -477,6 +496,35 @@ export function createElectronCapabilityRouter(
   router.register('shell.showItemInFolder', params =>
     shell.showItemInFolder(stringParam(params, 'path'))
   )
+  router.register('workspace.listOpeners', () => listLocalWorkspaceOpeners(app.getPath('userData')))
+  router.register('workspace.open', async params => {
+    const opener = stringParam(params, 'opener')
+    const path = stringParam(params, 'path')
+    const metadata = await stat(path)
+    if (!metadata.isDirectory()) {
+      throw new HostCapabilityError(
+        'workspace_path_not_directory',
+        'Workspace path is not a directory'
+      )
+    }
+    if (opener === 'file-manager') {
+      const error = await shell.openPath(path)
+      if (error) throw new HostCapabilityError('open_path_failed', error)
+      return
+    }
+    await openLocalWorkspace(opener, path, app.getPath('userData'))
+  })
+  router.register('workspace.pickOpener', async () => {
+    if (process.platform !== 'win32') return null
+    const result = await dialog.showOpenDialog(requiredWindow(window), {
+      properties: ['openFile'],
+      filters: [{ name: 'Executable', extensions: ['exe', 'cmd', 'bat', 'com'] }],
+    })
+    const executablePath = result.canceled ? null : (result.filePaths[0] ?? null)
+    if (!executablePath) return null
+    await saveCustomWorkspaceOpener(app.getPath('userData'), executablePath)
+    return executablePath
+  })
   router.register('smartApps.list', () => requiredSmartApps(smartApps).list())
   router.register('smartApps.createDirectory', params =>
     requiredSmartApps(smartApps).createDirectory({
@@ -604,6 +652,22 @@ export function createElectronCapabilityRouter(
   return router
 }
 
+export function registerAppUpdateCapabilities(
+  router: HostCapabilityRouter,
+  appUpdates: AppUpdateService | undefined
+): void {
+  router.register('appUpdate.check', params =>
+    requiredAppUpdates(appUpdates).check(updateChannelParam(params))
+  )
+  router.register('appUpdate.download', () => requiredAppUpdates(appUpdates).download())
+  router.register('appUpdate.downloadProgress', () =>
+    requiredAppUpdates(appUpdates).downloadProgress()
+  )
+  router.register('appUpdate.install', (_params, context) => {
+    context.deferUntilResponseSent(requiredAppUpdates(appUpdates).createInstallAction())
+  })
+}
+
 export function registerDesktopServiceCapabilities(
   router: HostCapabilityRouter,
   services: ElectronDesktopServices,
@@ -641,6 +705,30 @@ export function registerDesktopServiceCapabilities(
       stringParam(params, 'method'),
       params.params ?? {}
     )
+  )
+}
+
+export function registerCoreDshPluginCapabilities(
+  router: HostCapabilityRouter,
+  services: ElectronDesktopServices
+): void {
+  router.register('runtime.listCoreDshPlugins', () =>
+    requiredCoreDshPluginService(services).listCoreDshPlugins()
+  )
+  router.register('runtime.installCoreDshPlugin', params =>
+    requiredCoreDshPluginService(services).installCoreDshPlugin(stringParam(params, 'spec'))
+  )
+  router.register('runtime.updateCoreDshPlugin', params =>
+    requiredCoreDshPluginService(services).updateCoreDshPlugin(stringParam(params, 'name'))
+  )
+  router.register('runtime.setCoreDshPluginEnabled', params =>
+    requiredCoreDshPluginService(services).setCoreDshPluginEnabled(
+      stringParam(params, 'name'),
+      requiredBooleanParam(params, 'enabled')
+    )
+  )
+  router.register('runtime.uninstallCoreDshPlugin', params =>
+    requiredCoreDshPluginService(services).uninstallCoreDshPlugin(stringParam(params, 'name'))
   )
 }
 
@@ -745,6 +833,17 @@ function requiredSmartApps(resolveSmartApps: () => SmartAppManager | null): Smar
     throw new HostCapabilityError('smart_apps_unavailable', 'Smart app manager is unavailable')
   }
   return smartApps
+}
+
+function requiredCoreDshPluginService(services: ElectronDesktopServices): CoreDshPluginService {
+  const service = services.coreDshPlugins()
+  if (!service) {
+    throw new HostCapabilityError(
+      'capability_unavailable',
+      'Core DSH plugin management requires the managed desktop runtime'
+    )
+  }
+  return service
 }
 
 function requiredWindow(resolveWindow: () => BrowserWindow | null): BrowserWindow {
@@ -1039,6 +1138,17 @@ function fileFiltersParam(params: Record<string, unknown>): FileFilter[] | undef
 
 function compact<Value extends object>(value: Value): Value {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as Value
+}
+
+function requiredAppUpdates(value: AppUpdateService | undefined): AppUpdateService {
+  if (!value) throw new HostCapabilityError('capability_unavailable', 'App updates are unavailable')
+  return value
+}
+
+function updateChannelParam(params: Record<string, unknown>): WeworkUpdateChannel {
+  const channel = stringParam(params, 'channel')
+  if (channel !== 'stable' && channel !== 'beta') invalidParam('channel')
+  return channel
 }
 
 function invalidParam(key: string): never {

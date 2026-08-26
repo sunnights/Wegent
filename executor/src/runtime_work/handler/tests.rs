@@ -15,6 +15,25 @@ fn defaults_to_ten_parallel_runtime_tasks() {
     assert_eq!(DEFAULT_MAX_CONCURRENT_TASKS, 10);
 }
 
+#[test]
+fn running_task_count_uses_process_local_execution_state() {
+    let handler = RuntimeWorkRpcHandler::new("device-1", "/bin/false");
+    let (first_cancel, _first_cancel_rx) = oneshot::channel();
+    let (_first_stopped, first_stopped_rx) = oneshot::channel();
+    let first_execution = handler
+        .start_local_task_execution("task-1".to_owned(), None, first_cancel, first_stopped_rx)
+        .expect("first local execution should start");
+    let (second_cancel, _second_cancel_rx) = oneshot::channel();
+    let (_second_stopped, second_stopped_rx) = oneshot::channel();
+    handler
+        .start_local_task_execution("task-2".to_owned(), None, second_cancel, second_stopped_rx)
+        .expect("second local execution should start");
+
+    assert_eq!(handler.running_task_count()["runningCount"], 2);
+    assert!(handler.finish_local_task_execution("task-1", first_execution));
+    assert_eq!(handler.running_task_count()["runningCount"], 1);
+}
+
 #[tokio::test]
 async fn runtime_capacity_rpc_reports_scheduler_truth() {
     let handler = RuntimeWorkRpcHandler::new("device-1", "/bin/false");
@@ -53,6 +72,41 @@ async fn runtime_capacity_rpc_reports_scheduler_truth() {
         .filter_map(Value::as_str)
         .collect::<HashSet<_>>();
     assert_eq!(active_task_ids, HashSet::from(["active-1", "active-2"]));
+}
+
+#[tokio::test]
+async fn task_status_replay_emits_one_current_status_event_per_requested_task() {
+    let root = temp_runtime_work_index_path("task-status-replay");
+    let (event_tx, mut event_rx) = broadcast::channel(4);
+    let mut handler = RuntimeWorkRpcHandler::with_event_sender("device-1", "/bin/false", event_tx);
+    handler.store = RuntimeWorkStore::new(root.clone());
+    let mut completed = RuntimeTaskLink::new_pending(
+        "task-completed".to_owned(),
+        "/tmp/project".to_owned(),
+        "Completed task".to_owned(),
+    );
+    completed.status = "done".to_owned();
+    completed.running = false;
+    completed.completed_at = Some(1_787_563_200_000);
+    handler.upsert_local_task(completed);
+
+    let response = handler
+        .replay_task_statuses(json!({
+            "taskIds": ["task-completed", "task-missing"],
+        }))
+        .await
+        .expect("status replay should succeed");
+    let event = event_rx
+        .recv()
+        .await
+        .expect("status event should be emitted");
+
+    assert_eq!(response["replayedTaskIds"], json!(["task-completed"]));
+    assert_eq!(response["missingTaskIds"], json!(["task-missing"]));
+    assert_eq!(event["event"], "response.completed");
+    assert_eq!(event["payload"]["taskId"], "task-completed");
+    assert_eq!(event["payload"]["data"]["replayed"], true);
+    let _ = fs::remove_file(root);
 }
 
 #[test]
@@ -4200,6 +4254,69 @@ async fn execution_mapper_does_not_rebind_queued_notification_to_new_active_turn
     assert_eq!(
         active_messages[0]["content"],
         "Automatic continuation running"
+    );
+
+    let _ = fs::remove_file(index_path);
+}
+
+#[tokio::test]
+async fn execution_mapper_drops_notifications_after_stop_is_requested() {
+    let (event_tx, mut event_rx) = broadcast::channel(8);
+    let index_path = temp_runtime_work_index_path("execution-mapper-cancel-race");
+    let mut handler = RuntimeWorkRpcHandler::with_event_sender("device-1", "/bin/false", event_tx);
+    handler.store = RuntimeWorkStore::new(index_path.clone());
+    let local_task_id = "runtime-task-1";
+    let request = ExecutionRequest {
+        task_id: local_task_id.to_owned(),
+        subtask_id: "runtime-subtask-1".to_owned(),
+        ..ExecutionRequest::default()
+    };
+    handler.upsert_local_task(RuntimeTaskLink::new_pending(
+        local_task_id.to_owned(),
+        "/tmp/project".to_owned(),
+        "Task".to_owned(),
+    ));
+    let execution_id = start_test_execution(&handler, local_task_id);
+    handler.begin_active_codex_transcript(local_task_id, "thread-1", "turn-1");
+    assert!(handler.request_active_turn_stop(local_task_id));
+
+    let mut execution_mapper = CodexNotificationEventMapper::default();
+    handler
+        .map_execution_codex_notification(
+            local_task_id,
+            execution_id,
+            &request,
+            Some(ActiveCodexTurn {
+                execution_id,
+                thread_id: "thread-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+            }),
+            &mut execution_mapper,
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "id": "late-message",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "late completion"
+                    }
+                }
+            }),
+        )
+        .await;
+
+    assert!(
+        event_rx.try_recv().is_err(),
+        "notifications arriving after cancellation must not be emitted"
+    );
+    assert!(
+        handler
+            .active_codex_transcript_messages(local_task_id)
+            .is_empty(),
+        "notifications arriving after cancellation must not enter the transcript"
     );
 
     let _ = fs::remove_file(index_path);
