@@ -1,9 +1,18 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  type ReactNode,
+} from 'react'
 import { flushSync } from 'react-dom'
-import { navigateTo, toBrowserPath } from '@/lib/navigation'
+import { navigateTo, replaceTo } from '@/lib/navigation'
 import {
   closeWorkspaceTab,
   createWorkspaceTab,
+  dispatchWorkspaceTabsClosed,
   inferWorkspaceTabKind,
   moveWorkspaceTab,
   parseWorkspaceLocation,
@@ -16,6 +25,7 @@ import {
   type WorkspaceTabLabels,
 } from './workspaceTabs'
 import { WorkspaceTabsContext, type WorkspaceTabsContextValue } from './workspaceTabsContextValue'
+import { resolveDshRoute } from '@/features/dsh-runtime/dshRoutes'
 
 interface PersistedWorkspaceTabs {
   activeTabId: string
@@ -126,10 +136,11 @@ function loadPersistedTabs(
   return { tabs, activeTabId: routeTab.id, closedTabs: [] }
 }
 
-function replaceTabRoute(tab: WorkspaceTab) {
-  const browserPath = toBrowserPath(workspaceTabRoute(tab))
-  window.history.replaceState({}, '', browserPath)
-  window.dispatchEvent(new PopStateEvent('popstate'))
+function sessionRestorableTabs(tabs: WorkspaceTab[]): WorkspaceTab[] {
+  return tabs.filter(tab => {
+    const pathname = tab.contentRoute.split('?', 1)[0]
+    return resolveDshRoute(pathname)?.restorePolicy !== 'none'
+  })
 }
 
 function workspaceTabsReducer(
@@ -233,25 +244,47 @@ function workspaceTabsReducer(
     case 'syncFixed': {
       const fixedIds = new Set(action.tabs.map(tab => tab.id))
       const currentById = new Map(state.tabs.map(tab => [tab.id, tab]))
+      const bootstrapReplacementById = new Map<string, string>()
+      const bootstrapByFixedId = new Map<string, WorkspaceTab>()
+      if (!state.tabs.some(tab => tab.fixed)) {
+        const availableBootstrapTabs = state.tabs.filter(tab => !tab.fixed && !fixedIds.has(tab.id))
+        for (const fixedTab of action.tabs) {
+          if (currentById.has(fixedTab.id)) continue
+          const bootstrapTab = availableBootstrapTabs.find(
+            tab =>
+              !bootstrapReplacementById.has(tab.id) &&
+              tab.kind === fixedTab.kind &&
+              (fixedTab.kind !== 'auxiliary' || tab.contentRoute === fixedTab.contentRoute)
+          )
+          if (bootstrapTab) {
+            bootstrapReplacementById.set(bootstrapTab.id, fixedTab.id)
+            bootstrapByFixedId.set(fixedTab.id, bootstrapTab)
+          }
+        }
+      }
       const syncedFixedTabs = action.tabs.map(tab => {
         const current = currentById.get(tab.id)
-        if (!current || tab.contentRoute.startsWith('/app/harness-')) return tab
-        return {
-          ...tab,
-          kind: current.kind,
-          title: current.title,
-          contentRoute: current.contentRoute,
+        if (current && !tab.contentRoute.startsWith('/app/harness-')) {
+          return {
+            ...tab,
+            kind: current.kind,
+            title: current.title,
+            contentRoute: current.contentRoute,
+          }
         }
+        const bootstrap = bootstrapByFixedId.get(tab.id)
+        return bootstrap ? { ...tab, contentRoute: bootstrap.contentRoute } : tab
       })
       const ordinaryTabs = state.tabs
-        .filter(tab => !fixedIds.has(tab.id))
+        .filter(tab => !fixedIds.has(tab.id) && !bootstrapReplacementById.has(tab.id))
         .map(tab => (tab.fixed ? { ...tab, fixed: false } : tab))
       const tabs = [...syncedFixedTabs, ...ordinaryTabs]
+      const replacedActiveTabId = bootstrapReplacementById.get(state.activeTabId)
       return {
         ...state,
         tabs,
-        activeTabId: tabs.some(tab => tab.id === state.activeTabId)
-          ? state.activeTabId
+        activeTabId: tabs.some(tab => tab.id === (replacedActiveTabId ?? state.activeTabId))
+          ? (replacedActiveTabId ?? state.activeTabId)
           : (tabs[0]?.id ?? state.activeTabId),
       }
     }
@@ -283,12 +316,17 @@ export function WorkspaceTabsProvider({
     (): WorkspaceTabsState =>
       loadPersistedTabs(storageScope, pathname, search, labels, fixedTabs, restoreSessionTabs)
   )
+  const stateRef = useRef(state)
+
+  useLayoutEffect(() => {
+    stateRef.current = state
+  }, [state])
 
   useEffect(() => {
     if (fixedTabs.length > 0) dispatch({ type: 'syncFixed', tabs: fixedTabs })
   }, [fixedTabs])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     dispatch({ type: 'routeChanged', pathname, search, labels })
   }, [labels, pathname, search])
 
@@ -331,9 +369,12 @@ export function WorkspaceTabsProvider({
   useEffect(() => {
     if (!restoreSessionTabs) return
     try {
+      const tabs = sessionRestorableTabs(state.tabs)
       const persisted: PersistedWorkspaceTabs = {
-        activeTabId: state.activeTabId,
-        tabs: state.tabs,
+        activeTabId: tabs.some(tab => tab.id === state.activeTabId)
+          ? state.activeTabId
+          : (tabs[0]?.id ?? ''),
+        tabs,
       }
       persistWorkspaceTabs(storageScope, persisted.tabs, persisted.activeTabId)
     } catch {
@@ -364,21 +405,28 @@ export function WorkspaceTabsProvider({
 
   const closeTab = useCallback(
     (tabId: string) => {
-      if (state.tabs.find(tab => tab.id === tabId)?.fixed) return
+      const currentState = stateRef.current
+      const closingTab = currentState.tabs.find(tab => tab.id === tabId)
+      if (!closingTab || closingTab.fixed) return
       const fallback = createWorkspaceTab('task', labels)
-      const next = closeWorkspaceTab(state.tabs, state.activeTabId, tabId, fallback)
+      const next = closeWorkspaceTab(currentState.tabs, currentState.activeTabId, tabId, fallback)
       flushSync(() => dispatch({ type: 'close', tabId, fallback }))
+      dispatchWorkspaceTabsClosed([tabId])
       const nextActive = next.tabs.find(tab => tab.id === next.activeTabId) ?? next.tabs[0]
       navigateTo(workspaceTabRoute(nextActive))
     },
-    [labels, state.activeTabId, state.tabs]
+    [labels]
   )
 
   const closeOtherTabs = useCallback(
     (tabId: string) => {
       const tab = state.tabs.find(candidate => candidate.id === tabId)
       if (!tab) return
+      const closedTabIds = state.tabs
+        .filter(candidate => !candidate.fixed && candidate.id !== tabId)
+        .map(candidate => candidate.id)
       flushSync(() => dispatch({ type: 'closeOthers', tabId }))
+      dispatchWorkspaceTabsClosed(closedTabIds)
       navigateTo(workspaceTabRoute(tab))
     },
     [state.tabs]
@@ -403,8 +451,8 @@ export function WorkspaceTabsProvider({
       const currentTab = state.tabs.find(tab => tab.id === state.activeTabId)
       if (!currentTab) return
       const updated = { ...currentTab, ...updates }
-      dispatch({ type: 'updateActive', updates })
-      replaceTabRoute(updated)
+      flushSync(() => dispatch({ type: 'updateActive', updates }))
+      replaceTo(workspaceTabRoute(updated))
     },
     [state.activeTabId, state.tabs]
   )

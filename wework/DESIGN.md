@@ -282,6 +282,8 @@ embedded may change spacing and composition, but it must not select a
 light-only or dark-only color recipe. Apply this rule to nested surfaces as
 well as their containers: dialogs, directory pickers, menus, inputs, list rows,
 tooltips, footers, and action groups must all inherit the active theme.
+Surfaces rendered through a portal must explicitly set their semantic
+foreground color instead of relying on an ancestor outside the portal target.
 
 Literal white, black, or neutral fills are allowed only when color is part of
 the content contract rather than application chrome. Examples include a QR
@@ -660,6 +662,9 @@ must not discard entered data without warning. Do not stack modal dialogs.
   validation, or persistent system feedback.
 - Open on keyboard focus as well as hover and dismiss on blur, pointer exit, or
   Escape.
+- A focusable row retaining focus after activation must not keep its hover card
+  open unless that card explicitly opens on focus or focus has moved into its
+  interactive content.
 - Use the shared `Tooltip` component for compact controls instead of the native
   HTML `title` attribute. Icon-only controls must keep a localized
   `aria-label`; controls that currently have neither a visible label nor a
@@ -868,7 +873,7 @@ implementation and WCAG conflict.
 - File paths, terminals, permissions, and external applications reflect the
   actual current environment.
 - Keep pane resize and open/close motion stable under window zoom.
-- Verify changes through the isolated real-Tauri flow in `AGENTS.md`, never a
+- Verify changes through the isolated real-Electron flow in `AGENTS.md`, never a
   personal Wework window.
 
 ## 13. Implementation and review contract
@@ -899,7 +904,7 @@ For each material UI change, review:
 - Do keyboard behavior, accessible names, focus restoration, reduced motion,
   long translations, and constrained widths work?
 - Are light and dark themes both correct?
-- Was the affected flow verified in the isolated real Tauri application with a
+- Was the affected flow verified in the isolated real Electron application with a
   screenshot of the final normal state and any critical transient state?
 
 When a screenshot feels wrong, compare it in this order: composition, surface

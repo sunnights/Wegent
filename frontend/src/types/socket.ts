@@ -254,7 +254,14 @@ export interface GeminiAnnotation {
   source: string
 }
 
-export type ChatBlockType = 'text' | 'tool' | 'subagent' | 'thinking' | 'error' | 'guidance'
+export type ChatBlockType =
+  | 'text'
+  | 'tool'
+  | 'subagent'
+  | 'thinking'
+  | 'error'
+  | 'guidance'
+  | 'card'
 
 export interface ChatBlock {
   id: string
@@ -274,6 +281,12 @@ export interface ChatBlock {
   summary?: string
   children?: ChatBlock[]
   render_payload?: unknown
+  card_id?: string
+  card_type?: string
+  card_data?: Record<string, unknown>
+  card_status?: 'pending' | 'partial_ready' | 'populated' | 'error' | 'expired'
+  card_error?: string | null
+  card_preview_data?: Record<string, unknown>
   guidance_id?: string
   loop_index?: number
   applied_at?: string
@@ -449,6 +462,12 @@ export interface ChatBlockUpdatedPayload {
   tool_input?: Record<string, unknown>
   parent_tool_use_id?: string
   render_payload?: unknown
+  card_id?: string
+  card_type?: string
+  card_data?: Record<string, unknown>
+  card_status?: 'pending' | 'partial_ready' | 'populated' | 'error' | 'expired'
+  card_error?: string | null
+  card_preview_data?: Record<string, unknown>
   argument_status?: 'streaming' | 'done'
   output?: string
   summary?: string

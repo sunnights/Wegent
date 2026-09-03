@@ -32,6 +32,13 @@ sidebar_position: 4
 
 对于已经启动的任务，可以在右侧 **环境** 面板中选择 **关联项目空间**，将当前项目或当前任务关联到本地、云端项目空间，或者在空间中快速新建任务。选择本地空间时操作保存在当前设备；选择云端空间时使用云端协作数据。
 
+任务已经关联看板后，可以在输入框上方的任务摘要中选择 **更改看板关联**，再选择目标项目空间。Wework 会让你选择：
+
+- **新建看板任务**：使用当前任务标题和执行状态创建卡片并建立关联。
+- **关联已有看板任务**：按任务编号或标题搜索目标看板中可编辑的卡片，并把当前任务关联到该卡片；已有卡片的状态保持不变。
+
+如果目标项目空间与当前看板不同，Wework 会先显示移动确认。确认后，当前运行任务只保留一个用户选择的看板关联；原看板卡片继续保留，但不再关联该运行任务。新建的卡片会根据当前任务状态进入相应列，例如已结束且等待确认的任务进入 **待验收**。
+
 ### 查看看板任务进展
 
 看板卡片的关联任务进展不会重复显示运行时任务标题。任务执行中，第一行显示最新 AI 文本或思考状态，第二行通过短竖线缩进显示最近一次工具或编辑操作；PR/MR 状态作为右侧操作展示。任务停止后，卡片只显示最后一轮回复的最后一个非空行，不会回退到更早轮次。未读卡片使用轻微背景色区分，并保留未读标记。
@@ -54,13 +61,14 @@ sidebar_position: 4
 ```bash
 bash executor/scripts/dev-cloud-device.sh start    # 启动并保持在线（可重复执行）
 bash executor/scripts/dev-cloud-device.sh status   # 查看运行与在线状态
-bash executor/scripts/dev-cloud-device.sh restart  # 重启（会重新构建/拉起最新代码）
+bash executor/scripts/dev-cloud-device.sh restart  # 手动重启
 bash executor/scripts/dev-cloud-device.sh stop     # 停止
 ```
 
 - 默认设备 id 为 `cloud-device-dev`（可用 `DEVICE_ID` 覆盖），注册后出现在设备列表的“云端设备”中。
-- 脚本会自动构建最新 executor、从 `backend/.env` 读取密钥签发 30 天 token，并使用独立的
-  executor home 与 Codex home（不读取个人 Codex 凭据）。
+- 脚本会自动构建最新 executor，并持续监听 `executor/src`、`Cargo.toml` 和 `Cargo.lock`；
+  源码变化后会增量编译并动态重启 executor。它还会从 `backend/.env` 读取密钥签发 30 天
+  token，并使用独立的 executor home 与 Codex home（不读取个人 Codex 凭据）。
 - 创建机器人时执行环境选择“云端”、执行设备选择 `cloud-device-dev`，指派任务后即在本机按
   云端设备协议执行并写回评论与执行记录。
 - 运行数据与日志位于 `~/.wegent-executor-cloud-device/`。

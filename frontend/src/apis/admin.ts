@@ -8,6 +8,7 @@ import {
   updateQuickLaunchFunctionsConfig,
 } from './admin-quick-launch'
 import { outboundTokenAdminApis } from './outboundTokens'
+import { oauthClientAdminApis } from './oauthProvider'
 import { RetrieverCRD } from './retrievers'
 import type { SkillRefMeta } from '@/types/api'
 import type { KnowledgeBaseRetrievalProfile, RetrievalConfigDraft } from '@/types/knowledge'
@@ -31,6 +32,13 @@ export type {
   TokenIssuerListResponse,
   TokenIssuerUpdateRequest,
 } from './outboundTokens'
+export type {
+  OAuthClient,
+  OAuthClientCreateRequest,
+  OAuthClientListResponse,
+  OAuthClientType,
+  OAuthClientUpdateRequest,
+} from './oauthProvider'
 
 // Admin User Types
 export type UserRole = 'admin' | 'user'
@@ -83,6 +91,7 @@ export interface AdminPublicModel {
   display_name: string | null
   json: Record<string, unknown>
   is_active: boolean
+  is_visible: boolean
   is_advanced: boolean
   created_at: string
   updated_at: string
@@ -97,6 +106,7 @@ export interface AdminPublicModelCreate {
   name: string
   namespace?: string
   json: Record<string, unknown>
+  is_visible?: boolean
 }
 
 export interface AdminPublicModelUpdate {
@@ -104,6 +114,7 @@ export interface AdminPublicModelUpdate {
   namespace?: string
   json?: Record<string, unknown>
   is_active?: boolean
+  is_visible?: boolean
   is_advanced?: boolean
 }
 
@@ -285,6 +296,34 @@ export interface ServiceKeyListResponse {
   total: number
 }
 
+// Plugin Release Key Types
+export interface PluginReleaseKey {
+  id: number
+  name: string
+  keyPrefix: string
+  description: string | null
+  expiresAt: string
+  lastUsedAt: string
+  createdAt: string
+  isActive: boolean
+  createdBy: string | null
+}
+
+export interface PluginReleaseKeyCreated extends PluginReleaseKey {
+  key: string // Full key, only at creation
+}
+
+export interface PluginReleaseKeyCreateRequest {
+  name: string
+  description?: string
+  expiresAt?: string
+}
+
+export interface PluginReleaseKeyListResponse {
+  items: PluginReleaseKey[]
+  total: number
+}
+
 // Personal Key Types (Admin Management)
 export interface AdminPersonalKey {
   id: number
@@ -437,6 +476,8 @@ export interface AdminPublicBot {
   ghost_name: string | null
   shell_name: string | null
   model_name: string | null
+  secondary_model_name?: string | null
+  secondary_model_namespace?: string | null
   // Expanded Ghost fields for UI convenience
   system_prompt: string | null
   mcp_servers: Record<string, unknown> | null
@@ -467,6 +508,8 @@ export interface AdminPublicBotCreate {
   preload_skills?: string[]
   preload_skill_refs?: Record<string, SkillRefMeta>
   agent_config?: Record<string, unknown>
+  secondary_model_name?: string | null
+  secondary_model_namespace?: string
   default_knowledge_base_refs?: { id: number; name: string }[]
 }
 
@@ -484,6 +527,8 @@ export interface AdminPublicBotUpdate {
   preload_skills?: string[]
   preload_skill_refs?: Record<string, SkillRefMeta>
   agent_config?: Record<string, unknown>
+  secondary_model_name?: string | null
+  secondary_model_namespace?: string
   default_knowledge_base_refs?: { id: number; name: string }[]
 }
 
@@ -769,6 +814,7 @@ export async function restartAllCloudDevices(): Promise<AdminDeviceBatchStartRes
 // Admin API Services
 export const adminApis = {
   ...outboundTokenAdminApis,
+  ...oauthClientAdminApis,
   getQuickLaunchFunctionsConfig,
   updateQuickLaunchFunctionsConfig,
   upgradeAllLocalDevices,
@@ -979,6 +1025,32 @@ export const adminApis = {
    */
   async deleteServiceKey(keyId: number): Promise<void> {
     return apiClient.delete(`/admin/service-keys/${keyId}`)
+  },
+
+  // ==================== Plugin Release Key Management ====================
+
+  /**
+   * Get all keys dedicated to protected plugin release jobs
+   */
+  async getPluginReleaseKeys(): Promise<PluginReleaseKeyListResponse> {
+    return apiClient.get('/admin/plugin-release-keys')
+  },
+
+  /**
+   * Create a plugin release key
+   * The full key is only returned at creation time
+   */
+  async createPluginReleaseKey(
+    data: PluginReleaseKeyCreateRequest
+  ): Promise<PluginReleaseKeyCreated> {
+    return apiClient.post('/admin/plugin-release-keys', data)
+  },
+
+  /**
+   * Toggle plugin release key active status
+   */
+  async togglePluginReleaseKeyStatus(keyId: number): Promise<PluginReleaseKey> {
+    return apiClient.post(`/admin/plugin-release-keys/${keyId}/toggle-status`)
   },
 
   // ==================== Personal Key Management (Admin) ====================

@@ -17,10 +17,19 @@ import { listLocalHarnessModelOptions } from '@/features/local-harness/localHarn
 import { useWorkbench } from '@/features/workbench/useWorkbench'
 import { useTranslation } from '@/hooks/useTranslation'
 import { getErrorMessage } from '@/lib/error-message'
+import { isElectronRuntime } from '@/lib/runtime-environment'
 
-const launchingIds = new Set<string>()
+const launches = new Map<string, Promise<void>>()
 
-export function HarnessAppAutoLauncher({ installationId }: { installationId: string }) {
+interface HarnessAppAutoLauncherProps {
+  installationId: string
+  onStartupSettled?: (installationId: string) => void
+}
+
+export function HarnessAppAutoLauncher({
+  installationId,
+  onStartupSettled,
+}: HarnessAppAutoLauncherProps) {
   const { t } = useTranslation('common')
   const { projectChat, services } = useWorkbench()
   const [attempt, setAttempt] = useState(0)
@@ -30,12 +39,24 @@ export function HarnessAppAutoLauncher({ installationId }: { installationId: str
   )
 
   useEffect(() => {
-    if (!services.localHarnessModelApi || launchingIds.has(installationId)) return
     let cancelled = false
+    const settle = () => {
+      if (!cancelled) onStartupSettled?.(installationId)
+    }
+    if (!services.localHarnessModelApi) {
+      settle()
+      return
+    }
+    const existingLaunch = launches.get(installationId)
+    if (existingLaunch) {
+      void existingLaunch.finally(settle)
+      return () => {
+        cancelled = true
+      }
+    }
     const retry = () => setAttempt(current => current + 1)
-    launchingIds.add(installationId)
 
-    void harnessAppsApi
+    const launch = harnessAppsApi
       .list()
       .then(async installations => {
         const installation = installations.find(item => item.id === installationId)
@@ -45,6 +66,7 @@ export function HarnessAppAutoLauncher({ installationId }: { installationId: str
         }
         if (installation.state === 'running' && installation.webUrl) {
           registerHarnessAppTab(installation)
+          if (isElectronRuntime()) clearHarnessAppLaunch(installationId)
           return
         }
         const model = modelOptions.find(option => option.key === installation.modelKey)
@@ -85,6 +107,7 @@ export function HarnessAppAutoLauncher({ installationId }: { installationId: str
           await storeHarnessAppProxyToken(installationId, launch.proxyToken)
           if (contextToken) await storeHarnessAppContextToken(installationId, contextToken)
           registerHarnessAppTab(running)
+          if (isElectronRuntime()) clearHarnessAppLaunch(installationId)
         } catch (error) {
           console.warn(`[Wework] failed to auto-launch Smart app ${installationId}`, error)
           if (started) {
@@ -123,13 +146,15 @@ export function HarnessAppAutoLauncher({ installationId }: { installationId: str
         }
       })
       .finally(() => {
-        launchingIds.delete(installationId)
+        launches.delete(installationId)
       })
+    launches.set(installationId, launch)
+    void launch.finally(settle)
 
     return () => {
       cancelled = true
     }
-  }, [attempt, installationId, modelOptions, services.localHarnessModelApi, t])
+  }, [attempt, installationId, modelOptions, onStartupSettled, services.localHarnessModelApi, t])
 
   return null
 }

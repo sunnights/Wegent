@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type FocusEvent,
   type ReactNode,
 } from 'react'
@@ -30,7 +31,7 @@ interface HoverCardProps {
   estimatedHeight?: number
 }
 
-interface HoverCardPosition {
+type HoverCardPosition = CSSProperties & {
   left: number
   top: number
 }
@@ -90,6 +91,7 @@ export function HoverCard({
   const pinnedRef = useRef(false)
   const [position, setPosition] = useState<HoverCardPosition | null>(null)
   const [pinned, setPinned] = useState(false)
+  const isOpen = position !== null
 
   const clearTimers = useCallback(() => {
     if (openTimerRef.current !== null) {
@@ -164,13 +166,16 @@ export function HoverCard({
 
   const handleFocusCapture = useCallback(
     (event: FocusEvent<HTMLDivElement>) => {
+      const focusIsInsideAnchor =
+        event.target instanceof Node && Boolean(anchorRef.current?.contains(event.target))
       if (
         shouldPinInteraction(event.target) &&
         event.target instanceof Node &&
-        !anchorRef.current?.contains(event.target)
+        !focusIsInsideAnchor
       ) {
         pin()
       }
+      if (focusIsInsideAnchor && !openOnFocus) return
       focusWithinRef.current = true
       if (openOnFocus) {
         open()
@@ -181,12 +186,18 @@ export function HoverCard({
     [keepOpen, open, openOnFocus, pin, shouldPinInteraction]
   )
 
-  const handleBlurCapture = useCallback(() => {
-    focusWithinRef.current = false
-    window.queueMicrotask(() => {
-      if (!focusWithinRef.current) scheduleClose()
-    })
-  }, [scheduleClose])
+  const handleBlurCapture = useCallback(
+    (event: FocusEvent<HTMLDivElement>) => {
+      focusWithinRef.current = false
+      if (event.relatedTarget instanceof Node && anchorRef.current?.contains(event.relatedTarget)) {
+        return
+      }
+      window.queueMicrotask(() => {
+        if (!focusWithinRef.current) scheduleClose()
+      })
+    },
+    [scheduleClose]
+  )
 
   useEffect(
     () => () => {
@@ -196,8 +207,10 @@ export function HoverCard({
     []
   )
 
+  // Calibrate once per open transition. Re-running from the position update can
+  // make position-sensitive content alternate between two measured layouts.
   useLayoutEffect(() => {
-    if (!position) return
+    if (!isOpen) return
     const anchorRect = anchorRef.current?.getBoundingClientRect()
     const cardRect = cardRef.current?.getBoundingClientRect()
     if (!anchorRect || !cardRect) return
@@ -207,9 +220,13 @@ export function HoverCard({
       cardRect.width || estimatedWidth,
       cardRect.height || estimatedHeight
     )
-    if (nextPosition.left === position.left && nextPosition.top === position.top) return
-    setPosition(nextPosition)
-  }, [estimatedHeight, estimatedWidth, position])
+    setPosition(current => {
+      if (!current || (nextPosition.left === current.left && nextPosition.top === current.top)) {
+        return current
+      }
+      return nextPosition
+    })
+  }, [estimatedHeight, estimatedWidth, isOpen])
 
   useEffect(() => {
     if (!position) return

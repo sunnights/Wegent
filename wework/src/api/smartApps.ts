@@ -1,7 +1,7 @@
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import type { HttpClient } from './http'
-import { shouldUseTauriFetch } from './http'
 import type { PluginShareGroupSearchItem, PluginShareUserSearchItem } from './plugins'
+import { sha256Hex } from './fileHash'
+import { resolveApiUrl } from './resolveApiUrl'
 
 export interface SmartAppMarketplaceTag {
   id: string
@@ -101,15 +101,23 @@ export interface SmartAppSubmissionCompleteResponse {
   item: SmartAppMarketplaceItem | null
 }
 
-export function createSmartAppsApi(client: HttpClient) {
-  const initSubmission = (
+export function createSmartAppsApi(client: HttpClient, apiBaseUrl = '') {
+  const initSubmission = async (
     packageInfo: SmartAppPreparedPackage,
     metadata: SmartAppSubmissionMetadata
-  ) =>
-    client.post<SmartAppSubmissionInitResponse>('/smart-apps/submissions/init', {
-      ...metadata,
-      ...packageInfo,
-    })
+  ) => {
+    const initialized = await client.post<SmartAppSubmissionInitResponse>(
+      '/smart-apps/submissions/init',
+      {
+        ...metadata,
+        ...packageInfo,
+      }
+    )
+    return {
+      ...initialized,
+      uploadUrl: resolveApiUrl(initialized.uploadUrl, apiBaseUrl),
+    }
+  }
   const completeSubmission = (id: number) =>
     client.post<SmartAppSubmissionCompleteResponse>(`/smart-apps/submissions/${id}/complete`)
   const cancelSubmission = (id: number) => client.post(`/smart-apps/submissions/${id}/cancel`)
@@ -147,8 +155,14 @@ export function createSmartAppsApi(client: HttpClient) {
     getItem(id: number) {
       return client.get<SmartAppMarketplaceItem>(`/smart-apps/marketplace/${id}`)
     },
-    getDownload(id: number) {
-      return client.post<SmartAppDownloadDescriptor>(`/smart-apps/marketplace/${id}/download`)
+    async getDownload(id: number) {
+      const descriptor = await client.post<SmartAppDownloadDescriptor>(
+        `/smart-apps/marketplace/${id}/download`
+      )
+      return {
+        ...descriptor,
+        downloadUrl: resolveApiUrl(descriptor.downloadUrl, apiBaseUrl),
+      }
     },
     getAccess(id: number) {
       return client.get<SmartAppAccess>(`/smart-apps/${id}/access`)
@@ -160,16 +174,13 @@ export function createSmartAppsApi(client: HttpClient) {
     completeSubmission,
     cancelSubmission,
     async publish(file: File, metadata: SmartAppSubmissionMetadata) {
-      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-      const sha256 = Array.from(new Uint8Array(digest), byte =>
-        byte.toString(16).padStart(2, '0')
-      ).join('')
+      const sha256 = await sha256Hex(file)
       const initialized = await initSubmission(
         { filename: file.name, sha256, sizeBytes: file.size },
         metadata
       )
       try {
-        const transport = shouldUseTauriFetch() ? tauriFetch : globalThis.fetch.bind(globalThis)
+        const transport = globalThis.fetch.bind(globalThis)
         const upload = await transport(initialized.uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/zip' },

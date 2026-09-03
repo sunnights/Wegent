@@ -10,8 +10,6 @@ import {
   Upload,
   FileText,
   Search,
-  BookOpen,
-  Database,
   Trash2,
   Target,
   FileUp,
@@ -32,6 +30,8 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DocumentDetailDialog } from './DocumentDetailDialog'
 import { DocumentUpload } from './DocumentUpload'
+import { KnowledgeBaseIcon } from './KnowledgeBaseIcon'
+
 import { DeleteDocumentDialog } from './DeleteDocumentDialog'
 import { EditDocumentDialog } from './EditDocumentDialog'
 import { RetrievalTestDialog } from './RetrievalTestDialog'
@@ -718,8 +718,27 @@ export function DocumentList({
       setDocumentSelection(nextSelectedIds)
     }
 
-    setShowUpload(false)
     onDocumentsChanged?.()
+  }
+
+  const handleDingtalkImport = async (resourceIds: string[]) => {
+    const { importExternalDocumentBatch } = await import('@/apis/knowledge')
+
+    const result = await importExternalDocumentBatch(knowledgeBase.id, {
+      provider: 'dingtalk',
+      external_resource_ids: resourceIds,
+      folder_id: selectedUploadFolderId || 0,
+    })
+
+    // Refresh so the placeholders show up with their backend-driven state.
+    await refresh()
+    onDocumentsChanged?.()
+
+    return {
+      createdCount: result.created.length,
+      updatedCount: result.updated.length,
+      processingCount: result.processing.length,
+    }
   }
 
   const handleDelete = async () => {
@@ -815,19 +834,28 @@ export function DocumentList({
     }
   }
 
-  // Handle document reindex
+  // Handle document reindex. Failed external documents route to the dedicated
+  // import-retry entry so they fetch the provider's latest body before
+  // replacing the attachment and reindexing.
   const handleReindexDocument = async (doc: KnowledgeDocument) => {
     setReindexingDocId(doc.id)
     try {
-      const { reindexDocument } = await import('@/apis/knowledge')
-      const result = await reindexDocument(doc.id)
+      let successMessage = t('document.document.reindexSuccess')
+      if (doc.source_type === 'external') {
+        const { retryExternalDocumentImport } = await import('@/apis/knowledge')
+        await retryExternalDocumentImport(doc.id)
+        successMessage = t('document.document.retryImportSuccess')
+      } else {
+        const { reindexDocument } = await import('@/apis/knowledge')
+        const result = await reindexDocument(doc.id)
 
-      if (!result.success) {
-        throw new Error(t('document.document.reindexFailed'))
+        if (!result.success) {
+          throw new Error(t('document.document.reindexFailed'))
+        }
       }
 
       toast({
-        description: t('document.document.reindexSuccess'),
+        description: successMessage,
       })
 
       // Immediately refresh so the doc's new PENDING_CONVERSION/QUEUED status
@@ -840,7 +868,11 @@ export function DocumentList({
       onDocumentsChanged?.()
     } catch (err) {
       // Use ApiError.errorCode for structured error handling
-      let errorMessage = t('document.document.reindexFailed')
+      const fallbackMessage =
+        doc.source_type === 'external'
+          ? t('document.document.retryImportFailed')
+          : t('document.document.reindexFailed')
+      let errorMessage = fallbackMessage
       if (err instanceof Error) {
         // Check if it's an ApiError with errorCode for structured error handling
         const apiError = err as { errorCode?: string; message: string }
@@ -992,8 +1024,6 @@ export function DocumentList({
     },
     [getSelectionPayload, transfer, resetSelection, refresh, fetchFolders, onDocumentsChanged]
   )
-  // Knowledge base type info
-  const isNotebook = (knowledgeBase.kb_type || 'notebook') === 'notebook'
   // Check if RAG is configured (has retriever and embedding model)
   const ragConfigured = !!(
     knowledgeBase.retrieval_config?.retriever_name &&
@@ -1014,11 +1044,7 @@ export function DocumentList({
           </button>
         )}
         {/* Type icon - based on current kb type */}
-        {isNotebook ? (
-          <BookOpen className="w-5 h-5 text-primary flex-shrink-0" />
-        ) : (
-          <Database className="w-5 h-5 text-text-secondary flex-shrink-0" />
-        )}
+        <KnowledgeBaseIcon kbType={knowledgeBase.kb_type} className="w-5 h-5 flex-shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             {/* Group name prefix with click handler */}
@@ -1300,7 +1326,12 @@ export function DocumentList({
 
           {/* Upload button */}
           {canUploadDocuments && (
-            <Button variant="primary" size="sm" onClick={handleOpenUpload}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleOpenUpload}
+              data-testid="upload-documents-button"
+            >
               <Upload className="w-4 h-4 mr-1" />
               {t('document.document.upload')}
             </Button>
@@ -1604,10 +1635,13 @@ export function DocumentList({
         isOrganization={isOrganization}
       />
       <DocumentUpload
+        knowledgeBaseId={knowledgeBase.id}
         open={showUpload}
         onOpenChange={setShowUpload}
         onUploadComplete={handleUploadComplete}
         onWebAdd={handleWebAdd}
+        onDingtalkImport={handleDingtalkImport}
+        canManageDocuments={canUploadDocuments}
         kbType={documentViewOf(knowledgeBase.kb_type) ?? undefined}
         folderId={selectedUploadFolderId}
         folderOptions={folderOptions}

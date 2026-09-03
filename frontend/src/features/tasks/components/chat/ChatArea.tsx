@@ -24,9 +24,9 @@ import { GuidedQuestions } from '@/features/knowledge/document/components/Guided
 import type { PipelineStageInfo } from '@/apis/tasks'
 import { useChatAreaState } from './useChatAreaState'
 import { useChatStreamHandlers, type SendMessageOptions } from './useChatStreamHandlers'
-import { allBotsHavePredefinedModel } from '../selector/ModelSelector'
+import { allBotsHavePredefinedModel, DEFAULT_MODEL_NAME } from '../selector/ModelSelector'
 import { QuoteProvider, SelectionTooltip, useQuote } from '../text-selection'
-import type { Team, SubtaskContextBrief, TaskType } from '@/types/api'
+import type { Attachment, Team, SubtaskContextBrief, TaskType } from '@/types/api'
 import type { PipelineContextPassing } from '@/types/api'
 import type { Model } from '../../hooks/useModelSelection'
 import type { ContextItem, ExternalKnowledgeRef, QueueMessageContext } from '@/types/context'
@@ -102,12 +102,28 @@ import {
   isVideoExtension,
 } from '@/apis/attachments'
 import type { AttachmentTypeLimits } from '@/hooks/useMultiAttachment'
+import { teamHidesVideoParam, teamUsesModeSpecCategory } from '@/features/tasks/utils/teamModeSpec'
 
 /**
  * Threshold in pixels for determining when to collapse selectors.
  * When the controls container width is less than this value, selectors will collapse.
  */
 const COLLAPSE_SELECTORS_THRESHOLD = 420
+
+function hasVideoInputAttachment(attachment: Attachment): boolean {
+  if (attachment.mime_type?.toLowerCase().startsWith('video/')) {
+    return true
+  }
+  return isVideoExtension(attachment.file_extension)
+}
+
+function getVideoInputSupport(model: Model | null | undefined): boolean | null {
+  if (!model || model.name === DEFAULT_MODEL_NAME) {
+    return null
+  }
+  const capabilities = model.config?.modelCapabilities as { supportsVideo?: boolean } | undefined
+  return capabilities?.supportsVideo === true
+}
 
 function isAllowedGenerationFormat(format: string, formats: string[]): boolean {
   const normalized = format.toLowerCase().replace(/^\./, '')
@@ -225,6 +241,8 @@ interface ChatAreaProps {
   guidedQuestions?: string[]
   /** When true, input is always positioned at bottom even when there are no messages (used in knowledge notebook mode) */
   inputAlwaysAtBottom?: boolean
+  /** When true, render the message list and input inside a narrow split-view chat pane. */
+  isSplitViewOpen?: boolean
   /** Custom content to display when there are no messages (used in knowledge notebook mode for KnowledgeBaseSummaryCard) */
   emptyStateContent?: React.ReactNode
   /** Extension for team editing functionality (injected from parent to avoid module coupling) */
@@ -259,6 +277,7 @@ function ChatAreaContent({
   onGenerateModeChange,
   guidedQuestions,
   inputAlwaysAtBottom,
+  isSplitViewOpen = false,
   emptyStateContent,
   extension,
   externalPromptRequest,
@@ -338,16 +357,35 @@ function ChatAreaContent({
     maxAttachmentsByType: mediaAttachmentLimits.maxByType,
     validateAttachmentFile: validateAttachmentFileProxy,
   })
+  const isModeSpecVideo =
+    taskType === 'chat' && teamUsesModeSpecCategory(chatState.selectedTeam, 'video')
+  const hideVideoDuration = teamHidesVideoParam(chatState.selectedTeam, 'duration')
+  const usesVideoModel = taskType === 'video' || isModeSpecVideo
+  const taskVideoModelId = useMemo(() => {
+    const messages = taskState?.messages
+    if (!messages) return null
+    const userMessages = Array.from(messages.values()).filter(message => message.type === 'user')
+    for (let index = userMessages.length - 1; index >= 0; index -= 1) {
+      const result = userMessages[index].result as { video_config?: { model?: string } } | undefined
+      if (result?.video_config?.model) {
+        return result.video_config.model
+      }
+    }
+    return null
+  }, [taskState?.messages])
 
-  // Video model selection state - only enabled for video mode
+  // A Chat Team with video mode selects the Bot's video model while the
+  // backend runs planning on the Bot's secondary LLM.
   // Uses unified useModelSelection hook with modelCategoryType='video'
   const videoModelSelection = useModelSelection({
     teamId: chatState.selectedTeam?.id ?? null,
     taskId: effectiveTaskId ?? null,
+    taskModelId: taskVideoModelId,
     selectedTeam: chatState.selectedTeam,
-    disabled: taskType !== 'video',
+    disabled: !usesVideoModel,
     modelCategoryType: 'video',
   })
+  const selectVideoModelByKey = videoModelSelection.selectModelByKey
 
   // Image model selection state - only enabled for image mode
   // Uses unified useModelSelection hook with modelCategoryType='image'
@@ -375,8 +413,11 @@ function ChatAreaContent({
   const imageCapabilities = imageConfig?.capabilities
   const imageReferenceFormats = imageCapabilities?.image_formats
   const videoGenerationModes = useMemo(
-    () => videoCapabilities?.generation_modes ?? [],
-    [videoCapabilities?.generation_modes]
+    () =>
+      teamHidesVideoParam(chatState.selectedTeam, 'generation_mode')
+        ? []
+        : (videoCapabilities?.generation_modes ?? []),
+    [chatState.selectedTeam, videoCapabilities?.generation_modes]
   )
   const [selectedVideoGenerationMode, setSelectedVideoGenerationMode] = useState<
     string | undefined
@@ -424,12 +465,13 @@ function ChatAreaContent({
     if (taskType === 'image') {
       return imageCapabilities?.max_reference_images ?? imageConfig?.max_reference_images
     }
-    if (taskType === 'video') {
+    if (usesVideoModel) {
       return videoMaterialLimits.total ?? videoConfig?.max_reference_images
     }
     return undefined
   }, [
     taskType,
+    usesVideoModel,
     imageCapabilities?.max_reference_images,
     imageConfig?.max_reference_images,
     videoMaterialLimits.total,
@@ -437,14 +479,14 @@ function ChatAreaContent({
   ])
 
   const maxAttachmentsByType = useMemo(() => {
-    if (taskType !== 'video') return undefined
+    if (!usesVideoModel) return undefined
     return {
       image: videoMaterialLimits.image,
       imageWithVideo: videoCapabilities?.max_reference_images_with_video,
       video: videoMaterialLimits.video,
       audio: videoMaterialLimits.audio,
     }
-  }, [taskType, videoMaterialLimits])
+  }, [usesVideoModel, videoCapabilities?.max_reference_images_with_video, videoMaterialLimits])
 
   const videoImageMaterialAccept = useMemo(
     () => formatsToAcceptString(videoCapabilities?.image_formats, 'image/*'),
@@ -457,7 +499,7 @@ function ChatAreaContent({
 
   const materialAccept = useMemo(() => {
     if (taskType === 'image') return imageMaterialAccept
-    if (taskType !== 'video') return undefined
+    if (!usesVideoModel) return undefined
     const isKeyframeMode =
       activeVideoGenerationMode?.id === 'first_last_frame' ||
       activeVideoGenerationMode?.id === 'keyframe'
@@ -484,6 +526,7 @@ function ChatAreaContent({
     activeVideoGenerationMode,
     imageMaterialAccept,
     taskType,
+    usesVideoModel,
     videoCapabilities,
     videoImageMaterialAccept,
   ])
@@ -517,7 +560,7 @@ function ChatAreaContent({
         }
         return null
       }
-      if (taskType !== 'video' || !videoCapabilities) return null
+      if (!usesVideoModel || !videoCapabilities) return null
       const isImage = isImageExtension(extension)
       const isVideo = isVideoExtension(extension)
       const isAudio = isAudioExtension(extension)
@@ -769,6 +812,7 @@ function ChatAreaContent({
       imageReferenceFormats,
       t,
       taskType,
+      usesVideoModel,
       videoCapabilities,
     ]
   )
@@ -888,9 +932,21 @@ function ChatAreaContent({
         })
         return
       }
-      videoModelSelection.selectModelByKey(`${model.name}:${model.type || ''}`)
+      selectVideoModelByKey(`${model.name}:${model.type || ''}`)
     },
-    [chatState.attachmentState.attachments, t, toast, videoModelSelection.selectModelByKey]
+    [chatState.attachmentState.attachments, selectVideoModelByKey, t, toast]
+  )
+
+  const hasChatModelVideoAttachment = useMemo(() => {
+    if (usesVideoModel) {
+      return false
+    }
+    return chatState.attachmentState.attachments.some(hasVideoInputAttachment)
+  }, [usesVideoModel, chatState.attachmentState.attachments])
+
+  const selectedModelVideoInputSupport = useMemo(
+    () => getVideoInputSupport(chatState.selectedModel),
+    [chatState.selectedModel]
   )
 
   const effectiveTaskType = useMemo<TaskType>(() => {
@@ -922,6 +978,20 @@ function ChatAreaContent({
     enabled: true,
     initialSelectedSkills,
   })
+
+  const previousVideoMetadataOnlyRef = useRef(false)
+  useEffect(() => {
+    const active = hasChatModelVideoAttachment && selectedModelVideoInputSupport === false
+
+    if (active && !previousVideoMetadataOnlyRef.current) {
+      toast({
+        title: t('chat:externalWebContent.videoMetadataOnlyTitle'),
+        description: t('chat:externalWebContent.videoMetadataOnlyDescription'),
+      })
+    }
+
+    previousVideoMetadataOnlyRef.current = active
+  }, [hasChatModelVideoAttachment, selectedModelVideoInputSupport, toast, t])
 
   // Video mode specific state - resolution, aspect ratio, and duration
   // These are kept separate from useModelSelection as they are video-specific parameters
@@ -1232,16 +1302,20 @@ function ChatAreaContent({
     controlsContainerWidth,
   } = useFloatingInput({
     hasMessages: hasMessagesForHooks,
+    inputAlwaysAtBottom,
   })
 
   // For video/image mode, use respective model selection; otherwise use regular model selection
   // This ensures the correct model is passed to the backend for routing
   const effectiveSelectedModel = useMemo(() => {
-    if (effectiveTaskType === 'video') return videoModelSelection.selectedModel
+    if (effectiveTaskType === 'video' || isModeSpecVideo) {
+      return videoModelSelection.selectedModel
+    }
     if (effectiveTaskType === 'image') return imageModelSelection.selectedModel
     return chatState.selectedModel
   }, [
     effectiveTaskType,
+    isModeSpecVideo,
     videoModelSelection.selectedModel,
     imageModelSelection.selectedModel,
     chatState.selectedModel,
@@ -1250,12 +1324,22 @@ function ChatAreaContent({
   // Build generate params for video/image generation tasks
   // Include model name for display in user message bubble
   const generateParams = useMemo(() => {
+    if (isModeSpecVideo) {
+      return {
+        resolution: selectedResolution,
+        ratio: selectedRatio,
+        model: videoModelSelection.selectedModel?.name,
+        model_display_name: videoModelSelection.selectedModel?.displayName,
+        generation_mode_id: selectedVideoGenerationMode,
+      }
+    }
     if (effectiveTaskType === 'video') {
       return {
         resolution: selectedResolution,
         ratio: selectedRatio,
         duration: selectedDuration,
         model: videoModelSelection.selectedModel?.name,
+        model_display_name: videoModelSelection.selectedModel?.displayName,
         generation_mode_id: selectedVideoGenerationMode,
       }
     }
@@ -1268,12 +1352,14 @@ function ChatAreaContent({
     return undefined
   }, [
     effectiveTaskType,
+    isModeSpecVideo,
     selectedResolution,
     selectedRatio,
     selectedDuration,
     selectedVideoGenerationMode,
     selectedImageSize,
     videoModelSelection.selectedModel?.name,
+    videoModelSelection.selectedModel?.displayName,
     imageModelSelection.selectedModel?.name,
   ])
 
@@ -1401,8 +1487,7 @@ function ChatAreaContent({
     // OpenClaw devices handle model on device side, no model selection required
     if (hideSelectors) return false
     // Video mode uses video model selection, not regular model selection
-    if (effectiveTaskType === 'video') {
-      // In video mode, we need a video model selected
+    if (effectiveTaskType === 'video' || isModeSpecVideo) {
       return !videoModelSelection.selectedModel
     }
     // Image mode uses image model selection
@@ -1418,6 +1503,7 @@ function ChatAreaContent({
     chatState.selectedTeam,
     chatState.selectedModel,
     effectiveTaskType,
+    isModeSpecVideo,
     hideSelectors,
     videoModelSelection.selectedModel,
     imageModelSelection.selectedModel,
@@ -1444,7 +1530,7 @@ function ChatAreaContent({
     if (!chatState.isAttachmentReadyToSend) {
       return t('generate.material_errors.attachment_uploading')
     }
-    if (effectiveTaskType !== 'video') return null
+    if (effectiveTaskType !== 'video' && !isModeSpecVideo) return null
 
     if (
       (activeVideoGenerationMode?.id === 'first_last_frame' ||
@@ -1475,6 +1561,7 @@ function ChatAreaContent({
     effectiveTaskType,
     generationAttachmentCounts.image,
     generationAttachmentCounts.material,
+    isModeSpecVideo,
     isModelSelectionRequired,
     t,
     videoCapabilities?.image_input_required,
@@ -1497,7 +1584,8 @@ function ChatAreaContent({
 
   // Collapse selectors when space is limited
   const shouldCollapseSelectors =
-    controlsContainerWidth > 0 && controlsContainerWidth < COLLAPSE_SELECTORS_THRESHOLD
+    isSplitViewOpen ||
+    (controlsContainerWidth > 0 && controlsContainerWidth < COLLAPSE_SELECTORS_THRESHOLD)
 
   // Keep latest mutable values in refs so callbacks passed to MessagesArea remain stable.
   const taskInputMessageRef = useRef(chatState.taskInputMessage)
@@ -1540,7 +1628,7 @@ function ChatAreaContent({
     if (isGenerateMode(effectiveTaskType)) {
       isExitingGenerationRef.current = true
       removeGenerationModeQueryParam(url.searchParams)
-      chatState.handleTeamChange(null)
+      handleTeamChange(null)
       router.replace(`${url.pathname}${url.search}${url.hash}`)
       return
     }
@@ -1553,7 +1641,7 @@ function ChatAreaContent({
       )
     }
     restoreDefaultTeam()
-  }, [chatState.handleTeamChange, effectiveTaskType, restoreDefaultTeam, router, teamIdFromUrl])
+  }, [effectiveTaskType, handleTeamChange, restoreDefaultTeam, router, teamIdFromUrl])
 
   const shouldConfirmPendingReplacement =
     runtimeTaskStatus === 'PENDING' &&
@@ -1593,10 +1681,9 @@ function ChatAreaContent({
 
   const handleUserFileSelect = useCallback(
     async (files: File | File[]) => {
-      await clearQuickPresetAttachments()
       await handleFileSelect(files)
     },
-    [clearQuickPresetAttachments, handleFileSelect]
+    [handleFileSelect]
   )
 
   const handleInputAttachmentRemove = useCallback(
@@ -1635,14 +1722,6 @@ function ChatAreaContent({
 
       const sourceAttachmentIds = preset.source_attachment_ids ?? []
       if (sourceAttachmentIds.length === 0) {
-        await clearQuickPresetAttachments()
-        return
-      }
-
-      const hasUserAttachment = chatState.attachmentState.attachments.some(
-        attachment => !quickPresetAttachmentIdsRef.current.has(attachment.id)
-      )
-      if (hasUserAttachment) {
         await clearQuickPresetAttachments()
         return
       }
@@ -2362,6 +2441,8 @@ function ChatAreaContent({
     selectedVideoModel: videoModelSelection.selectedModel,
     onVideoModelChange: handleVideoModelChange,
     isVideoModelsLoading: videoModelSelection.isLoading,
+    showVideoControlsInChat: isModeSpecVideo,
+    hideDurationSelector: hideVideoDuration,
     selectedResolution,
     onResolutionChange: setSelectedResolution,
     availableResolutions,
@@ -2402,7 +2483,9 @@ function ChatAreaContent({
   return (
     <div
       ref={chatAreaRef}
-      className="flex-1 flex flex-col min-h-0 w-full relative"
+      className={`flex-1 flex flex-col min-h-0 w-full relative ${
+        isSplitViewOpen ? 'overflow-hidden' : ''
+      }`}
       style={{ height: '100%', boxSizing: 'border-box' }}
     >
       {/* Queue Message Handler - processes process_message URL parameter from inbox */}
@@ -2453,14 +2536,26 @@ function ChatAreaContent({
         <div
           ref={scrollContainerRef}
           className={
-            (hasMessages ? 'h-full overflow-y-auto custom-scrollbar' : 'overflow-y-hidden') +
+            (hasMessages
+              ? `h-full overflow-x-hidden overflow-y-auto ${
+                  isSplitViewOpen ? 'scrollbar-hide' : 'custom-scrollbar'
+                }`
+              : 'overflow-y-hidden') +
             ' transition-opacity duration-200 ' +
             (hasMessages ? 'opacity-100' : 'opacity-0 pointer-events-none h-0')
           }
           aria-hidden={!hasMessages}
-          style={{ paddingBottom: hasMessages ? `${inputHeight + 16}px` : '0' }}
+          style={{
+            paddingBottom: hasMessages && !isSplitViewOpen ? `${inputHeight + 16}px` : '0',
+          }}
         >
-          <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 pt-12">
+          <div
+            className={
+              isSplitViewOpen
+                ? 'w-full px-[18px] pt-12'
+                : 'w-full max-w-5xl mx-auto px-4 sm:px-6 pt-12'
+            }
+          >
             <MessagesArea
               selectedTeam={chatState.selectedTeam}
               selectedRepo={chatState.selectedRepo}
@@ -2500,11 +2595,8 @@ function ChatAreaContent({
       >
         {/* Center area for input when no messages (and not in inputAlwaysAtBottom mode) */}
         {!hasMessages && !inputAlwaysAtBottom && (
-          <div
-            className="flex-1 flex items-center justify-center w-full"
-            style={{ marginBottom: '12vh' }}
-          >
-            <div ref={floatingInputRef} className="w-full max-w-4xl mx-auto px-4 sm:px-6">
+          <div className="flex w-full flex-1 items-start justify-center pt-[8dvh] md:items-center md:pt-0 md:[margin-bottom:12vh]">
+            <div ref={floatingInputRef} className="mx-auto w-full max-w-4xl px-3 sm:px-6">
               {taskType !== 'knowledge' && (
                 <SloganDisplay slogan={chatState.randomSlogan} project={activeProject} />
               )}
@@ -2546,9 +2638,11 @@ function ChatAreaContent({
           <div
             className="absolute inset-0 flex flex-col items-center w-full px-4 sm:px-6 overflow-y-auto pt-4"
             style={{
-              // Reserve space for: GuidedQuestions (~200px max) + ChatInputCard (~120px) + padding (32px)
-              // This prevents overlap between summary card and guided questions on smaller screens
-              paddingBottom: guidedQuestions && guidedQuestions.length > 0 ? '352px' : '152px',
+              // Keep the empty-state scroller clear of the actual floating input,
+              // whose height varies with the selected controls. The extra space is
+              // for the fade above the input; the floor avoids a first-render jump
+              // before the input has been measured.
+              paddingBottom: `${Math.max(inputHeight + 32, 152)}px`,
             }}
           >
             {emptyStateContent}
@@ -2557,10 +2651,11 @@ function ChatAreaContent({
 
         {/* Floating Input Area for messages view or inputAlwaysAtBottom mode */}
         {/* Width is reduced by 12px to avoid overlapping the scrollbar */}
-        {(hasMessages || inputAlwaysAtBottom) && (
+        {(hasMessages || inputAlwaysAtBottom) && !isSplitViewOpen && (
           <div
             ref={floatingInputRef}
             className="fixed bottom-0 z-50 bg-base"
+            data-testid="chat-floating-input"
             style={{
               left: floatingMetrics.left,
               width:
@@ -2612,6 +2707,20 @@ function ChatAreaContent({
           </div>
         )}
       </div>
+
+      {hasMessages && isSplitViewOpen && (
+        <div
+          ref={floatingInputRef}
+          className="w-full shrink-0 overflow-hidden bg-base"
+          data-testid="chat-split-input"
+        >
+          <div className="relative w-full px-[18px]">
+            <div className="pb-3 pt-[41px]">
+              <ChatInputCard {...inputCardProps} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Team Edit Dialog - rendered via extension if provided */}
       {selectedTaskDetail?.id && (

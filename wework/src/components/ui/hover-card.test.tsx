@@ -109,6 +109,70 @@ describe('HoverCard', () => {
     expect(screen.queryByTestId('interactive-anchor-hover-card')).not.toBeInTheDocument()
   })
 
+  test('closes a hovered card when its focused anchor hands off to another anchor', async () => {
+    vi.useFakeTimers()
+    render(
+      <>
+        <HoverCard testId="first-hover-card" interactive content={<div>First task details</div>}>
+          <button type="button">First task</button>
+        </HoverCard>
+        <HoverCard testId="second-hover-card" interactive content={<div>Second task details</div>}>
+          <button type="button">Second task</button>
+        </HoverCard>
+      </>
+    )
+
+    const firstAnchor = screen.getByRole('button', { name: 'First task' })
+    const secondAnchor = screen.getByRole('button', { name: 'Second task' })
+    fireEvent.focus(firstAnchor)
+    fireEvent.mouseEnter(firstAnchor)
+    await act(async () => vi.advanceTimersByTime(450))
+    expect(screen.getByTestId('first-hover-card')).toBeInTheDocument()
+
+    fireEvent.mouseLeave(firstAnchor)
+    fireEvent.mouseEnter(secondAnchor)
+    fireEvent.pointerMove(secondAnchor)
+    await act(async () => vi.advanceTimersByTime(120))
+    expect(screen.queryByTestId('first-hover-card')).not.toBeInTheDocument()
+
+    await act(async () => vi.advanceTimersByTime(330))
+    expect(screen.getByTestId('second-hover-card')).toBeInTheDocument()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(1)
+  })
+
+  test('stays open while focus moves between descendants of the same hovered anchor', async () => {
+    vi.useFakeTimers()
+    render(
+      <HoverCard
+        testId="multi-focus-anchor-hover-card"
+        interactive
+        content={<div>Task details</div>}
+      >
+        <div>
+          <button type="button">Open task</button>
+          <button type="button">Pin task</button>
+        </div>
+      </HoverCard>
+    )
+
+    const firstAction = screen.getByRole('button', { name: 'Open task' })
+    const secondAction = screen.getByRole('button', { name: 'Pin task' })
+    fireEvent.mouseEnter(firstAction)
+    await act(async () => vi.advanceTimersByTime(450))
+    expect(screen.getByTestId('multi-focus-anchor-hover-card')).toBeInTheDocument()
+
+    fireEvent.focus(firstAction)
+    fireEvent.blur(firstAction, { relatedTarget: secondAction })
+    fireEvent.focus(secondAction)
+    await act(async () => vi.advanceTimersByTime(120))
+    expect(screen.getByTestId('multi-focus-anchor-hover-card')).toBeInTheDocument()
+
+    fireEvent.mouseLeave(secondAction)
+    fireEvent.pointerMove(document.body)
+    await act(async () => vi.advanceTimersByTime(120))
+    expect(screen.queryByTestId('multi-focus-anchor-hover-card')).not.toBeInTheDocument()
+  })
+
   test('keeps an interactive card open while using a nested portal menu', async () => {
     vi.useFakeTimers()
     const onClick = vi.fn()
@@ -323,5 +387,60 @@ describe('HoverCard', () => {
       left: '530px',
       top: '380px',
     })
+  })
+
+  test('calibrates once when the rendered size changes with its position', async () => {
+    vi.useFakeTimers()
+    let cardMeasurements = 0
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      const isCard = this.dataset.testid === 'stable-hover-card'
+      if (!isCard) {
+        return {
+          x: 100,
+          y: 500,
+          width: 100,
+          height: 40,
+          top: 500,
+          right: 200,
+          bottom: 540,
+          left: 100,
+          toJSON: () => undefined,
+        }
+      }
+
+      cardMeasurements += 1
+      const top = Number.parseFloat(this.style.top)
+      const height = top === 500 ? 340 : 220
+      return {
+        x: 210,
+        y: top,
+        width: 360,
+        height,
+        top,
+        right: 570,
+        bottom: top + height,
+        left: 210,
+        toJSON: () => undefined,
+      }
+    })
+    vi.stubGlobal('innerWidth', 1024)
+    vi.stubGlobal('innerHeight', 768)
+
+    render(
+      <HoverCard
+        testId="stable-hover-card"
+        estimatedWidth={360}
+        estimatedHeight={220}
+        content={<div>Position-sensitive details</div>}
+      >
+        <div>Current task</div>
+      </HoverCard>
+    )
+
+    fireEvent.mouseEnter(screen.getByText('Current task'))
+    await act(async () => vi.advanceTimersByTime(450))
+
+    expect(screen.getByTestId('stable-hover-card')).toHaveStyle({ left: '210px', top: '200px' })
+    expect(cardMeasurements).toBe(1)
   })
 })

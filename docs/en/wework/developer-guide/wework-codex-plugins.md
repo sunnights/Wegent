@@ -19,6 +19,14 @@ Plugin marketplaces are not split into local and cloud modes. Wework shows the O
 
 Codex plugin runtime configuration is available under Settings → Integrations → Plugins and currently exposes the remote Apps / Connectors switch. Settings no longer includes a standalone worktree management page or an action panel that migrates Claude and Codex skill directories into shared symlinks. Worktree lifecycle is managed by conversation flows, while skill and plugin content is managed through the plugin pages and Codex app-server.
 
+### Boundary between Codex plugins and Wework plugins
+
+The desktop management page separates **Codex plugins** from **Wework plugins**. Codex plugins continue to use the Codex app-server, Wegent cloud marketplace, and Executor synchronization paths. Wework plugins are bundle dependencies of the `wework-core` DSH profile and are managed directly by the Electron main process. Wework plugin management is available only in the managed desktop runtime and does not expose installation or removal HTTP endpoints through the DSH web server.
+
+The renderer invokes allowlisted Electron capabilities to list, install, update, enable, disable, and uninstall plugins. The main process serializes these operations and snapshots the profile `package.json`, lockfile, workspace configuration, and Wework plugin state before each mutation. It then validates the result with `dsh --profile wework-core --dump-config`. If package management or validation fails, it restores the snapshot and reinstalls dependencies from the lockfile.
+
+User plugins must declare `dsh.bundle.patch`. Bundled DSH packages are read-only in the management UI. User plugin order and disabled state are stored in a Wework state file inside the profile and used to rebuild `dsh.profile.bundles`. Configuration changes do not restart the desktop runtime implicitly; the UI prompts the user to call `runtime.restartCoreDsh` after completing a group of changes.
+
 ## Marketplace and Install
 
 Wework reads local marketplaces and the OpenAI official marketplace through the Codex app-server exposed by the local executor. List requests do not restrict `marketplaceKinds`, allowing Codex to return both local marketplaces and the `openai-curated-remote` official marketplace according to the active feature flags and authentication state. Custom remote GitHub marketplaces are cloned into a local cache directory, and later reads use the cached marketplace data and plugin folders. Local marketplace installation, uninstall, refresh, and removal all go through Codex app-server.
@@ -33,6 +41,8 @@ Plugins can declare device-side authorization under `connectors[].localAuth`. `l
 
 The connector authorization preflight before sending a message runs synchronously only for messages that explicitly reference a `plugin://` URI or contain a connector authentication hint; ordinary messages are sent immediately without reading the installed plugin list, so sending is never blocked by local plugin enumeration. When a plugin reference is present, preflight only enriches the mentioned plugins with `plugin/read` and must not call full `plugin/list` / `readState` on the send path, which can stall conversation open by ~10 seconds.
 
+Mid-run authorization recovery checks only the latest assistant or system message in the current conversation; task switching must not rescan the complete transcript. Detection text must have a fixed size bound and may include only message errors, message content, and textual or known structured error fields from tool blocks. It must not serialize `renderPayload` or other unbounded presentation data. This prevents paginated history caches or a single large tool result from blocking the renderer main thread, and prevents stale authorization errors from reopening after later successful replies.
+
 Browser OAuth runs as an asynchronous authorization session with `preparing`, `waiting_browser`, `verifying`, and `ok/error` states. Closing the UI calls the Executor `cancel` RPC and terminates the login process. CLI bridges must emit one status JSON object and must never include tokens, cookies, or other credentials.
 
 Local authorization tools have two sources:
@@ -44,7 +54,7 @@ Plugin installation is user-scoped, while CLI credentials are device-scoped. Ins
 
 `wegent-sites` and `weibo-miniapp-h5-develop-agent` are maintained in separate plugin repositories. Before a Backend image build, `pnpm prepare:builtin-plugins` copies each configured external plugin into the ignored `backend/init_data/plugins/<plugin-name>` staging directory. The standard `build_image.sh` and `build_image_mac.sh` scripts run this step automatically. Official image workflows download each configured archive, verify its pinned SHA-256, and run the same staging operation. Download, verification, or staging failures stop the image build. Backend then idempotently publishes every staged plugin as a workspace-scoped, featured Wegent cloud marketplace item owned by the system `user_id=0`.
 
-Built-in application plugin identity is defined by the Backend built-in plugin registry. The current registry contains only `wegent-sites` and `weibo-miniapp-h5-develop-agent`; both use `visibility=workspace`, so their canonical marketplace name is `wegent`. `public` remains a valid visibility for ordinary plugins. Only when the built-in installation path finds one of these two system-owned `user_id=0` marketplace rows still stored as `visibility=public` does Backend treat it as a legacy row and normalize it to `workspace` before installing. This prevents the same built-in plugin from appearing as `plugin://...@wework` in old data and `plugin://...@wegent` in the current application create flow.
+Built-in application plugin identity is defined by the Backend built-in plugin registry. The current registry contains only `wegent-sites` and `weibo-miniapp-h5-develop-agent`; both use `visibility=workspace`, so their canonical marketplace name is `wegent`. `public` remains valid in the data model but is reserved for system/official public catalogs; a regular user's enterprise submission cannot select it. Only when the built-in installation path finds one of these two system-owned `user_id=0` marketplace rows still stored as `visibility=public` does Backend treat it as a legacy row and normalize it to `workspace` before installing. This prevents the same built-in plugin from appearing as `plugin://...@wework` in old data and `plugin://...@wegent` in the current application create flow.
 
 The Applications page reads its lists through `GET /api/sites`. Sites and Mini Programs share this endpoint and pass `app_type=web` and `app_type=miniapp`, respectively. Omitting the parameter defaults to Sites for backward compatibility. The response `app_type` discriminates the fields for each application type. The page also calls `GET /api/sites/app-types` to discover the types enabled by the current Backend, their display order, and capabilities such as `create`, `publish`, `edit`, `delete`, and `open_experience`. Wework only shows types that are both enabled by the server and represented by a local Definition, and hides operations that are not supported by the advertised capabilities.
 
@@ -99,6 +109,8 @@ Codex app-server requests from `item/commandExecution/requestApproval`, `item/fi
 ## Model List
 
 Wework requests the model catalog from the Codex app-server's `model/list` method through the local executor, then uses the returned provider and model array order unchanged in the model picker. The frontend does not reorder official or default models or custom providers, and does not add models that Codex did not return. The request uses `includeHidden: false`, so models Codex marks as hidden are not displayed.
+
+Existing tasks preserve the model selection saved when the task was created or last sent. If that model is temporarily absent from the current catalog, Wework requires the user to select an available model and blocks sending; it does not silently replace the task model with the default model for new tasks.
 
 ### Supervisor Models
 

@@ -5,7 +5,10 @@
 'use client'
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react'
+import { X } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Drawer, DrawerContent, DrawerTitle, DrawerTrigger } from '@/components/ui/drawer'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { knowledgeBaseApi } from '@/apis/knowledge-base'
 import { taskKnowledgeBaseApi } from '@/apis/task-knowledge-base'
@@ -15,6 +18,7 @@ import type { BoundKnowledgeBaseDetail } from '@/types/task-knowledge-base'
 import type { ContextItem } from '@/types/context'
 import { useExternalKnowledgeSources } from '@/features/knowledge/externalKnowledgeSourceRegistry'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useIsMobile } from '@/features/layout/hooks/useMediaQuery'
 import { cn } from '@/lib/utils'
 import { KnowledgeSourcePicker, type GroupedKnowledgeBases } from './KnowledgeSourcePicker'
 
@@ -98,6 +102,7 @@ export default function ContextSelector({
   const [error, setError] = useState<string | null>(null)
   const [searchValue, setSearchValue] = useState('')
   const knowledgeBaseError = error
+  const isMobile = useIsMobile()
 
   const fetchKnowledgeBases = useCallback(async () => {
     setLoading(true)
@@ -209,14 +214,98 @@ export default function ContextSelector({
     }
   }, [open])
 
+  const selectedContextCount = selectedContexts.filter(context =>
+    ['knowledge_base', 'dingtalk_doc', 'external_knowledge'].includes(context.type)
+  ).length
+
+  const selectorContent = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-11 shrink-0 items-center justify-between border-b border-border px-4 lg:hidden">
+        <h2 className="text-base font-semibold text-text-primary">
+          {t('knowledge:picker.selectContent')}
+        </h2>
+        <button
+          type="button"
+          aria-label={t('common:actions.close')}
+          className="flex h-11 w-11 items-center justify-center rounded-md text-text-muted hover:bg-surface hover:text-text-primary"
+          onClick={() => onOpenChange(false)}
+          data-testid="context-selector-close-button"
+        >
+          <X className="h-5 w-5" />
+        </button>
+      </div>
+
+      <div className="flex h-full min-h-0 flex-1 flex-col">
+        <Input
+          placeholder={t('knowledge:search_placeholder')}
+          value={searchValue}
+          onChange={event => setSearchValue(event.target.value)}
+          className={cn(
+            'h-11 shrink-0 rounded-none border-b border-border text-sm lg:h-9',
+            'placeholder:text-text-muted'
+          )}
+          data-testid="context-selector-knowledge-search-input"
+        />
+        <KnowledgeSourcePicker
+          groupedKnowledgeBases={groupedKnowledgeBases}
+          boundKnowledgeBases={boundKnowledgeBases}
+          externalSources={externalSources}
+          selectedContexts={selectedContexts}
+          searchValue={searchValue}
+          onSearchValueChange={setSearchValue}
+          loading={loading}
+          error={knowledgeBaseError}
+          onRetry={handleKnowledgeBaseRetry}
+          onSelect={onSelect}
+          onDeselect={onDeselect}
+          onSelectMultiple={onSelectMultiple}
+          onDeselectMultiple={onDeselectMultiple}
+          onReplaceContexts={onReplaceContexts}
+        />
+      </div>
+
+      <div className="flex min-h-16 shrink-0 items-center justify-between border-t border-border px-4 lg:hidden">
+        <span className="text-sm text-text-primary" data-testid="context-selector-selected-count">
+          {t('knowledge:picker.selectedCount', { count: selectedContextCount })}
+        </span>
+        <Button
+          type="button"
+          variant="primary"
+          className="min-h-11 min-w-24"
+          onClick={() => onOpenChange(false)}
+          data-testid="context-selector-done-button"
+        >
+          {t('common:actions.done')}
+        </Button>
+      </div>
+    </div>
+  )
+
+  if (isMobile) {
+    return (
+      <Drawer open={open} onOpenChange={onOpenChange} shouldScaleBackground={false}>
+        <DrawerTrigger asChild>{children}</DrawerTrigger>
+        <DrawerContent
+          className="h-[82dvh] max-h-[680px] overflow-hidden rounded-t-2xl border-border bg-base p-0"
+          handleClassName="mt-2 h-1 w-9 bg-text-muted/30"
+          overlayClassName="bg-black/45"
+          data-testid="context-selector-drawer"
+        >
+          <DrawerTitle className="sr-only">{t('knowledge:picker.selectContent')}</DrawerTitle>
+          {selectorContent}
+        </DrawerContent>
+      </Drawer>
+    )
+  }
+
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
       <PopoverContent
         className={cn(
-          'p-0 w-[760px] max-w-[calc(100vw-24px)] border border-border bg-base',
-          'max-h-[var(--radix-popover-content-available-height)] shadow-xl rounded-xl overflow-hidden',
-          'flex flex-col'
+          'flex w-[760px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border border-border bg-base p-0 shadow-xl',
+          'max-h-[var(--radix-popover-content-available-height)]',
+          'md:h-[min(680px,var(--radix-popover-content-available-height))] lg:h-auto'
         )}
         align="start"
         side="top"
@@ -226,33 +315,7 @@ export default function ContextSelector({
         sticky="partial"
         data-testid="context-selector-popover"
       >
-        <div className="flex min-h-0 flex-1 flex-col">
-          <Input
-            placeholder={t('knowledge:search_placeholder')}
-            value={searchValue}
-            onChange={event => setSearchValue(event.target.value)}
-            className={cn(
-              'h-9 rounded-none border-b border-border flex-shrink-0',
-              'placeholder:text-text-muted text-sm'
-            )}
-            data-testid="context-selector-knowledge-search-input"
-          />
-          <KnowledgeSourcePicker
-            groupedKnowledgeBases={groupedKnowledgeBases}
-            boundKnowledgeBases={boundKnowledgeBases}
-            externalSources={externalSources}
-            selectedContexts={selectedContexts}
-            searchValue={searchValue}
-            loading={loading}
-            error={knowledgeBaseError}
-            onRetry={handleKnowledgeBaseRetry}
-            onSelect={onSelect}
-            onDeselect={onDeselect}
-            onSelectMultiple={onSelectMultiple}
-            onDeselectMultiple={onDeselectMultiple}
-            onReplaceContexts={onReplaceContexts}
-          />
-        </div>
+        {selectorContent}
       </PopoverContent>
     </Popover>
   )

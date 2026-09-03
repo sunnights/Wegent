@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react'
 import { forwardRef, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { TFunction } from 'i18next'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -55,8 +56,9 @@ import {
 import type { PluginTrialRefinementRequest } from '@/features/plugins/usePluginTrialPromptRefinement'
 import type { ComposerTextareaHandle } from './composer/ComposerTextarea'
 import { ComposerPluginIcon } from './composer/ComposerPluginIcon'
+import type { ModelSelectorCloseReason } from './composer/model-selector-types'
 import { runtimeProjectUiId } from '@/lib/runtime-project'
-import type { QuickPhrase } from '@/tauri/appPreferences'
+import type { QuickPhrase } from '@/desktop/appPreferences'
 
 export type ProjectCreateMode = 'scratch' | 'existing' | 'git'
 
@@ -86,7 +88,7 @@ export interface ProjectChatControls {
   contextUsage?: RuntimeContextUsage
   isOptionsLocked: boolean
   modelSelectorOpenSignal?: number
-  onModelSelectorOpenChange?: (open: boolean) => void
+  onModelSelectorOpenChange?: (open: boolean, closeReason?: ModelSelectorCloseReason) => void
   setSelectedModel: (model: UnifiedModel | null) => void
   setSelectedModelAndOptions?: (model: UnifiedModel, options: ModelOptions) => void
   setSelectedModelOption: (optionId: string, value: string) => void
@@ -114,7 +116,6 @@ export interface ProjectWorkControls {
   executionMode: ProjectExecutionMode
   executionModeLocked?: boolean
   worktreeAvailability?: ProjectWorktreeAvailability
-  isGitProject?: boolean
   onSelectProject: (projectId: number | null) => void
   onSelectStandaloneDevice: (deviceId: string | null) => void
   onSelectProjectWorkspace?: (projectId: number, deviceWorkspaceId: number | null) => void
@@ -155,6 +156,7 @@ export interface ChatInputProps {
   disabledReason?: string
   placeholder?: string
   inputTestId?: string
+  nativeEmptyCaret?: boolean
   submitButtonTestId?: string
   variant?: 'compact' | 'desktop'
   collapseWhenIdle?: boolean
@@ -565,6 +567,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     disabledReason,
     placeholder,
     inputTestId,
+    nativeEmptyCaret = false,
     submitButtonTestId,
     variant = 'compact',
     collapseWhenIdle = false,
@@ -636,6 +639,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   useImperativeHandle(
     ref,
     () => ({
+      get element() {
+        return composerRef.current?.element ?? null
+      },
       focus: () => composerRef.current?.focus(),
       getValue: () => composerRef.current?.getValue() ?? value,
       setValue: (nextValue, selectionOffset) =>
@@ -764,6 +770,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setPendingModelSelection(null)
     applyModelSelection(model, options)
   }
+  const cancelModelSelection = () => {
+    setPendingModelSelection(null)
+    controls.onModelSelectorOpenChange?.(false, 'dismiss')
+  }
 
   const handleSubmit = (valueOverride?: string, options?: ChatSubmitOptions) => {
     const submittedValue = (valueOverride ?? value).trim()
@@ -808,6 +818,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     disabledReason,
     placeholder: disabledReason ? '' : inputPlaceholder,
     inputTestId,
+    nativeEmptyCaret,
     submitButtonTestId,
     onOpenSkillFile,
     workspaceTarget,
@@ -859,7 +870,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         pendingModelSelection.model?.name ||
         t('workbench.model_auto_select', 'Auto select')
       }
-      onCancel={() => setPendingModelSelection(null)}
+      onCancel={cancelModelSelection}
       onConfirm={confirmModelSelection}
     />
   ) : null
@@ -1106,7 +1117,7 @@ function QueueResumeDialog({
   onPreserve: () => void
   onClear: () => void
 }) {
-  return (
+  return createPortal(
     <div
       data-testid="paused-queue-send-dialog-overlay"
       className="fixed inset-0 z-modal flex items-center justify-center bg-black/35 px-4"
@@ -1160,7 +1171,8 @@ function QueueResumeDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -1175,7 +1187,7 @@ function ModelSwitchWarningDialog({
   onCancel: () => void
   onConfirm: () => void
 }) {
-  return (
+  return createPortal(
     <div
       data-testid="model-switch-warning-dialog-overlay"
       className="fixed inset-0 z-modal flex items-center justify-center bg-black/35 px-4"
@@ -1229,6 +1241,7 @@ function ModelSwitchWarningDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }

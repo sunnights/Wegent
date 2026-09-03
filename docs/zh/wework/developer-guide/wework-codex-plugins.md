@@ -19,6 +19,14 @@ Wework 的插件能力兼容 Codex plugin、skill 和 app 机制。插件页负�
 
 Codex 插件运行配置位于“设置 → 集成 → 插件”，当前提供远端 Apps / Connectors 开关。设置区不再提供独立的工作树管理页，也不再提供将 Claude 和 Codex 技能目录迁移为共享软链接的操作面板；工作树生命周期由会话流程管理，技能与插件内容由插件页和 Codex app-server 管理。
 
+### Codex 插件与 Wework 插件的边界
+
+桌面管理页把插件分为 **Codex 插件** 和 **Wework 插件**。前者继续使用 Codex app-server、Wegent 云端市场和 Executor 同步链路；后者是 `wework-core` DSH profile 的 bundle 依赖，由 Electron 主进程直接管理。Wework 插件管理能力只在受管桌面运行时可用，不通过 DSH Web Server 暴露安装或卸载 HTTP 接口。
+
+Renderer 通过白名单 Electron capability 调用列举、安装、更新、启停和卸载操作。主进程将这些操作串行化，并在每次修改前快照 profile 的 `package.json`、锁文件、workspace 配置和 Wework 插件状态文件。修改后执行 `dsh --profile wework-core --dump-config` 预检；预检或包管理命令失败时恢复快照并按锁文件重新安装依赖。
+
+用户插件必须声明 `dsh.bundle.patch`。内置 DSH 包在管理页中只读展示；用户插件的顺序和停用状态记录在 profile 内的 Wework 状态文件中，再据此重建 `dsh.profile.bundles`。配置修改不会隐式重启桌面运行时，页面统一提示用户在完成一组操作后调用 `runtime.restartCoreDsh`。
+
 ## 市场和安装
 
 本地市场和 OpenAI 官方市场由 Wework 前端通过本机 executor 的 Codex app-server 读取。列表请求不限制 `marketplaceKinds`，因此 Codex 可以按照当前功能开关和登录态返回本地市场与 `openai-curated-remote` 官方市场。远程 GitHub 自定义市场会被 clone 到本地缓存目录，后续列表读取使用缓存中的 marketplace 数据和插件目录。本地市场的安装、卸载、刷新和删除都走 Codex app-server。
@@ -33,6 +41,8 @@ Codex 插件运行配置位于“设置 → 集成 → 插件”，当前提供�
 
 发送消息前的连接器授权预检只对明确包含 `plugin://` 引用或连接器认证提示的消息同步执行；普通消息直接发送，不读取插件清单，避免每次发送都被本机插件枚举阻塞。带插件引用时也只对消息中提到的插件做 `plugin/read` 补全连接器信息，禁止在发送路径上调用完整 `plugin/list` / `readState`，以免会话打开被拖慢约 10 秒。
 
+运行中授权恢复只检查当前会话最新的 assistant/system 消息，不在任务切换时重新扫描全部历史。检测文本必须有固定大小上限，只读取消息错误、正文以及工具块中的文本或已知结构化错误字段；不得序列化 `renderPayload` 或其它无界展示载荷。这样历史分页缓存或单条大型工具输出不会阻塞渲染进程主线程，旧的授权错误也不会在后续正常回复后重新弹出。
+
 `browser_oauth` 使用异步授权会话，状态依次为 `preparing`、`waiting_browser`、`verifying` 和 `ok/error`。关闭界面会调用 Executor 的 `cancel` RPC 并终止登录子进程。CLI 输出必须是单个状态 JSON，不得包含 token、cookie 或其他凭据。
 
 本地授权工具支持两种来源：
@@ -44,7 +54,7 @@ Codex 插件运行配置位于“设置 → 集成 → 插件”，当前提供�
 
 `wegent-sites` 和 `weibo-miniapp-h5-develop-agent` 由独立插件仓库维护。构建 Backend 镜像前，`pnpm prepare:builtin-plugins` 会按插件配置将外部插件复制到忽略提交的 `backend/init_data/plugins/<plugin-name>` 目录；标准 `build_image.sh` 和 `build_image_mac.sh` 会自动执行该步骤。正式镜像工作流分别从配置的归档地址下载插件，校验固定 SHA-256 后执行同一 staging。下载、校验或 staging 失败会终止镜像构建。Backend 随后以系统所有者 `user_id=0` 将已 staging 的插件幂等发布为组织范围、推荐的 Wegent 云端市场条目。
 
-内置应用插件的身份以 Backend 内置插件注册表为准。当前注册表只包含 `wegent-sites` 和 `weibo-miniapp-h5-develop-agent`，二者都使用 `visibility=workspace`，因此规范市场名是 `wegent`。`public` 仍是普通插件的合法可见性；只有在内置插件安装路径中，系统所有者 `user_id=0` 下的这两个内置插件市场行仍保存为 `visibility=public` 时，才会被视为历史遗留行并在安装前规范化为 `workspace`。这样可以避免同一个内置插件在旧数据中以 `plugin://...@wework`、在当前应用创建流程中以 `plugin://...@wegent` 出现两套身份。
+内置应用插件的身份以 Backend 内置插件注册表为准。当前注册表只包含 `wegent-sites` 和 `weibo-miniapp-h5-develop-agent`，二者都使用 `visibility=workspace`，因此规范市场名是 `wegent`。`public` 在数据模型中仍然合法，但只保留给系统/官方公开目录；普通用户的企业投稿不能选择它。只有在内置插件安装路径中，系统所有者 `user_id=0` 下的这两个内置插件市场行仍保存为 `visibility=public` 时，才会被视为历史遗留行并在安装前规范化为 `workspace`。这样可以避免同一个内置插件在旧数据中以 `plugin://...@wework`、在当前应用创建流程中以 `plugin://...@wegent` 出现两套身份。
 
 应用页通过 `GET /api/sites` 读取列表。站点和小程序共用该接口，并分别传入 `app_type=web` 和 `app_type=miniapp`；省略参数时默认返回站点，兼容已有调用。响应中的 `app_type` 是区分两类应用字段的判别值。页面还会调用 `GET /api/sites/app-types` 获取当前 Backend 启用的类型、展示顺序和 `create`、`publish`、`edit`、`delete`、`open_experience` 等能力；Wework 只显示本地已有 Definition 且服务端已启用的类型，并按能力隐藏不支持的操作。
 
@@ -99,6 +109,8 @@ Codex app-server 的 `item/commandExecution/requestApproval`、`item/fileChange/
 ## 模型列表
 
 Wework 通过本机 executor 请求 Codex app-server 的 `model/list` 获取模型目录，并将返回的 provider 和模型数组顺序原样用于模型选择器。前端不会重排官方模型、默认模型或自定义 provider，也不会补充未由 Codex 返回的模型。请求使用 `includeHidden: false`，因此 Codex 标记为隐藏的模型不会显示。
+
+已有任务会保留创建或上次发送时保存的模型选择。如果该模型暂时不在当前模型目录中，Wework 会要求用户重新选择可用模型，并阻止继续发送；它不会把新任务的默认模型静默替换到已有任务中。
 
 ### 监督模型
 

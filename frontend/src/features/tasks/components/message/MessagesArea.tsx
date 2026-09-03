@@ -113,6 +113,11 @@ interface StreamingMessageBubbleProps {
   theme: 'light' | 'dark'
   t: (key: string) => string
   onSendMessage?: (content: string, options?: SendMessageOptions) => void
+  onAskUserSubmit?: (
+    toolUseId: string,
+    formattedMessage: string,
+    answer: InteractiveFormAnswerPayload
+  ) => void
   index: number
   isGroupChat?: boolean
   isPendingConfirmation?: boolean
@@ -129,6 +134,7 @@ function StreamingMessageBubble({
   theme,
   t,
   onSendMessage,
+  onAskUserSubmit,
   index,
   isGroupChat,
   isPendingConfirmation,
@@ -193,6 +199,7 @@ function StreamingMessageBubble({
       isWaiting={Boolean(isStreaming && !hasContent && !hasThinking)}
       waitingMessage={waitingMessage}
       onSendMessage={onSendMessage}
+      onAskUserSubmit={onAskUserSubmit}
       isGroupChat={isGroupChat}
       isPendingConfirmation={isPendingConfirmation}
       onUseAsReference={onUseAsReference}
@@ -1301,6 +1308,7 @@ function MessagesArea({
                     theme={theme as 'light' | 'dark'}
                     t={t}
                     onSendMessage={onSendMessage}
+                    onAskUserSubmit={handleAskUserSubmit}
                     index={index}
                     isGroupChat={isGroupChat}
                     isPendingConfirmation={isPendingConfirmation}

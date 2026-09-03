@@ -15,7 +15,6 @@ const guardedFiles = [
   'components/common/ActionMenu.tsx',
   'components/layout/DesktopAppSwitcher.tsx',
   'components/layout/workspace-panels/FileWorkspacePanel.tsx',
-  'components/plugins/PluginCatalogSections.tsx',
   'components/projects/DeviceFolderPicker.tsx',
   'components/projects/ProjectCreateDialog.tsx',
   'features/todo/TodoCreateDialog.tsx',
@@ -31,8 +30,8 @@ const guardedFiles = [
   'components/chat/blocks/ToolBlocksDisplay.tsx',
   'components/plugins/PluginCreateMenu.tsx',
   'components/plugins/PluginsWorkspace.tsx',
-  'pages/PluginManagementPage.tsx',
-  'pages/PluginsPage.tsx',
+  '../dsh/ui-plugin-center/src/PluginManagementPage.tsx',
+  '../dsh/ui-plugin-center/src/PluginsPage.tsx',
 ]
 
 const forbiddenThemeClasses = [
@@ -50,8 +49,8 @@ const zIndexGuardedFiles = [
   'components/layout/DesktopWorkbenchMain.tsx',
   'components/layout/MobileDrawer.tsx',
   'components/layout/MobileWorkbenchLayout.tsx',
-  'pages/PluginManagementPage.tsx',
-  'pages/PluginsPage.tsx',
+  '../dsh/ui-plugin-center/src/PluginManagementPage.tsx',
+  '../dsh/ui-plugin-center/src/PluginsPage.tsx',
 ]
 
 const forbiddenGlobalZIndexClasses = [

@@ -542,6 +542,30 @@ impl RuntimeWorkRpcHandler {
     }
 
     pub(super) fn start_queued_turn(&self, turn: SpawnTurnRequest) {
+        if turn
+            .request
+            .extra
+            .get(RESTORED_TURN_MARKER)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let handler = self.clone();
+            tokio::spawn(async move {
+                log_executor_event(
+                    "runtime restored turn waiting for startup permit",
+                    &[("local_task_id", turn.local_task_id.clone())],
+                );
+                let permit = match Arc::clone(&handler.restore_startup_semaphore)
+                    .acquire_owned()
+                    .await
+                {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                };
+                handler.start_turn_with_restore_permit(turn, Some(permit));
+            });
+            return;
+        }
         if !turn
             .request
             .extra
@@ -556,9 +580,128 @@ impl RuntimeWorkRpcHandler {
         });
     }
 
-    pub(super) fn start_turn(&self, mut turn: SpawnTurnRequest) {
+    pub(super) async fn map_execution_codex_notification(
+        &self,
+        local_task_id: &str,
+        execution_id: u64,
+        request: &ExecutionRequest,
+        active_turn: Option<ActiveCodexTurn>,
+        event_mapper: &mut CodexNotificationEventMapper,
+        message: Value,
+    ) {
+        if !self.is_local_task_execution_accepting_notifications(local_task_id, execution_id) {
+            return;
+        }
+        self.sync_runtime_task_goal_from_notification(local_task_id, &message);
+        self.persist_completed_codex_turn_from_notification(local_task_id, &message);
+
+        if let (Some(active_turn), Some(notification_turn_id)) =
+            (active_turn.as_ref(), codex_notification_turn_id(&message))
+        {
+            if notification_turn_id != active_turn.turn_id {
+                log_executor_event(
+                    "runtime work execution mapper dropped non-active turn notification",
+                    &[
+                        ("local_task_id", local_task_id.to_owned()),
+                        ("active_turn_id", active_turn.turn_id.clone()),
+                        ("notification_turn_id", notification_turn_id),
+                    ],
+                );
+                return;
+            }
+        }
+
+        if let (Some(active_turn), Some(cwd)) = (active_turn.as_ref(), request.cwd()) {
+            let resolved_hook_user = hook_user(request);
+            let context = CodexHookContext {
+                user: resolved_hook_user.clone(),
+                session_id: active_turn.thread_id.clone(),
+                turn_id: active_turn.turn_id.clone(),
+                cwd: PathBuf::from(cwd),
+                model: string_field(&request.model_config, "model_id"),
+                permission_mode: "workspace-write".to_owned(),
+            };
+            match post_tool_use_from_notification(&context, &message) {
+                Ok(Some(input)) => {
+                    log_executor_event(
+                        "runtime work hook identity resolved",
+                        &[
+                            (
+                                "request_user_name",
+                                request
+                                    .user_name
+                                    .clone()
+                                    .unwrap_or_else(|| "<none>".to_owned()),
+                            ),
+                            ("hook_user_name", resolved_hook_user.name.clone()),
+                        ],
+                    );
+                    self.hook_service.dispatch(input).await
+                }
+                Ok(None) => {}
+                Err(error) => log_executor_event(
+                    "runtime work hook notification mapping failed",
+                    &[("error", error.to_string())],
+                ),
+            }
+        }
+        if !self.is_local_task_execution_accepting_notifications(local_task_id, execution_id) {
+            return;
+        }
+        let mut event_request = request.clone();
+        if let Some(active_turn) = active_turn {
+            self.record_active_codex_transcript_item(local_task_id, &active_turn.turn_id, &message);
+            event_request.subtask_id = active_turn.turn_id;
+        }
+        event_mapper.map(
+            &self.event_tx,
+            &self.device_id,
+            local_task_id,
+            &event_request,
+            message,
+        );
+    }
+
+    pub(super) fn start_turn(&self, turn: SpawnTurnRequest) {
+        self.start_turn_with_restore_permit(turn, None);
+    }
+
+    pub(super) fn schedule_restore_startup_timeout(
+        &self,
+        local_task_id: String,
+        execution_id: u64,
+        restore_startup: Arc<RestoreStartupGate>,
+    ) {
+        let handler = self.clone();
+        tokio::spawn(async move {
+            sleep(RESTORE_STARTUP_TIMEOUT).await;
+            if !restore_startup.try_timeout() {
+                return;
+            }
+            if handler.is_current_local_task_execution(&local_task_id, execution_id) {
+                handler.force_settle_local_task_execution(
+                    &local_task_id,
+                    None,
+                    "failed",
+                    "restore_startup_timeout",
+                );
+                log_executor_event(
+                    "runtime restored turn startup timed out",
+                    &[("local_task_id", local_task_id)],
+                );
+            }
+        });
+    }
+
+    fn start_turn_with_restore_permit(
+        &self,
+        mut turn: SpawnTurnRequest,
+        restore_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        turn.request.extra.remove(RESTORED_TURN_MARKER);
+        let restore_startup = restore_permit.map(RestoreStartupGate::new);
         if is_claude_runtime(&turn.runtime) {
-            self.start_claude_turn(turn.local_task_id, turn.request);
+            self.start_claude_turn(turn.local_task_id, turn.request, restore_startup);
             return;
         }
         self.apply_backend_connection(&mut turn.request);
@@ -570,7 +713,6 @@ impl RuntimeWorkRpcHandler {
             fork_thread_id,
             fork_thread_path,
             resume_thread_id,
-            initial_thread_name,
             initial_thread_goal,
         } = turn;
         let mut fields = task_fields(&request.task_id, &request.subtask_id);
@@ -616,6 +758,13 @@ impl RuntimeWorkRpcHandler {
                 return;
             }
         };
+        if let Some(restore_startup) = restore_startup.as_ref() {
+            self.schedule_restore_startup_timeout(
+                local_task_id.clone(),
+                execution_id,
+                Arc::clone(restore_startup),
+            );
+        }
         if let Ok(mut requests) = self.active_request_user_inputs.lock() {
             requests.insert(
                 local_task_id.clone(),
@@ -642,73 +791,20 @@ impl RuntimeWorkRpcHandler {
             let mapper_handle = tokio::spawn(async move {
                 let mut event_mapper = CodexNotificationEventMapper::default();
                 while let Some(message) = notification_rx.recv().await {
-                    if !mapper_handler
-                        .is_current_local_task_execution(&mapper_local_task_id, mapper_execution_id)
-                    {
-                        continue;
-                    }
-                    mapper_handler
-                        .sync_runtime_task_goal_from_notification(&mapper_local_task_id, &message);
-                    mapper_handler.persist_completed_codex_turn_from_notification(
-                        &mapper_local_task_id,
-                        &message,
-                    );
                     let active_turn = mapper_hook_turn
                         .lock()
                         .expect("hook turn context lock should not be poisoned")
                         .clone();
-                    if let (Some(active_turn), Some(cwd)) =
-                        (active_turn.as_ref(), mapper_request.cwd())
-                    {
-                        let resolved_hook_user = hook_user(&mapper_request);
-                        let context = CodexHookContext {
-                            user: resolved_hook_user.clone(),
-                            session_id: active_turn.thread_id.clone(),
-                            turn_id: active_turn.turn_id.clone(),
-                            cwd: PathBuf::from(cwd),
-                            model: string_field(&mapper_request.model_config, "model_id"),
-                            permission_mode: "workspace-write".to_owned(),
-                        };
-                        match post_tool_use_from_notification(&context, &message) {
-                            Ok(Some(input)) => {
-                                log_executor_event(
-                                    "runtime work hook identity resolved",
-                                    &[
-                                        (
-                                            "request_user_name",
-                                            mapper_request
-                                                .user_name
-                                                .clone()
-                                                .unwrap_or_else(|| "<none>".to_owned()),
-                                        ),
-                                        ("hook_user_name", resolved_hook_user.name.clone()),
-                                    ],
-                                );
-                                mapper_handler.hook_service.dispatch(input).await
-                            }
-                            Ok(None) => {}
-                            Err(error) => log_executor_event(
-                                "runtime work hook notification mapping failed",
-                                &[("error", error.to_string())],
-                            ),
-                        }
-                    }
-                    let mut event_request = mapper_request.clone();
-                    if let Some(active_turn) = active_turn {
-                        mapper_handler.record_active_codex_transcript_item(
+                    mapper_handler
+                        .map_execution_codex_notification(
                             &mapper_local_task_id,
-                            &active_turn.turn_id,
-                            &message,
-                        );
-                        event_request.subtask_id = active_turn.turn_id;
-                    }
-                    event_mapper.map(
-                        &mapper_handler.event_tx,
-                        &mapper_handler.device_id,
-                        &mapper_local_task_id,
-                        &event_request,
-                        message,
-                    );
+                            mapper_execution_id,
+                            &mapper_request,
+                            active_turn,
+                            &mut event_mapper,
+                            message,
+                        )
+                        .await;
                 }
             });
             let route_handler = handler.clone();
@@ -735,8 +831,18 @@ impl RuntimeWorkRpcHandler {
             let active_turn_request = request.clone();
             let callback_hook_turn = Arc::clone(&hook_turn);
             let callback_turn_presentation = Arc::clone(&pending_turn_presentation);
+            let active_turn_restore_startup = restore_startup.clone();
             let active_turn_started: CodexActiveTurnCallback =
                 Box::new(move |thread_id, turn_id| {
+                    if let Some(restore_startup) = active_turn_restore_startup.as_ref() {
+                        if !restore_startup.try_activate() {
+                            return;
+                        }
+                        log_executor_event(
+                            "runtime restored turn reached active state",
+                            &[("local_task_id", active_turn_local_task_id.clone())],
+                        );
+                    }
                     if !active_turn_handler.is_current_local_task_execution(
                         &active_turn_local_task_id,
                         active_turn_execution_id,
@@ -808,7 +914,6 @@ impl RuntimeWorkRpcHandler {
                         fork_thread_id,
                         fork_thread_path,
                         resume_thread_id,
-                        initial_thread_name,
                         initial_thread_goal,
                         notifications: Some(notification_tx),
                         cancellation: Some(cancel_rx),
@@ -819,6 +924,9 @@ impl RuntimeWorkRpcHandler {
                     },
                 )
                 .await;
+            if let Some(restore_startup) = restore_startup.as_ref() {
+                restore_startup.finish();
+            }
 
             let _ = mapper_handle.await;
             if !handler.is_current_local_task_execution(&turn_local_task_id, execution_id) {
@@ -1306,9 +1414,38 @@ mod tests {
             fork_thread_id: None,
             fork_thread_path: None,
             resume_thread_id: None,
-            initial_thread_name: None,
             initial_thread_goal: None,
         }
+    }
+
+    #[tokio::test]
+    async fn restore_startup_timeout_prevents_late_activation() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("restore startup permit should be available");
+        let startup = RestoreStartupGate::new(permit);
+
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(startup.try_timeout());
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(!startup.try_activate());
+    }
+
+    #[tokio::test]
+    async fn restore_startup_activation_prevents_late_timeout() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("restore startup permit should be available");
+        let startup = RestoreStartupGate::new(permit);
+
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(startup.try_activate());
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(!startup.try_timeout());
     }
 
     #[test]

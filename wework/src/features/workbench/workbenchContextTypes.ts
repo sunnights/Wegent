@@ -4,6 +4,7 @@ import type {
   Attachment,
   BindRuntimeTaskIMSessionsResponse,
   CloneGitRepositoryInput,
+  CreatedRuntimeProject,
   CreateGitWorkspaceProjectRequest,
   CreateProjectRequest,
   DeleteDeviceWorkspaceRequest,
@@ -83,7 +84,10 @@ export type ArchiveRuntimeTaskResult = {
   status: 'archived' | 'dirty_worktree' | 'failed'
 }
 
-export type RefreshWorkLists = (options?: { syncCloud?: boolean }) => Promise<void>
+export type RefreshWorkLists = (options?: {
+  syncCloud?: boolean
+  unarchivedTasks?: RuntimeTaskAddress[]
+}) => Promise<void>
 
 export type ArchiveRuntimeConversationsResult = ArchiveRuntimeTaskResult
 
@@ -109,6 +113,7 @@ export interface SendCurrentInputOptions {
   ) => void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>
   additionalContext?: RuntimeAdditionalContext
   cloudProjectId?: string
+  origin?: RuntimeTaskCreateRequest['origin']
 }
 
 export interface CreateTemporaryRuntimeTaskOptions {
@@ -125,6 +130,7 @@ export interface CreateProjectRuntimeTaskOptions {
   /** Select a project workspace without mutating the global workbench
    * selection, for embedded project-space composers. */
   deviceWorkspaceId?: number | null
+  taskRequest?: RuntimeTaskCreateRequest | null
   /** Reuse the exact workspace or worktree from a previous runtime task
    * without inheriting its conversation. */
   workspaceSource?: RuntimeTaskAddress | null
@@ -166,6 +172,7 @@ export interface CreateProjectRuntimeTaskOptions {
 export interface RuntimePaneActionOptions {
   onError?: (error: string) => void
   silentBusyRetry?: boolean
+  optimisticUserMessage?: WorkbenchMessage & { role: 'user' }
 }
 
 export interface RuntimePaneGuidanceResult {
@@ -231,6 +238,7 @@ export interface WorkbenchContextValue {
     resetAttachmentsForScope: (scopeKey: string) => void
     listLocalSkills: () => Promise<LocalDeviceSkill[]>
     listLocalApps: () => Promise<LocalDeviceApp[]>
+    requestCatalogs?: () => void
   }
   upgradingDevices: Record<string, DeviceUpgradeState>
   projectExecutionMode: ProjectExecutionMode
@@ -311,6 +319,11 @@ export interface WorkbenchContextValue {
     data: CreateProjectRequest,
     options?: ProjectMutationOptions
   ) => Promise<ProjectWithTasks>
+  createLocalRuntimeProject: (data: {
+    deviceId: string
+    name: string
+    roots: string[]
+  }) => Promise<CreatedRuntimeProject>
   createGitWorkspaceProject: (data: CreateGitWorkspaceProjectRequest) => Promise<ProjectWithTasks>
   prepareDeviceWorkspace: (
     data: DeviceWorkspacePrepareRequest,
@@ -411,11 +424,6 @@ export interface WorkbenchContextValue {
     input: string,
     options: CreateProjectRuntimeTaskOptions
   ) => Promise<RuntimeTaskAddress | false>
-  retryFailedMessage: (
-    messageId: string,
-    messagesOverride?: WorkbenchMessage[],
-    retryUserMessageOverride?: WorkbenchMessage
-  ) => Promise<boolean>
   pauseCurrentResponse: (messagesOverride?: WorkbenchMessage[]) => Promise<void>
   loadTurnFileChangesDiff: (
     subtaskId: string,
@@ -456,8 +464,12 @@ export interface WorkbenchProviderProps {
   lifecycleStore?: RuntimeTaskLifecycleStore
   onStartupReadyChange?: (ready: boolean) => void
   workspaceTabId?: string
+  debugSnapshotEnabled?: boolean
   consumePluginTrials?: boolean
+  loadTaskComposerCatalogs?: boolean
+  prewarmComposerApps?: boolean
   publishDebugSnapshots?: boolean
+  syncCoreDshModels?: boolean
   syncRemoteProjects?: boolean
   syncRuntimeTaskLifecycle?: boolean
 }

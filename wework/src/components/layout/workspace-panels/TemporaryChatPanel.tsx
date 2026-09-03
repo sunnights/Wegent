@@ -25,7 +25,10 @@ import {
   removeRuntimeConversationTurn,
   subscribeRuntimeConversation,
 } from '@/features/workbench/runtimeConversationCache'
-import { resolveTemporaryChatActiveModel } from '@/features/workbench/temporaryChatModelContext'
+import {
+  resolveTemporaryChatActiveModel,
+  resolveTemporaryChatModelSelection,
+} from '@/features/workbench/temporaryChatModelContext'
 import {
   consumeRuntimeTaskLifecycleBlock,
   type RuntimeTaskLifecycleSnapshot,
@@ -35,6 +38,7 @@ import {
 import { localRuntimeAttachments, remoteAttachmentIds } from '@/lib/runtime-attachments'
 import { persistAttachmentReferences } from '@/lib/attachments'
 import { focusComposerAtEnd } from '@/lib/workbenchComposerFocus'
+import { runtimeGoalCreateInput } from '@/lib/runtime-goal'
 import { createAppliedRuntimeGuidanceMessage } from '@/features/workbench/runtimeGuidanceMessages'
 import { createRuntimeUserMessage } from '@/features/workbench/runtimeUserMessage'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -45,12 +49,14 @@ import type {
   ModelType,
   ProjectWithTasks,
   RuntimeSendRequest,
+  RuntimeGoalCreateInput,
   RuntimeTaskAddress,
 } from '@/types/api'
 import type { RuntimePaneQueuedMessage, WorkbenchMessage } from '@/types/workbench'
 
 export interface RuntimeTaskComposerCreateOptions {
   attachments: Attachment[]
+  initialGoal?: RuntimeGoalCreateInput
   executionModel: {
     modelId?: string
     modelType?: ModelType | null
@@ -78,8 +84,10 @@ interface TemporaryChatPanelProps {
   sendEphemeral?: boolean
   emptyStateText?: string
   placeholder?: string
+  allowInitialGoal?: boolean
   expanded?: boolean
   wideComposer?: boolean
+  collapseComposerWhenIdle?: boolean
   projectWork?: ProjectWorkControls
   showProjectWorkBar?: boolean
   projectWorkBarMiddleContext?: ReactNode
@@ -101,8 +109,10 @@ export function TemporaryChatPanel({
   sendEphemeral = true,
   emptyStateText = '临时聊天不会出现在左侧任务列表。',
   placeholder = '要求后续变更',
+  allowInitialGoal = false,
   expanded = false,
   wideComposer = false,
+  collapseComposerWhenIdle = false,
   projectWork,
   showProjectWorkBar = false,
   projectWorkBarMiddleContext,
@@ -131,6 +141,14 @@ export function TemporaryChatPanel({
     () => resolveTemporaryChatActiveModel(projectChat.models, state.runtimeWork, address),
     [address, projectChat.models, state.runtimeWork]
   )
+  const activeModelSelection = useMemo(
+    () => resolveTemporaryChatModelSelection(state.runtimeWork, address),
+    [address, state.runtimeWork]
+  )
+  const globalSelectedModel = projectChat.getSelectedModel?.() ?? projectChat.selectedModel
+  const globalSelectedModelOptions =
+    projectChat.getSelectedModelOptions?.() ?? projectChat.selectedModelOptions
+  const taskModelIdentityPending = Boolean(address && !activeModelSelection)
   const sideChatProjectChat = useMemo(
     () => ({
       ...projectChat,
@@ -153,6 +171,7 @@ export function TemporaryChatPanel({
   const [input, setInput] = useState(initialInput)
   const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
+  const [goalDraftActive, setGoalDraftActive] = useState(false)
   const [queuedMessages, setQueuedMessages] = useState<RuntimePaneQueuedMessage[]>([])
   const [loadingFullTranscript, setLoadingFullTranscript] = useState(false)
   const lifecycleStore = useRuntimeTaskLifecycleStore()
@@ -225,7 +244,7 @@ export function TemporaryChatPanel({
           return
         }
         lifecycleStore.syncTranscript(address, transcript, {
-          preserveActiveTurn: lifecycleStore.getTask(address)?.derived.isRunning ?? false,
+          preserveActiveTurn: lifecycleStore.getTask(address)?.derived.isTurnActive ?? false,
         })
         const nextMessages = completeRuntimeConversationHydration(
           address,
@@ -256,7 +275,7 @@ export function TemporaryChatPanel({
         refresh: true,
       })
       lifecycleStore.syncTranscript(address, transcript, {
-        preserveActiveTurn: lifecycleStore.getTask(address)?.derived.isRunning ?? false,
+        preserveActiveTurn: lifecycleStore.getTask(address)?.derived.isTurnActive ?? false,
       })
       const nextMessages = completeRuntimeConversationHydration(
         address,
@@ -303,11 +322,27 @@ export function TemporaryChatPanel({
   }, [address, subscribeRuntimeTaskStream])
 
   const selectedModelFields = useMemo(() => {
-    const selectedModel = projectChat.getSelectedModel?.() ?? projectChat.selectedModel
-    const selectedModelOptions =
-      projectChat.getSelectedModelOptions?.() ?? projectChat.selectedModelOptions
-    return selectedModelExecutionFields(selectedModel, selectedModelOptions)
-  }, [projectChat])
+    if (address && activeModelSelection) {
+      return {
+        modelId: activeModelSelection.modelName,
+        modelType: activeModelSelection.modelType,
+        modelOptions: activeModelSelection.options ?? {},
+      }
+    }
+    return selectedModelExecutionFields(globalSelectedModel, globalSelectedModelOptions)
+  }, [activeModelSelection, address, globalSelectedModel, globalSelectedModelOptions])
+
+  useEffect(() => {
+    if (!address) return
+    console.info('[runtime-v2] task conversation identity resolved', {
+      deviceId: address.deviceId,
+      taskId: address.taskId,
+      taskModel: activeModelSelection?.modelName ?? null,
+      taskModelType: activeModelSelection?.modelType ?? null,
+      resolvedCatalogModel: activeModel?.name ?? null,
+      globalComposerModel: globalSelectedModel?.name ?? null,
+    })
+  }, [activeModel, activeModelSelection, address, globalSelectedModel])
 
   const sendQueuedMessage = useCallback(
     async (queuedMessage: RuntimePaneQueuedMessage) => {
@@ -478,10 +513,21 @@ export function TemporaryChatPanel({
     async (valueOverride?: string, options: ChatSubmitOptions = {}): Promise<boolean> => {
       const message = (valueOverride ?? input).trim()
       if (!message) return false
+      if (taskModelIdentityPending) {
+        setError('正在同步任务模型配置，请稍后重试')
+        return false
+      }
       setError(null)
       setInput('')
 
       const currentAttachments = sideChatProjectChat.attachments
+      const initialGoal = goalDraftActive
+        ? runtimeGoalCreateInput({
+            objective: message,
+            status: 'active',
+            tokenBudget: null,
+          })
+        : undefined
       const queuedMessage: RuntimePaneQueuedMessage = {
         id: `queued-side-chat-${Date.now()}-${queuedMessages.length}`,
         content: message,
@@ -526,6 +572,7 @@ export function TemporaryChatPanel({
         targetAddress = createTask
           ? await createTask(message, {
               attachments: currentAttachments,
+              initialGoal,
               executionModel: selectedModelFields,
               optimisticUserMessage,
               onError: handleError,
@@ -557,6 +604,7 @@ export function TemporaryChatPanel({
       if (!address) {
         setMessages(getRuntimeConversationMessages(targetAddress))
         updateAddress(targetAddress)
+        setGoalDraftActive(false)
         sideChatProjectChat.resetAttachments()
         return true
       }
@@ -618,6 +666,7 @@ export function TemporaryChatPanel({
     },
     [
       address,
+      goalDraftActive,
       createTask,
       createTemporaryRuntimeTask,
       currentProject,
@@ -632,6 +681,7 @@ export function TemporaryChatPanel({
       sendRuntimePaneMessage,
       source,
       sendEphemeral,
+      taskModelIdentityPending,
       updateAddress,
     ]
   )
@@ -640,9 +690,14 @@ export function TemporaryChatPanel({
     if (!autoSubmitInitialInput || !initialInput.trim() || autoSubmittedInitialInputRef.current) {
       return
     }
-    autoSubmittedInitialInputRef.current = true
-    void send(initialInput)
-  }, [autoSubmitInitialInput, initialInput, send])
+    if (taskModelIdentityPending) return
+    const timeoutId = window.setTimeout(() => {
+      if (autoSubmittedInitialInputRef.current) return
+      autoSubmittedInitialInputRef.current = true
+      void send(initialInput)
+    }, 0)
+    return () => window.clearTimeout(timeoutId)
+  }, [autoSubmitInitialInput, initialInput, send, taskModelIdentityPending])
 
   const cancelQueuedMessage = useCallback((id: string) => {
     queuedMessageBusyBlocksRef.current.delete(id)
@@ -681,7 +736,7 @@ export function TemporaryChatPanel({
   }, [address, cancelRuntimePaneTask])
 
   return (
-    <section data-testid={testId} className="flex min-h-0 flex-1 flex-col">
+    <section data-testid={testId} className="flex min-h-0 min-w-0 flex-1 flex-col">
       {messages.length === 0 ? (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-sm text-text-muted">
           <MessageCircle className="h-5 w-5 text-text-secondary" />
@@ -734,11 +789,12 @@ export function TemporaryChatPanel({
             onChange={setInput}
             onDraftEdit={() => setError(null)}
             onSubmit={send}
-            disabled={false}
+            disabled={taskModelIdentityPending}
             pluginPickerIconOnly
             error={error}
             placeholder={placeholder}
             variant="desktop"
+            collapseWhenIdle={collapseComposerWhenIdle}
             projectChat={sideChatProjectChat}
             projectWork={projectWork}
             showProjectWorkBar={showProjectWorkBar}
@@ -750,6 +806,16 @@ export function TemporaryChatPanel({
             onEditQueuedMessage={editQueuedMessage}
             isStreaming={busy}
             onPause={pause}
+            goalDraftActive={goalDraftActive}
+            onSetGoal={
+              allowInitialGoal && createTask && !address
+                ? () => {
+                    setGoalDraftActive(true)
+                    setError(null)
+                  }
+                : undefined
+            }
+            onCancelGoalDraft={() => setGoalDraftActive(false)}
           />
         </div>
       </div>

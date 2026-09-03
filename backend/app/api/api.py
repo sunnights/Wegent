@@ -16,6 +16,7 @@ from app.api.endpoints import (
     device_chat_tasks,
     devices,
     dingtalk_docs,
+    dsh_plugin_storage,
     external_tasks,
     feedback,
     groups,
@@ -31,9 +32,12 @@ from app.api.endpoints import (
     local_executor,
     loop_item_executions,
     mcp_providers,
+    oauth_clients,
+    oauth_provider,
     oidc,
     openapi_responses,
     pet,
+    plugin_publications,
     project_automations,
     project_incoming_hooks,
     projects,
@@ -42,6 +46,7 @@ from app.api.endpoints import (
     remote_devices,
     repository,
     resource_library,
+    runtime_profiles,
     runtime_work,
     share,
     sites,
@@ -101,6 +106,7 @@ from app.api.endpoints.internal import (
 )
 from app.api.endpoints.internal import (
     object_storage_router,
+    plugin_publications_router,
     rag_content_router,
 )
 from app.api.endpoints.internal import robot_queue as internal_robot_queue
@@ -121,6 +127,10 @@ from app.api.router import api_router
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(oidc.router, prefix="/auth/oidc", tags=["auth", "oidc"])
+api_router.include_router(oauth_provider.router)
+api_router.include_router(
+    oauth_clients.router, prefix="/oauth-clients", tags=["oauth-clients"]
+)
 api_router.include_router(
     wework_auth.router, prefix="/auth/wework", tags=["auth", "wework"]
 )
@@ -153,6 +163,21 @@ api_router.include_router(
     project_automations.router,
     prefix="/v1/cloud-projects",
     tags=["project-automations"],
+)
+api_router.include_router(
+    runtime_profiles.router,
+    prefix="/v1/runtime-profiles",
+    tags=["runtime-profiles"],
+)
+api_router.include_router(
+    dsh_plugin_storage.router,
+    prefix="/v1/dsh-plugin-storage",
+    tags=["dsh-plugin-storage"],
+)
+api_router.include_router(
+    runtime_profiles.project_router,
+    prefix="/v1/cloud-projects",
+    tags=["runtime-profiles"],
 )
 api_router.include_router(
     project_incoming_hooks.router,
@@ -322,6 +347,7 @@ api_router.include_router(
 )
 api_router.include_router(installed_mcps.router, prefix="/mcps", tags=["mcps"])
 api_router.include_router(installed_plugins.router, prefix="/plugins", tags=["plugins"])
+api_router.include_router(plugin_publications.router, prefix="/plugins")
 api_router.include_router(smart_apps.router, prefix="/smart-apps", tags=["smart-apps"])
 api_router.include_router(
     local_executor.router, prefix="/local-executor", tags=["local-executor"]
@@ -375,6 +401,11 @@ api_router.include_router(
     object_storage_router,
     prefix="/internal",
     tags=["internal-object-storage"],
+)
+api_router.include_router(
+    plugin_publications_router,
+    prefix="/internal",
+    tags=["internal-plugin-publications"],
 )
 api_router.include_router(
     workspace_archives_router,

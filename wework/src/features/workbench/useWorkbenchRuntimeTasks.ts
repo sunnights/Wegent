@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch } from 'react'
 import type { ExecutorClient } from '@/api/executorAccess'
+import { stripAppBasePath } from '@/config/runtime'
 import { useTranslation } from '@/hooks/useTranslation'
 import { track } from '@/telemetry/client'
-import { buildRuntimeTaskRoute, navigateTo } from '@/lib/navigation'
+import { buildRuntimeTaskRoute, navigateTo, parseRuntimeTaskRoute } from '@/lib/navigation'
 import { runtimeProjectToProject, runtimeProjectUiId } from '@/lib/runtime-project'
 import type {
   RuntimeTaskSummary,
@@ -126,11 +127,14 @@ export function useWorkbenchRuntimeTasks({
     [dispatch]
   )
 
-  const clearCurrentRuntimeTaskView = useCallback(() => {
-    currentRuntimeTaskRef.current = null
-    dispatch({ type: 'current_task_cleared' })
-    navigateTo('/')
-  }, [dispatch])
+  const clearCurrentRuntimeTaskView = useCallback(
+    (navigate = true) => {
+      currentRuntimeTaskRef.current = null
+      dispatch({ type: 'current_task_cleared' })
+      if (navigate) navigateTo('/')
+    },
+    [dispatch]
+  )
 
   const loadRuntimeTranscriptForPane = useCallback(
     async (
@@ -176,7 +180,10 @@ export function useWorkbenchRuntimeTasks({
   )
 
   const openRuntimeTask = useCallback(
-    async (address: RuntimeTaskAddress) => {
+    async (
+      address: RuntimeTaskAddress,
+      options?: { fallbackProject?: ProjectWithTasks | null }
+    ) => {
       const runtimeProjectWork = state.runtimeWork?.projects.find(item =>
         item.deviceWorkspaces.some(
           workspace =>
@@ -188,7 +195,7 @@ export function useWorkbenchRuntimeTasks({
         ? (state.projects.find(
             item => item.id === runtimeProjectUiId(runtimeProjectWork.project)
           ) ?? runtimeProjectToProject(runtimeProjectWork))
-        : null
+        : (options?.fallbackProject ?? null)
 
       writeLastProjectId(user.id, project?.id ?? null)
       openRuntimeTaskView(address, project, {
@@ -206,7 +213,14 @@ export function useWorkbenchRuntimeTasks({
       ) {
         return
       }
-      clearCurrentRuntimeTaskView()
+      const activeRoute = parseRuntimeTaskRoute(
+        stripAppBasePath(window.location.pathname),
+        window.location.search
+      )
+      const shouldNavigateHome = addresses.some(address =>
+        isSameRuntimeTaskAddress(activeRoute, address)
+      )
+      clearCurrentRuntimeTaskView(shouldNavigateHome)
     },
     [clearCurrentRuntimeTaskView]
   )
@@ -240,27 +254,6 @@ export function useWorkbenchRuntimeTasks({
     [dispatch, services.runtimeWorkApi, t]
   )
 
-  const completeArchivedBoardTasks = useCallback(
-    async (addresses: RuntimeTaskAddress[]) => {
-      const trackingApi = services.projectSpaceApis?.local
-      if (!trackingApi) return
-
-      await Promise.all(
-        addresses.map(async address => {
-          try {
-            await trackingApi.updateTaskTrackingStatus(address, 'archived')
-          } catch (error) {
-            console.warn('[Wework] Failed to complete archived task on project board', {
-              address: runtimeAddressDebug(address),
-              error,
-            })
-          }
-        })
-      )
-    },
-    [services.projectSpaceApis?.local]
-  )
-
   const archiveRuntimeConversations = useCallback(
     async (
       addresses: RuntimeTaskAddress[],
@@ -291,7 +284,6 @@ export function useWorkbenchRuntimeTasks({
       ]
       let worktreeCleanupSucceeded = true
       if (archivedAddresses.length > 0) {
-        await completeArchivedBoardTasks(archivedAddresses)
         archivedAddresses.forEach(evictRuntimeConversation)
         archivedAddresses.forEach(address => lifecycleStore.remove(address))
         markRuntimeTasksArchived(archivedAddresses)
@@ -320,7 +312,6 @@ export function useWorkbenchRuntimeTasks({
     },
     [
       clearCurrentRuntimeTaskIfArchived,
-      completeArchivedBoardTasks,
       dispatch,
       executorClient,
       lifecycleStore,
@@ -462,8 +453,10 @@ export function useWorkbenchRuntimeTasks({
           return
         }
 
+        await openRuntimeTask(response.target, {
+          fallbackProject: state.currentProject,
+        })
         await refreshWorkLists()
-        await openRuntimeTask(response.target)
       } catch (error) {
         dispatch({
           type: 'error_set',
@@ -471,7 +464,14 @@ export function useWorkbenchRuntimeTasks({
         })
       }
     },
-    [dispatch, executorClient, openRuntimeTask, refreshWorkLists, state.currentRuntimeTask]
+    [
+      dispatch,
+      executorClient,
+      openRuntimeTask,
+      refreshWorkLists,
+      state.currentProject,
+      state.currentRuntimeTask,
+    ]
   )
 
   const getRuntimeGoal = useCallback(

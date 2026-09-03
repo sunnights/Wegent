@@ -220,7 +220,7 @@ describe('ComposerProseMirrorEditor', () => {
     expect(onChange).toHaveBeenLastCalledWith('existing pasted text')
   })
 
-  test('moves the caret to the end after pasting text', () => {
+  test('keeps the caret immediately after text pasted in the middle', () => {
     const { editorRef } = renderEditor('before after')
     const editor = screen.getByTestId('composer-editor')
 
@@ -236,9 +236,9 @@ describe('ComposerProseMirrorEditor', () => {
 
     expect(editorRef.current?.getSnapshot()).toMatchObject({
       value: 'before pasted after',
-      selectionOffset: 'before pasted after'.length,
-      selectionStart: 'before pasted after'.length,
-      selectionEnd: 'before pasted after'.length,
+      selectionOffset: 'before pasted '.length,
+      selectionStart: 'before pasted '.length,
+      selectionEnd: 'before pasted '.length,
     })
   })
 
@@ -355,6 +355,64 @@ describe('ComposerProseMirrorEditor', () => {
     renderEditor('')
 
     expect(screen.getByTestId('composer-editor').querySelector('.composer-empty-caret')).toBeNull()
+  })
+
+  test('renders the measurable empty caret in Electron', () => {
+    const previousRuntimeConfig = window.__WEWORK_RUNTIME_CONFIG__
+    window.__WEWORK_RUNTIME_CONFIG__ = {
+      ...previousRuntimeConfig,
+      desktopHost: 'electron',
+    }
+
+    try {
+      renderEditor('')
+
+      expect(
+        screen.getByTestId('composer-editor').querySelector('.composer-empty-caret')
+      ).toHaveAttribute('aria-hidden', 'true')
+    } finally {
+      window.__WEWORK_RUNTIME_CONFIG__ = previousRuntimeConfig
+    }
+  })
+
+  test('keeps an explicitly native Electron composer free of caret widgets', () => {
+    const previousRuntimeConfig = window.__WEWORK_RUNTIME_CONFIG__
+    window.__WEWORK_RUNTIME_CONFIG__ = {
+      ...previousRuntimeConfig,
+      desktopHost: 'electron',
+    }
+
+    try {
+      const textareaRef = createRef<HTMLElement>()
+      render(
+        <ComposerProseMirrorEditor
+          value=""
+          onChange={vi.fn()}
+          onSnapshotChange={vi.fn()}
+          onKeyDown={() => false}
+          onBeforeInput={() => false}
+          onKeyUp={vi.fn()}
+          onCompositionStart={vi.fn()}
+          onCompositionEnd={vi.fn()}
+          onPaste={() => false}
+          onDrop={() => false}
+          onClick={vi.fn()}
+          onFocus={vi.fn()}
+          placeholder="Message"
+          testId="native-composer-editor"
+          rows={2}
+          textareaRef={textareaRef}
+          className="min-h-12"
+          nativeEmptyCaret
+        />
+      )
+
+      expect(
+        screen.getByTestId('native-composer-editor').querySelector('.composer-empty-caret')
+      ).toBeNull()
+    } finally {
+      window.__WEWORK_RUNTIME_CONFIG__ = previousRuntimeConfig
+    }
   })
 
   test('keeps the caret outside the skill while repeatedly moving left', () => {

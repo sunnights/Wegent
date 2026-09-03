@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { AppPreferences } from '@/tauri/appPreferences'
+import type { AppPreferences } from '@/desktop/appPreferences'
+import { AppPreferencesContext } from '@/features/app-preferences/appPreferencesContext'
 import { WorkbenchContext } from '@/features/workbench/useWorkbench'
 import type { WorkbenchContextValue } from '@/features/workbench/workbenchContextTypes'
 import { GeneralSettingsPage } from './GeneralSettingsPage'
@@ -68,7 +69,7 @@ vi.mock('@/hooks/useTranslation', () => ({
   }),
 }))
 
-vi.mock('@/tauri/appPreferences', () => ({
+vi.mock('@/desktop/appPreferences', () => ({
   defaultAppPreferences: {
     closeToTrayEnabled: true,
     showMainWindowOnLaunch: true,
@@ -429,6 +430,25 @@ describe('GeneralSettingsPage', () => {
         telemetryEnabled: false,
       })
     })
+  })
+
+  test('shows the loaded shared preferences without flashing defaults', async () => {
+    getAppPreferencesMock.mockImplementation(() => new Promise(() => undefined))
+
+    render(
+      <AppPreferencesContext.Provider
+        value={{
+          loaded: true,
+          preferences: { ...defaultPreferences, telemetryEnabled: true },
+        }}
+      >
+        <GeneralSettingsPage />
+      </AppPreferencesContext.Provider>
+    )
+
+    const toggle = await screen.findByTestId('general-telemetry-toggle')
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    expect(getAppPreferencesMock).not.toHaveBeenCalled()
   })
 
   test('groups task runtime controls separately and spaces later sections', async () => {

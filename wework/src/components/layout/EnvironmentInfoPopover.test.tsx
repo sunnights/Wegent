@@ -1,12 +1,31 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import '@/i18n'
+import { WEWORK_DSH_SLOTS } from '@/features/dsh-runtime/dshUiSlots'
+import { installDshUiTestContributions } from '@/test/setup'
 import { EnvironmentInfoPopover } from './EnvironmentInfoPopover'
 
 describe('EnvironmentInfoPopover', () => {
   const portalContainers: HTMLElement[] = []
+
+  beforeEach(async () => {
+    await installDshUiTestContributions(
+      {
+        [WEWORK_DSH_SLOTS.environmentSection]: [
+          {
+            id: 'git-change-request',
+            module: 'plugins/wework-ui-git-environment-section.js',
+          },
+        ],
+      },
+      {
+        'plugins/wework-ui-git-environment-section.js': () =>
+          import('../../../dsh/ui-git/src/environment-section'),
+      }
+    )
+  })
 
   afterEach(() => {
     vi.useRealTimers()
@@ -48,6 +67,49 @@ describe('EnvironmentInfoPopover', () => {
     expect(popover).toHaveTextContent('10.201.3.200 已离线，恢复在线后可继续对话')
     expect(popover).not.toHaveTextContent('executor-offline:')
     expect(popover).not.toHaveTextContent('9562a3b4-61a3-4217-9655-0341b231eb06')
+  })
+
+  test('shows the task executor instead of the workspace access device', () => {
+    const popoverContainer = document.createElement('div')
+    document.body.appendChild(popoverContainer)
+    portalContainers.push(popoverContainer)
+
+    render(
+      <EnvironmentInfoPopover
+        info={{
+          additions: '',
+          deletions: '',
+          executionTarget: 'cloud',
+          executionDeviceId: 'cloud-device',
+          deviceId: 'local-device',
+        }}
+        devices={[
+          {
+            id: 1,
+            device_id: 'local-device',
+            name: 'Local Executor',
+            status: 'online',
+            is_default: true,
+            device_type: 'local',
+          },
+          {
+            id: 2,
+            device_id: 'cloud-device',
+            name: 'Cloud Verify Device',
+            status: 'online',
+            is_default: false,
+            device_type: 'cloud',
+            client_ip: '127.0.0.1',
+          },
+        ]}
+        popoverContainer={popoverContainer}
+        open
+        onOpenChange={vi.fn()}
+      />
+    )
+
+    expect(screen.getByTestId('environment-device-button')).toHaveTextContent('Cloud Verify Device')
+    expect(screen.getByTestId('environment-device-button')).not.toHaveTextContent('Local Executor')
   })
 
   test('delegates open state to the app shell without writing browser storage', async () => {
@@ -608,6 +670,7 @@ describe('EnvironmentInfoPopover', () => {
       .getByTestId('environment-change-request-status')
       .querySelector('[aria-hidden="true"]')
     expect(screen.getByTestId('change-request-state')).toHaveTextContent('已合并')
+    expect(screen.getByTestId('change-request-checks')).toHaveTextContent('检查通过')
     expect(icon).toHaveClass('text-violet-500')
     expect(icon).not.toHaveClass('text-green-500')
     expect(screen.getByTestId('change-request-merged-icon')).toBeInTheDocument()
@@ -648,5 +711,46 @@ describe('EnvironmentInfoPopover', () => {
     await userEvent.click(screen.getByTestId('change-request-open-settings'))
     expect(onOpenChange).toHaveBeenCalledWith(false)
     expect(window.location.pathname).toBe('/settings/git-hosting')
+  })
+
+  test('renders no source-control section when no environment contribution is installed', () => {
+    const defaultRuntime = window.__WEWORK_DSH_UI__
+    window.__WEWORK_DSH_UI__ = {
+      ...defaultRuntime!,
+      getEntries: slot =>
+        slot === 'wework.environment.section'
+          ? []
+          : (defaultRuntime?.getEntries(slot as never) ?? []),
+    }
+    const popoverContainer = document.createElement('div')
+    document.body.appendChild(popoverContainer)
+    portalContainers.push(popoverContainer)
+
+    try {
+      render(
+        <EnvironmentInfoPopover
+          info={{
+            additions: '+2',
+            branchName: 'feature/example',
+            deletions: '-1',
+            executionTarget: 'local',
+            isGitRepository: true,
+          }}
+          popoverContainer={popoverContainer}
+          open
+          onOpenChange={vi.fn()}
+          onCommitChanges={vi.fn()}
+          onListBranches={vi.fn()}
+          onCheckoutBranch={vi.fn()}
+          onOpenChangesReview={vi.fn()}
+        />
+      )
+
+      expect(screen.queryByTestId('environment-git-section')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('environment-changes-button')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('environment-commit-button')).not.toBeInTheDocument()
+    } finally {
+      window.__WEWORK_DSH_UI__ = defaultRuntime
+    }
   })
 })
