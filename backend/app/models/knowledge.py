@@ -45,7 +45,6 @@ class DocumentSourceType(str, PyEnum):
 
     FILE = "file"  # Uploaded file
     TEXT = "text"  # Pasted text
-    TABLE = "table"  # External table (DingTalk, Feishu, etc.)
     WEB = "web"  # Web page (scraped URL)
     CODE = "code"  # Source file indexed for retrieval, not a browsable document
 

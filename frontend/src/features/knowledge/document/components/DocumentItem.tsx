@@ -9,7 +9,6 @@ import {
   Trash2,
   Pencil,
   ExternalLink,
-  Table2,
   MoreVertical,
   Globe,
   CloudDownload,
@@ -215,7 +214,6 @@ export function DocumentItem({
   // Whether to show download button
   const showDownload = document.source_type === 'file' && !!document.attachment_id
   // Check document source type
-  const isTable = document.source_type === 'table'
   const isWeb = document.source_type === 'web'
   const isNotIndexed = document.index_status === 'not_indexed'
   const isIndexFailed = document.index_status === 'failed'
@@ -228,11 +226,7 @@ export function DocumentItem({
     isPendingConversion
   const showIndexingState = isReindexing || isBackendIndexing
   const canReindex =
-    ragConfigured &&
-    !isTable &&
-    !!onReindex &&
-    (isIndexFailed || isNotIndexed) &&
-    !showIndexingState
+    ragConfigured && !!onReindex && (isIndexFailed || isNotIndexed) && !showIndexingState
 
   // Multimodal (video/image) document actions — re-analyze gate + handler.
   const { canReanalyze, handleReanalyze } = useMultimodalDocActions(
@@ -245,11 +239,9 @@ export function DocumentItem({
   const EXCEL_FILE_SIZE_LIMIT = 2 * 1024 * 1024 // 2MB
   const isExcel = ['xls', 'xlsx'].includes(document.file_extension?.toLowerCase() || '')
   const isExcelExceedingSizeLimit = isExcel && document.file_size > EXCEL_FILE_SIZE_LIMIT
-  // URL for table or web documents
+  // URL for web documents
   const sourceUrl =
-    (isTable || isWeb) &&
-    document.source_config?.url &&
-    typeof document.source_config.url === 'string'
+    isWeb && document.source_config?.url && typeof document.source_config.url === 'string'
       ? document.source_config.url
       : null
 
@@ -361,15 +353,7 @@ export function DocumentItem({
           <div className="flex items-center justify-between mt-0.5">
             <div className="flex items-center gap-1.5 min-w-0">
               {/* Type badge */}
-              {isTable ? (
-                <Badge
-                  variant="default"
-                  size="sm"
-                  className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[9px] px-1 py-0"
-                >
-                  {t('knowledge:document.document.type.table')}
-                </Badge>
-              ) : isWeb ? (
+              {isWeb ? (
                 <Badge
                   variant="default"
                   size="sm"
@@ -383,7 +367,7 @@ export function DocumentItem({
                 </span>
               )}
               {/* Size */}
-              {!isTable && !isWeb && (
+              {!isWeb && (
                 <span className="text-[9px] text-text-muted">
                   {formatFileSize(document.file_size)}
                 </span>
@@ -458,9 +442,7 @@ export function DocumentItem({
           <div
             className={`p-1 bg-primary/10 rounded ${canManage ? 'group-hover:opacity-0' : ''} transition-opacity`}
           >
-            {isTable ? (
-              <Table2 className="w-3 h-3 text-primary" />
-            ) : isWeb ? (
+            {isWeb ? (
               <Globe className="w-3 h-3 text-primary" />
             ) : (
               <FileText className="w-3 h-3 text-primary" />
@@ -572,9 +554,7 @@ export function DocumentItem({
       >
         {/* File icon */}
         <div className="flex-shrink-0">
-          {isTable ? (
-            <Table2 className="w-4 h-4 text-primary" />
-          ) : isWeb ? (
+          {isWeb ? (
             <Globe className="w-4 h-4 text-primary" />
           ) : (
             <FileText className="w-4 h-4 text-primary" />
@@ -619,15 +599,7 @@ export function DocumentItem({
 
       {/* Type */}
       <div className="text-center min-w-0">
-        {isTable ? (
-          <Badge
-            variant="default"
-            size="sm"
-            className="bg-blue-500/10 text-blue-600 border-blue-500/20"
-          >
-            {t('knowledge:document.document.type.table')}
-          </Badge>
-        ) : isWeb ? (
+        {isWeb ? (
           <Badge
             variant="default"
             size="sm"
@@ -643,7 +615,7 @@ export function DocumentItem({
       {/* Size */}
       <div className="text-center min-w-0">
         <span className="text-xs text-text-muted">
-          {isTable || isWeb ? '-' : formatFileSize(document.file_size)}
+          {isWeb ? '-' : formatFileSize(document.file_size)}
         </span>
       </div>
       {/* Creator */}

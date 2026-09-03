@@ -167,7 +167,7 @@ export interface ChatStreamHandlers {
    * Send a message with a temporary model override (used for regeneration).
    * @param overrideMessage - The message content to send
    * @param modelOverride - The model to use for this single request
-   * @param existingContexts - Optional existing contexts from original message (attachments, knowledge bases, tables)
+   * @param existingContexts - Optional existing contexts from original message (attachments, knowledge bases)
    */
   handleSendMessageWithModel: (
     overrideMessage: string,
@@ -471,40 +471,23 @@ export function useChatStreamHandlers({
       }
 
       const contextItems: Array<{
-        type: 'knowledge_base' | 'table' | 'selected_documents' | 'external_knowledge'
+        type: 'knowledge_base' | 'selected_documents' | 'external_knowledge'
         data: Record<string, unknown>
       }> = snapshotContexts
-        .filter(
-          ctx =>
-            ctx.type !== 'queue_message' &&
-            ctx.type !== 'dingtalk_doc' &&
-            ctx.type !== 'external_knowledge'
-        )
-        .map(ctx => {
-          if (ctx.type === 'knowledge_base') {
-            return {
-              type: 'knowledge_base' as const,
-              data: {
-                knowledge_id: ctx.id,
-                name: ctx.name,
-                document_count: ctx.document_count,
-                document_ids: ctx.document_ids,
-                folder_ids: ctx.folder_ids,
-                folder_names: ctx.folder_names,
-                include_subfolders: ctx.include_subfolders,
-                scope_restricted: ctx.scope_restricted,
-              },
-            }
-          }
-          return {
-            type: 'table' as const,
-            data: {
-              document_id: (ctx as { document_id: number }).document_id,
-              name: ctx.name,
-              source_config: (ctx as { source_config?: { url?: string } }).source_config,
-            },
-          }
-        })
+        .filter(ctx => ctx.type === 'knowledge_base')
+        .map(ctx => ({
+          type: 'knowledge_base' as const,
+          data: {
+            knowledge_id: ctx.id,
+            name: ctx.name,
+            document_count: ctx.document_count,
+            document_ids: ctx.document_ids,
+            folder_ids: ctx.folder_ids,
+            folder_names: ctx.folder_names,
+            include_subfolders: ctx.include_subfolders,
+            scope_restricted: ctx.scope_restricted,
+          },
+        }))
 
       if (taskType === 'knowledge' && knowledgeBaseId && !sendOptions?.artifactContext) {
         const workspaceKnowledgeContext = {
@@ -579,7 +562,7 @@ export function useChatStreamHandlers({
 
       const pendingContexts: Array<{
         id: number
-        context_type: 'attachment' | 'knowledge_base' | 'table' | 'external_knowledge'
+        context_type: 'attachment' | 'knowledge_base' | 'external_knowledge'
         name: string
         status: 'pending' | 'ready'
         file_extension?: string
@@ -592,10 +575,6 @@ export function useChatStreamHandlers({
         include_subfolders?: boolean
         scope_restricted?: boolean
         knowledge_id?: number
-        document_id?: number
-        source_config?: {
-          url?: string
-        }
         external_provider?: string
         external_mode?: string
         external_id?: string
@@ -656,19 +635,6 @@ export function useChatStreamHandlers({
             folder_names: kbContext.folder_names,
             include_subfolders: kbContext.include_subfolders,
             scope_restricted: kbContext.scope_restricted,
-          })
-        } else if (ctx.type === 'table') {
-          const tableContext = ctx as typeof ctx & {
-            document_id: number
-            source_config?: { url?: string }
-          }
-          pendingContexts.push({
-            id: tableContext.document_id,
-            context_type: 'table',
-            name: ctx.name,
-            status: 'ready',
-            document_id: tableContext.document_id,
-            source_config: tableContext.source_config,
           })
         }
       }
@@ -1344,9 +1310,9 @@ export function useChatStreamHandlers({
           existingContexts?.filter(ctx => ctx.context_type === 'attachment').map(ctx => ctx.id) ||
           []
 
-        // Build context items for backend from existing contexts (knowledge bases, tables)
+        // Build context items for backend from existing contexts (knowledge bases)
         const contextItems: Array<{
-          type: 'knowledge_base' | 'table' | 'selected_documents' | 'external_knowledge'
+          type: 'knowledge_base' | 'selected_documents' | 'external_knowledge'
           data: Record<string, unknown>
         }> = []
 
@@ -1364,15 +1330,6 @@ export function useChatStreamHandlers({
                   folder_names: ctx.folder_names,
                   include_subfolders: ctx.include_subfolders,
                   scope_restricted: ctx.scope_restricted,
-                },
-              })
-            } else if (ctx.context_type === 'table' && ctx.document_id) {
-              contextItems.push({
-                type: 'table' as const,
-                data: {
-                  document_id: ctx.document_id,
-                  name: ctx.name,
-                  source_config: ctx.source_config,
                 },
               })
             } else if (ctx.context_type === 'external_knowledge' && ctx.external_provider) {
@@ -1397,7 +1354,7 @@ export function useChatStreamHandlers({
         // Build pending contexts for immediate display from existing contexts
         const pendingContexts: Array<{
           id: number
-          context_type: 'attachment' | 'knowledge_base' | 'table' | 'external_knowledge'
+          context_type: 'attachment' | 'knowledge_base' | 'external_knowledge'
           name: string
           status: 'pending' | 'ready'
           file_extension?: string
@@ -1410,10 +1367,6 @@ export function useChatStreamHandlers({
           include_subfolders?: boolean | null
           scope_restricted?: boolean | null
           knowledge_id?: number
-          document_id?: number
-          source_config?: {
-            url?: string
-          }
           external_provider?: string | null
           external_mode?: string | null
           external_id?: string | null
@@ -1442,8 +1395,6 @@ export function useChatStreamHandlers({
             include_subfolders: ctx.include_subfolders ?? undefined,
             scope_restricted: ctx.scope_restricted ?? undefined,
             knowledge_id: ctx.knowledge_id ?? undefined,
-            document_id: ctx.document_id ?? undefined,
-            source_config: ctx.source_config ?? undefined,
             external_provider: ctx.external_provider ?? undefined,
             external_mode: ctx.external_mode ?? undefined,
             external_id: ctx.external_id ?? undefined,

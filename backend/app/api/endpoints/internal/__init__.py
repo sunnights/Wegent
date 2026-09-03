@@ -18,7 +18,6 @@ from .object_storage import router as object_storage_router
 from .rag_content import router as rag_content_router
 from .services import router as services_router
 from .skills import router as skills_router
-from .tables import router as tables_router
 from .workspace_archives import router as workspace_archives_router
 
 # RAG router is conditionally imported based on STANDALONE_MODE
@@ -39,7 +38,6 @@ __all__ = [
     "rag_content_router",
     "services_router",
     "skills_router",
-    "tables_router",
     "workspace_archives_router",
 ]
 

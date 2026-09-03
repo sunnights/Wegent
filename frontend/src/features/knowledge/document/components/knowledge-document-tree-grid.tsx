@@ -29,7 +29,6 @@ import {
   Globe,
   Pencil,
   RotateCcw,
-  Table2,
   Trash2,
 } from 'lucide-react'
 
@@ -356,12 +355,9 @@ export function KnowledgeDocumentTreeGrid({
           const indent = depth * 16
           if (node.kind === 'document') {
             const document = node.document
-            const isTable = document.source_type === 'table'
             const isWeb = document.source_type === 'web'
             const sourceUrl =
-              (isTable || isWeb) &&
-              document.source_config?.url &&
-              typeof document.source_config.url === 'string'
+              isWeb && document.source_config?.url && typeof document.source_config.url === 'string'
                 ? document.source_config.url
                 : null
             const displayName = getDocumentDisplayName(document)
@@ -371,9 +367,7 @@ export function KnowledgeDocumentTreeGrid({
                 style={indent > 0 ? { paddingLeft: `${indent}px` } : undefined}
               >
                 {expandAllFolders && <div className="h-6 w-6 flex-shrink-0" />}
-                {isTable ? (
-                  <Table2 className="w-4 h-4 text-primary flex-shrink-0" />
-                ) : isWeb ? (
+                {isWeb ? (
                   <Globe className="w-4 h-4 text-primary flex-shrink-0" />
                 ) : (
                   <FileText className="w-4 h-4 text-primary flex-shrink-0" />
@@ -530,17 +524,6 @@ export function KnowledgeDocumentTreeGrid({
             )
           }
           const document = node.document
-          if (document.source_type === 'table') {
-            return (
-              <Badge
-                variant="default"
-                size="sm"
-                className="bg-blue-500/10 text-blue-600 border-blue-500/20"
-              >
-                {t('document.document.type.table')}
-              </Badge>
-            )
-          }
           if (document.source_type === 'web') {
             return (
               <Badge
@@ -569,9 +552,7 @@ export function KnowledgeDocumentTreeGrid({
           const document = node.document
           return (
             <span className="text-xs text-text-muted">
-              {document.source_type === 'table' || document.source_type === 'web'
-                ? '-'
-                : formatFileSize(document.file_size)}
+              {document.source_type === 'web' ? '-' : formatFileSize(document.file_size)}
             </span>
           )
         },
@@ -760,7 +741,6 @@ export function KnowledgeDocumentTreeGrid({
           const document = node.document
           if (!(canManage?.(document) ?? true)) return null
           const isWeb = document.source_type === 'web'
-          const isTable = document.source_type === 'table'
           const isNotIndexed = document.index_status === 'not_indexed'
           const isIndexFailed = document.index_status === 'failed'
           const isPendingConversion = document.index_status === 'pending_conversion'
@@ -772,15 +752,11 @@ export function KnowledgeDocumentTreeGrid({
             isConverting ||
             isPendingConversion
           const canReindex =
-            ragConfigured &&
-            !isTable &&
-            !!onReindex &&
-            (isIndexFailed || isNotIndexed) &&
-            !showIndexingState
+            ragConfigured && !!onReindex && (isIndexFailed || isNotIndexed) && !showIndexingState
           const normalizedExt = `.${(document.file_extension || '').replace(/^\.+/, '')}`
           const isMultimodalDoc = isVideoFileName(document.name) || isImageExtension(normalizedExt)
-          // Gate on source_type=file + attachment_id like showDownload: a table
-          // or web doc could have a multimodal-looking name (e.g. "demo.mp4")
+          // Gate on source_type=file + attachment_id like showDownload: a web
+          // doc could have a multimodal-looking name (e.g. "demo.mp4")
           // but has no attachment to stage/re-analyze.
           const canReanalyze =
             multimodalFeatureEnabled &&

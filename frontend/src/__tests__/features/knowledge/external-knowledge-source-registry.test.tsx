@@ -53,10 +53,6 @@ jest.mock('@/apis/task-knowledge-base', () => ({
   },
 }))
 
-jest.mock('@/apis/table', () => ({
-  tableApi: { list: jest.fn().mockResolvedValue({ items: [] }) },
-}))
-
 jest.mock('@/features/settings/hooks/useKnowledgeBaseOptions', () => ({
   useKnowledgeBaseOptions: () => mockUseKnowledgeBaseOptions(),
 }))

@@ -68,12 +68,6 @@ jest.mock('@/apis/task-knowledge-base', () => ({
   },
 }))
 
-jest.mock('@/apis/table', () => ({
-  tableApi: {
-    list: jest.fn().mockResolvedValue({ items: [] }),
-  },
-}))
-
 jest.mock('@/apis/dingtalk-doc', () => ({
   dingtalkDocApi: {
     getDocs: (...args: unknown[]) => mockGetDingTalkDocs(...args),

@@ -31,7 +31,7 @@ import { Badge } from '@/components/ui/badge'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DocumentDetailDialog } from './DocumentDetailDialog'
-import { DocumentUpload, type TableDocument } from './DocumentUpload'
+import { DocumentUpload } from './DocumentUpload'
 import { DeleteDocumentDialog } from './DeleteDocumentDialog'
 import { EditDocumentDialog } from './EditDocumentDialog'
 import { RetrievalTestDialog } from './RetrievalTestDialog'
@@ -694,19 +694,6 @@ export function DocumentList({
     })
     if (results.some(result => result.documentId !== undefined)) onDocumentsChanged?.()
     return results
-  }
-
-  const handleTableAdd = async (data: TableDocument) => {
-    await create({
-      name: data.name,
-      file_extension: 'table',
-      file_size: 0,
-      source_type: 'table',
-      source_config: data.source_config,
-      folder_id: selectedUploadFolderId || 0,
-    })
-    setShowUpload(false)
-    onDocumentsChanged?.()
   }
 
   const handleWebAdd = async (url: string, name?: string) => {
@@ -1620,7 +1607,6 @@ export function DocumentList({
         open={showUpload}
         onOpenChange={setShowUpload}
         onUploadComplete={handleUploadComplete}
-        onTableAdd={handleTableAdd}
         onWebAdd={handleWebAdd}
         kbType={documentViewOf(knowledgeBase.kb_type) ?? undefined}
         folderId={selectedUploadFolderId}
