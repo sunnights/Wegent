@@ -365,7 +365,7 @@ class ExternalDocumentImportService:
     def request_source_refresh(
         self, db: Session, user: User, document_id: int
     ) -> KnowledgeDocument:
-        """Force a synchronized external document to fetch its source again."""
+        """Force an imported external document to fetch its source again."""
         document = db.get(KnowledgeDocument, document_id)
         if document is None:
             raise ExternalDocumentImportError("Document not found", status_code=404)
@@ -381,15 +381,12 @@ class ExternalDocumentImportService:
                 "You do not have permission to manage documents in this knowledge base",
                 status_code=403,
             )
-        from app.services.knowledge.external_sync_providers import (
-            is_synchronized_external_document,
-        )
-
-        if not document.has_external_identity or not is_synchronized_external_document(
-            document
-        ):
+        # Any imported external document can re-fetch its source: Wiki copies
+        # invalidate their index before landing the new body, DingTalk copies
+        # follow the same refresh path as the scheduled copy update.
+        if not document.has_external_identity:
             raise ExternalDocumentImportError(
-                "Only synchronized external documents can be synchronized"
+                "Only imported external documents can be synchronized"
             )
         refresh = self.queue_source_refresh(db, document)
         if not refresh.started:

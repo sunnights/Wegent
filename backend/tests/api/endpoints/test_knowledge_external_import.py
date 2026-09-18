@@ -1010,7 +1010,7 @@ class TestSynchronizeExternalDocument:
     ) -> None:
         kb_id = _create_kb(test_db, test_user.id)
         document = _create_failed_external_document(
-            test_db, test_user.id, kb_id, index_status="failed"
+            test_db, test_user.id, kb_id, index_status="failed", external=False
         )
 
         response = import_client.post(
@@ -1019,6 +1019,26 @@ class TestSynchronizeExternalDocument:
 
         assert response.status_code == 400
         assert dispatched == []
+
+    def test_refreshes_a_dingtalk_copy(
+        self,
+        import_client: TestClient,
+        test_db: Session,
+        test_user: User,
+        dispatched: list[int],
+    ) -> None:
+        kb_id = _create_kb(test_db, test_user.id)
+        document = _create_failed_external_document(
+            test_db, test_user.id, kb_id, index_status="success"
+        )
+
+        response = import_client.post(
+            f"/knowledge-documents/{document.id}/external-sync"
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["index_status"] == "queued"
+        assert dispatched == [document.id]
 
     def test_returns_conflict_while_sync_is_running(
         self,
