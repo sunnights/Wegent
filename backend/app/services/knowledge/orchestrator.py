@@ -1770,7 +1770,8 @@ class KnowledgeOrchestrator:
 
         Creates the attachment from the provider-fetched body, then lands it on
         the document through a guarded write (see ``_land_external_content``).
-        The user's own name and folder are never overwritten.
+        The user's own folder is never overwritten; a synchronized copy's
+        name follows its source (see ``_land_external_content``).
 
         Args:
             db: Database session
@@ -1922,8 +1923,8 @@ class KnowledgeOrchestrator:
         document_id = document.id
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # Refresh the provider-owned source metadata; never touch the user's
-        # own document name or folder.
+        # Refresh the provider-owned source metadata; the folder stays the
+        # user's own. A synchronized copy's name follows its source.
         existing_external = document.external_source_config
         incoming_external = dict(content.metadata or {})
         existing_sync = existing_external.get("sync")
@@ -1956,6 +1957,10 @@ class KnowledgeOrchestrator:
         }
         sync_config = merged_external.get("sync")
         if isinstance(sync_config, dict) and sync_config.get("enabled"):
+            update_fields[KnowledgeDocument.name] = content.name[:255]
+        elif document.external_provider == "dingtalk" and content.name.strip():
+            # A DingTalk copy follows its source title on every landed body;
+            # a blank source title never replaces the current name.
             update_fields[KnowledgeDocument.name] = content.name[:255]
 
         updated = (
