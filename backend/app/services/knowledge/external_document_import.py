@@ -862,7 +862,9 @@ def _mark_external_source_unavailable(
 
     The placeholder is kept for an explicit retry. The source is only marked
     when this attempt's failure actually landed; a stale generation must not
-    overwrite the outcome of a newer attempt.
+    overwrite the outcome of a newer attempt. The provider's own message
+    (with its logId) is what the user sees, per DingTalk's troubleshooting
+    guidance.
     """
     mark_document_index_failed(
         db=db,
@@ -917,17 +919,23 @@ def _external_source_unavailable_message(
     provider_id: str,
     exc: ExternalSourceUnavailableError,
 ) -> str:
-    """Keep Wiki sync copy provider-specific without changing other providers."""
+    """Prefer the provider's own message; fall back per provider."""
     if provider_id == "wiki":
         if exc.error_code == "external_source_missing":
             return _external_fetch_error_message(
                 exc,
                 fallback="外部源文档不存在",
             )
-        return "外部源当前无法访问，请恢复访问后重试导入"
-    return (
-        "The external source is no longer accessible. Restore access "
-        "and retry the import."
+        return _external_fetch_error_message(
+            exc,
+            fallback="外部源当前无法访问，请恢复访问后重试导入",
+        )
+    return _external_fetch_error_message(
+        exc,
+        fallback=(
+            "The external source is no longer accessible. Restore access "
+            "and retry the import."
+        ),
     )
 
 
