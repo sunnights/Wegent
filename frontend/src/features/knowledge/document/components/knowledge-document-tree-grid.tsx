@@ -51,6 +51,7 @@ import {
   getExternalSourceInfo,
   isDocumentIndexInFlight,
   isDingtalkCopyDocument,
+  isExternalSourceUnavailable,
   isSyncedWikiDocument,
 } from '../utils/documentUtils'
 import type { SortField, SortOrder } from './FolderTree'
@@ -390,6 +391,16 @@ export function KnowledgeDocumentTreeGrid({
             const wikiSourceMissing =
               isSyncedWikiDocument(document) &&
               externalSource?.sync?.last_error_code === 'external_source_missing'
+            const externalSourceUnavailable = isExternalSourceUnavailable(document)
+            const externalSourceFailed = externalSource?.status === 'sync_error'
+            const externalSourceBadgeLabel = externalSourceFailed
+              ? t('document.document.sourceSyncFailed')
+              : t('document.document.sourceInaccessible')
+            const externalSourceBadgeHint =
+              externalSource?.last_error ||
+              (externalSourceFailed
+                ? t('document.document.sourceSyncFailedHint')
+                : t('document.document.sourceInaccessibleHint'))
             return (
               <div
                 className="flex items-center gap-2 overflow-hidden min-w-0"
@@ -427,6 +438,25 @@ export function KnowledgeDocumentTreeGrid({
                       </TooltipTrigger>
                       <TooltipContent side="top" className="max-w-xs">
                         <p className="text-xs">{t('document.document.wikiSourceMissingHint')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                {!wikiSourceMissing && externalSourceUnavailable && (
+                  <TooltipProvider>
+                    <Tooltip delayDuration={200}>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="default"
+                          size="sm"
+                          className="flex-shrink-0 cursor-help whitespace-nowrap bg-red-500/10 text-red-600 border-red-500/20"
+                          data-testid={`external-source-inaccessible-${document.id}`}
+                        >
+                          {externalSourceBadgeLabel}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-xs">
+                        <p className="text-xs">{externalSourceBadgeHint}</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
