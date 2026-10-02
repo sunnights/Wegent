@@ -31,6 +31,7 @@ Before changing a Wework flow, identify the affected product area and trace its 
 - Preserve platform text-navigation semantics in the ProseMirror chat composer. Register only composer-specific key bindings instead of the document-level `baseKeymap`, and scope mention caret workarounds to unmodified arrow keys.
 - Focus popup composers through their exact editor target; a mixed `querySelector` returns the first matching element in DOM order, not the first selector in the list. In WKWebView, keep a completely empty contenteditable position native instead of replacing it with a decoration widget so programmatic focus can start the platform text input session.
 - Keep model selector controls mounted while refreshing an already-loaded model catalog. Reserve loading placeholders for the initial catalog load so background refreshes do not create blank composer actions.
+- In project-board hover conversations, handle self-contained actions such as sending, retrying, answering runtime input, and loading or reverting diffs inside the popup. Actions that require workbench UI, including opening files, skills, reviews, plans, or switching the retry model, must navigate to the bound Runtime task. Never render an enabled conversation action without a real handler.
 
 ## i18n
 
@@ -107,10 +108,11 @@ pnpm --filter wework ai:verify stop --session <session-path>
 - Execute the complete QA test plan in the isolated Electron session, including the primary path, relevant boundary and error cases, and recovery. Document the environment, cases run, actual results, and evidence in the change handoff or pull request.
 - Use `capture` after the final assertion when a visual verification artifact is required. It renders the current WebView without macOS screen-recording permission.
 - Use `request-close` to exercise the native main-window close request and its close-to-tray preference or confirmation flow.
-- Use `close-to-tray` only for window-lifecycle verification. It destroys the controlled renderer while leaving the isolated Electron process running so native reopen behavior can be tested.
+- Use `close-to-tray` only for window-lifecycle verification. It hides the controlled window while preserving its renderer and the isolated Electron process so native reopen behavior can be tested.
 - On failure, inspect `app.log`, `executor.log`, and Electron host logs under `test-results/ai-verify/`; do not silently downgrade to mocked verification.
 
 ## Local runtime boundaries
 
 - Keep the local runtime and desktop UI isolated from a developer's normal Codex home. Do not copy or log credentials.
 - Local coding tasks and desktop workbench behavior must remain functional when the cloud connection is unavailable; do not hide primary-path state or synchronization bugs behind fallback behavior.
+- Keep project-space conversation semantics identical for cloud and local projects. Each top-level activity comment owns one independent executor session; replies inside that activity thread continue the owning session; a new top-level comment starts a new session. Cloud and local implementations may differ in storage and dispatch, but must not differ in these user-visible session boundaries.

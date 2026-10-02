@@ -5,11 +5,10 @@
 """Schemas for shared cloud projects and local execution bindings."""
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import (
     BaseModel,
-    BeforeValidator,
     ConfigDict,
     Field,
     field_validator,
@@ -20,10 +19,20 @@ from app.core.provider_credentials import mask_provider_config
 from app.schemas.base_role import BaseRole
 from app.schemas.issue_workflow import ProjectWorkflowDefinition
 from app.schemas.tagging import MAX_TAGS_PER_ITEM, normalize_tags
+from app.schemas.types import SnowflakeId
+from app.schemas.workspace import (
+    ExecutionEnvironmentConfig,
+    ExecutionEnvironmentDefinition,
+    WorkspaceNavigationContextResponse,
+)
 
-SnowflakeId = Annotated[str, BeforeValidator(str)]
 TaskProvider = Literal["local", "github", "gitlab", "dingtalk_aitable"]
 ProjectVisibility = Literal["private", "public"]
+PublicAccessRole = Literal["Developer", "Viewer"]
+
+
+class PublicAccessGrant(BaseModel):
+    role: PublicAccessRole = "Viewer"
 
 
 def _normalize_repository(task_provider: str, repository: str) -> str:
@@ -73,6 +82,7 @@ def normalize_provider_config(
 
 
 class CloudProjectCreate(BaseModel):
+    workspace_id: SnowflakeId | None = None
     project_key: str | None = Field(
         default=None, min_length=2, max_length=16, pattern=r"^[A-Za-z0-9]+$"
     )
@@ -81,6 +91,8 @@ class CloudProjectCreate(BaseModel):
     task_provider: TaskProvider = "local"
     provider_config: dict[str, object] = Field(default_factory=dict)
     visibility: ProjectVisibility = "private"
+    public_access: PublicAccessGrant | None = None
+    default_issue_security: Literal["open", "related"] = "open"
 
     @field_validator("project_key")
     @classmethod
@@ -92,6 +104,15 @@ class CloudProjectCreate(BaseModel):
         self.provider_config = normalize_provider_config(
             self.task_provider, self.provider_config
         )
+        if self.visibility == "private" and self.public_access is not None:
+            raise ValueError("Private projects cannot grant public access")
+        if self.visibility == "public" and self.public_access is None:
+            self.public_access = PublicAccessGrant()
+        if (
+            self.task_provider == "dingtalk_aitable"
+            and self.default_issue_security != "open"
+        ):
+            raise ValueError("DingTalk table records use DingTalk permissions")
         return self
 
 
@@ -187,11 +208,14 @@ class CloudProjectUpdate(BaseModel):
     tags: list[str] | None = Field(default=None, max_length=MAX_TAGS_PER_ITEM)
     provider_config: dict[str, object] | None = None
     visibility: ProjectVisibility | None = None
+    public_access: PublicAccessGrant | None = None
+    default_issue_security: Literal["open", "related"] | None = None
     card_display: CloudProjectCardDisplay | None = None
     board_config: CloudProjectBoardConfig | None = None
     ai_automation: CloudProjectAiAutomation | None = None
     pull_request_automation: CloudProjectPullRequestAutomation | None = None
     workflow_definition: ProjectWorkflowDefinition | None = None
+    execution_environment: ExecutionEnvironmentDefinition | None = None
     version: int = Field(ge=1)
 
     @field_validator("tags", mode="before")
@@ -201,6 +225,8 @@ class CloudProjectUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_provider(self) -> "CloudProjectUpdate":
+        if self.visibility == "private" and self.public_access is not None:
+            raise ValueError("Private projects cannot grant public access")
         if self.provider_config is not None:
             # The provider kind is immutable. The service validates this config
             # against the project's current provider before persisting it.
@@ -218,6 +244,8 @@ class CloudProjectResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: SnowflakeId
+    workspace_id: SnowflakeId | None = None
+    workspace_context: WorkspaceNavigationContextResponse | None = None
     public_id: str
     project_key: str
     name: str
@@ -244,11 +272,16 @@ class CloudProjectResponse(BaseModel):
         default_factory=ProjectWorkflowDefinition
     )
     workflow_automation_id: str | None = None
+    execution_environment: ExecutionEnvironmentConfig = Field(
+        default_factory=ExecutionEnvironmentConfig
+    )
     visibility: ProjectVisibility = "private"
+    public_access: PublicAccessGrant | None = None
+    default_issue_security: Literal["open", "related"] = "open"
     created_by_user_id: int
     current_user_id: int = 0
     current_user_name: str = ""
-    access_role: BaseRole = BaseRole.RestrictedAnalyst
+    access_role: BaseRole = BaseRole.Viewer
     status: str
     tags: list[str] = []
     version: int
@@ -275,8 +308,11 @@ class CloudProjectResponse(BaseModel):
                 "pull_request_automation": metadata.get("pull_request_automation", {}),
                 "workflow_definition": metadata.get("workflow_definition", {}),
                 "workflow_automation_id": metadata.get("workflow_automation_id"),
-                "visibility": (
-                    "public" if metadata.get("visibility") == "public" else "private"
+                "execution_environment": metadata.get("execution_environment", {}),
+                "visibility": value.get("visibility", "private"),
+                "public_access": value.get("public_access"),
+                "default_issue_security": metadata.get(
+                    "default_issue_security", "open"
                 ),
                 "tags": normalize_tags(metadata.get("tags")),
             }
@@ -295,8 +331,8 @@ class CloudProjectMemberCreate(BaseModel):
     @field_validator("role")
     @classmethod
     def reject_owner(cls, value: BaseRole) -> BaseRole:
-        if value == BaseRole.Owner:
-            raise ValueError("Owner cannot be assigned")
+        if value not in {BaseRole.Maintainer, BaseRole.Developer, BaseRole.Viewer}:
+            raise ValueError("Only project member roles may be assigned")
         return value
 
 
@@ -307,8 +343,12 @@ class CloudProjectMemberUpdate(BaseModel):
     @field_validator("role")
     @classmethod
     def reject_owner(cls, value: BaseRole | None) -> BaseRole | None:
-        if value == BaseRole.Owner:
-            raise ValueError("Owner cannot be assigned")
+        if value is not None and value not in {
+            BaseRole.Maintainer,
+            BaseRole.Developer,
+            BaseRole.Viewer,
+        }:
+            raise ValueError("Only project member roles may be assigned")
         return value
 
     @model_validator(mode="after")
@@ -325,3 +365,22 @@ class CloudProjectMemberResponse(BaseModel):
     email: str | None
     role: BaseRole
     capability_description: str = ""
+
+
+class CollaborationMessageImportTarget(BaseModel):
+    kind: Literal["new_issue", "existing_issue"]
+    issue_id: str | None = Field(default=None, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "CollaborationMessageImportTarget":
+        if self.kind == "existing_issue" and not self.issue_id:
+            raise ValueError("issue_id is required for an existing Issue")
+        return self
+
+
+class CollaborationMessageImportCreate(BaseModel):
+    source_task_id: int = Field(ge=1)
+    subtask_ids: list[int] | None = None
+    target: CollaborationMessageImportTarget
+    note: str | None = Field(default=None, max_length=1_000)

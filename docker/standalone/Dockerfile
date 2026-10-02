@@ -14,6 +14,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches ./patches
 COPY packages/chat-core/package.json ./packages/chat-core/package.json
+COPY packages/collaboration/package.json ./packages/collaboration/package.json
 COPY frontend/package.json ./frontend/package.json
 COPY frontend/scripts ./frontend/scripts
 
@@ -48,7 +49,7 @@ ENV HUSKY=0
 WORKDIR /app/frontend
 RUN corepack enable \
     && corepack prepare pnpm@11.7.0 --activate \
-    && pnpm run build
+    && pnpm --config.verify-deps-before-run=false run build
 
 # ========== Stage 2: Build Wework ==========
 FROM node:22-slim AS wework-builder
@@ -62,6 +63,7 @@ RUN apt-get update \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches ./patches
 COPY packages/chat-core/package.json ./packages/chat-core/package.json
+COPY packages/collaboration/package.json ./packages/collaboration/package.json
 COPY wework/package.json ./wework/package.json
 
 ENV HUSKY=0
@@ -82,7 +84,7 @@ ENV HUSKY=0
 WORKDIR /app/wework
 RUN corepack enable \
     && corepack prepare pnpm@11.7.0 --activate \
-    && pnpm run build
+    && pnpm --config.verify-deps-before-run=false run build
 
 # ========== Stage 3: Build Python Base with Tools ==========
 FROM ghcr.io/wecode-ai/wegent-base-python3.12:latest AS python-base
@@ -108,7 +110,9 @@ RUN dnf install -y \
     procps-ng iproute lsof less tree unzip ripgrep \
     # Redis server for standalone mode (embedded)
     redis \
-    && npm install -g @anthropic-ai/claude-code@2.1.247 @openai/codex@0.142.5 \
+    # MySQL server for standalone mode (embedded)
+    mysql-server \
+    && npm install -g @anthropic-ai/claude-code@2.1.277 @openai/codex@0.142.5 \
     && dnf clean all \
     && rm -rf /var/cache/dnf/*
 
@@ -152,8 +156,13 @@ ENV PATH=/root/.cargo/bin:${PATH}
 
 COPY executor/Cargo.toml executor/Cargo.lock /app/executor/
 COPY executor/src /app/executor/src
+COPY sdk/plugin-auth /app/sdk/plugin-auth
+COPY sdk/plugin-creator /app/sdk/plugin-creator
 COPY shared/assets /app/shared/assets
 RUN cd /app/executor && APP_VERSION="${APP_VERSION}" cargo build --release --locked
+
+COPY backend-rs /app/backend-rs
+RUN cd /app/backend-rs && cargo build --release --locked --bin wegent-backend-rs
 
 # ========== Stage 5: Runtime ==========
 FROM python-base AS runtime
@@ -168,6 +177,8 @@ COPY shared /app/shared
 COPY chat_shell /app/chat_shell
 COPY knowledge_engine /app/knowledge_engine
 COPY --from=executor-builder /app/executor/target/release/wegent-executor /app/wegent-executor
+COPY --from=executor-builder /app/backend-rs/target/release/wegent-backend-rs /app/wegent-backend-rs
+COPY --from=executor-builder /app/backend-rs/config /app/backend-rs/config
 
 # Install shared module first
 RUN uv pip install --system --no-cache /app/shared
@@ -186,6 +197,7 @@ RUN uv pip install --system --no-cache --no-deps openai-codex==0.1.0b3
 # - wegent-chat-shell = { path = "../chat_shell" } -> /app/chat_shell
 # - wegent-knowledge-engine = { path = "../knowledge_engine" } -> /app/knowledge_engine
 COPY backend/pyproject.toml /app/backend/pyproject.toml
+COPY backend/.env.example /app/backend/.env.example
 RUN cd /app/backend && uv pip install --system --no-cache -r pyproject.toml
 
 # Copy backend application code
@@ -215,8 +227,11 @@ RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 ENV STANDALONE_MODE=true
 ENV STANDALONE_EXECUTOR_DEVICE_ID=standalone-admin-device
 ENV ENVIRONMENT=development
-# Note: SQLite absolute path requires 4 slashes: sqlite:////path/to/db
-ENV DATABASE_URL=sqlite:////app/data/wegent.db
+ENV DATABASE_URL=mysql+pymysql://root@127.0.0.1:3306/task_manager
+ENV DB_AUTO_MIGRATE=false
+ENV INIT_DATA_ENABLED=true
+ENV INIT_DATA_DIR=/app/init_data
+ENV BUILTIN_PLUGINS_DIR=/app/init_data/plugins
 ENV CHAT_SHELL_MODE=package
 ENV CODEX_HOME=/app/data/codex
 ENV PYTHONPATH=/app:/app/backend:/app/chat_shell
@@ -226,6 +241,16 @@ ENV WEGENT_EXECUTOR_VERSION=${APP_VERSION}
 # Redis configuration (embedded in standalone mode)
 ENV REDIS_URL=redis://localhost:6379/0
 ENV REDIS_DATA_DIR=/app/data/redis
+
+# MySQL configuration (embedded in standalone mode)
+ENV MYSQL_PORT=3306
+ENV MYSQL_DATA_DIR=/app/data/mysql
+
+# Hybrid Backend configuration
+ENV WEGENT_RS_ROUTES_FILE=/app/backend-rs/config/routes.toml
+ENV WEGENT_BACKEND_RS_ENV_FILE=/app/backend/.env.example
+ENV WEGENT_PYTHON_UPSTREAM_PORT=8004
+ENV LOG_DIR=/app/data/logs/backend
 
 # Server configuration
 ENV BACKEND_PORT=8000

@@ -1,6 +1,7 @@
 import path from 'path'
 import fs from 'fs'
-import { createLogger, defineConfig } from 'vite'
+import { pathToFileURL } from 'node:url'
+import { createLogger, defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileViewerRenderers } from '@file-viewer/vite-plugin'
 import { configDefaults } from 'vitest/config'
@@ -28,9 +29,29 @@ const packageJson = JSON.parse(
   version?: string
 }
 const internalExtensionsDir = path.resolve(__dirname, './wecode/extensions')
-const extensionsDir = fs.existsSync(path.join(internalExtensionsDir, 'apps.tsx'))
+const extensionsDir = fs.existsSync(internalExtensionsDir)
   ? internalExtensionsDir
   : path.resolve(__dirname, './src/extensions')
+const internalVitePluginsPath = path.resolve(__dirname, './wecode/vitePlugins.mjs')
+const internalVitePluginsUrl = fs.existsSync(internalVitePluginsPath)
+  ? pathToFileURL(internalVitePluginsPath)
+  : null
+if (internalVitePluginsUrl) {
+  internalVitePluginsUrl.searchParams.set(
+    'version',
+    String(fs.statSync(internalVitePluginsPath).mtimeMs)
+  )
+}
+const internalViteModule = internalVitePluginsUrl
+  ? ((await import(internalVitePluginsUrl.href)) as {
+      createWecodeVitePlugins: () => Promise<Plugin[]>
+      createWecodeViteEntries?: () => Record<string, string>
+    })
+  : null
+const internalVitePlugins = internalViteModule
+  ? await internalViteModule.createWecodeVitePlugins()
+  : []
+const internalViteEntries = internalViteModule?.createWecodeViteEntries?.() ?? {}
 const logger = createLogger()
 const defaultWarn = logger.warn.bind(logger)
 const browserExternalPackages = ['/avsc/', '/ag-psd/', '/jszip/', '/@ljheee/xmind-parser/']
@@ -84,6 +105,7 @@ export default defineConfig({
   customLogger: logger,
   plugins: [
     react(),
+    ...internalVitePlugins,
     preserveDshUiEntryExports(),
     fileViewerRenderers({
       preset: 'auto',
@@ -124,6 +146,10 @@ export default defineConfig({
         'wework-ui-core-apps': path.resolve(__dirname, 'dsh/ui-core-apps/src/app-surface.tsx'),
         'wework-ui-home-developer': path.resolve(__dirname, 'dsh/ui-home-developer/src/home.tsx'),
         'wework-ui-home-focus': path.resolve(__dirname, 'dsh/ui-home-focus/src/home.tsx'),
+        'wework-ui-conversation-export': path.resolve(
+          __dirname,
+          'dsh/conversation-export/src/dialog.tsx'
+        ),
         'wework-ui-git-board-card-status': path.resolve(
           __dirname,
           'dsh/ui-git/src/board-card-status.tsx'
@@ -146,6 +172,11 @@ export default defineConfig({
           __dirname,
           'dsh/ui-git/src/workspace-menu-section.tsx'
         ),
+        'wework-ui-outputs-conversation-summary': path.resolve(
+          __dirname,
+          'dsh/ui-outputs/src/conversation-summary.tsx'
+        ),
+        ...internalViteEntries,
         'wework-ui-plugin-center-catalog': path.resolve(
           __dirname,
           'dsh/ui-plugin-center/src/catalog-route.tsx'
@@ -205,7 +236,7 @@ export default defineConfig({
     globals: true,
     server: {
       deps: {
-        inline: [/@file-viewer/, /@panzoom/],
+        inline: [/@file-viewer/, /@panzoom/, /mermaid/],
       },
     },
     // Keep local and pre-push runs below the resource-contention point where
@@ -215,6 +246,7 @@ export default defineConfig({
       ...configDefaults.exclude,
       'dsh/**/*.test.mjs',
       'e2e/**',
+      'electron/**',
       'scripts/electron-e2e-launch-arguments.test.mjs',
       'scripts/harness-runtime-metadata.test.mjs',
       'test-results/**',

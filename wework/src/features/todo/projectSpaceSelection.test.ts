@@ -1,7 +1,9 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { CloudProject } from '@/api/deliveries'
 import {
+  canEditProjectSpaceIssue,
   findProjectSpaceContextForTask,
+  findProjectSpaceContextSourceForTask,
   loadProjectSpaceOptions,
   projectSpaceRef,
   runtimeCloudProjectId,
@@ -28,6 +30,27 @@ function project(id: string, name: string, projectStore: 'local' | 'backend'): C
 }
 
 describe('projectSpaceSelection', () => {
+  test('fails closed for cloud Issues and trusts only the explicit local marker', () => {
+    expect(
+      canEditProjectSpaceIssue({
+        project_store: 'backend',
+        can_edit: undefined,
+      })
+    ).toBe(false)
+    expect(
+      canEditProjectSpaceIssue({
+        project_store: 'backend',
+        can_edit: true,
+      })
+    ).toBe(true)
+    expect(
+      canEditProjectSpaceIssue({
+        project_store: 'local',
+        can_edit: undefined,
+      })
+    ).toBe(true)
+  })
+
   test('lists local and cloud project spaces without querying per-project bindings', async () => {
     const defaultProject = {
       ...project('default-work-items', 'My Tasks', 'local'),
@@ -122,6 +145,31 @@ describe('projectSpaceSelection', () => {
     ).resolves.toEqual(cloudContext)
     expect(localApi.findCloudContextForTask).toHaveBeenCalledOnce()
     expect(cloudApi.findCloudContextForTask).toHaveBeenCalledOnce()
+  })
+
+  test('returns the API that owns the selected task context', async () => {
+    const context = {
+      id: 'context-1',
+      device_id: 'device-1',
+      task_id: 'task-1',
+      cloud_project_id: 'space-cloud',
+      loop_item_id: 'todo-cloud',
+      project: project('space-cloud', 'Cloud board', 'backend'),
+      loop_item: null,
+    }
+    const localApi = {
+      findCloudContextForTask: vi.fn().mockRejectedValue(new Error('Not found')),
+    } as unknown as ProjectSpaceApi
+    const cloudApi = {
+      findCloudContextForTask: vi.fn().mockResolvedValue(context),
+    } as unknown as ProjectSpaceApi
+
+    await expect(
+      findProjectSpaceContextSourceForTask([localApi, cloudApi], {
+        deviceId: 'device-1',
+        taskId: 'task-1',
+      })
+    ).resolves.toEqual({ api: cloudApi, context })
   })
 
   test('does not let an unavailable store block a resolved task context', async () => {

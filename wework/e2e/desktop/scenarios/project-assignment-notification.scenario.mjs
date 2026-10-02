@@ -1,28 +1,47 @@
 import assert from 'node:assert/strict'
-import { createSingleRootLocalProject, selectE2EModel } from '../modules/shared.mjs'
-import { waitForSnapshot } from '../modules/conversation-layout.mjs'
+
+import { ensureExperimentalFeaturesEnabled } from '../modules/preferences-automation-flows.mjs'
 import {
   assistantMessage,
+  codexRequestKind,
   createSse,
   mcpToolRequestEvents,
   namespacedFunctionCall,
+  readRequestBody,
   requestContainsToolOutput,
   responseCompleted,
   responseCreated,
   selectMcpTool,
 } from '../modules/response-protocol.mjs'
+import { REMOTE_DOCKER_DEVICE_ID, selectE2EModel } from '../modules/shared.mjs'
+import {
+  initializeFirstProjectExecutionEnvironment,
+  selectCollaborationDomain,
+} from '../modules/workspace-flows.mjs'
 
-const PROJECT_NAME = '任务分配通知验收'
-const ASSIGNER_NAME = 'desktop-e2e-assigner'
-const ASSIGNER_PASSWORD = 'desktop-e2e-assigner-password'
-const ASSIGNED_TASK_TITLE = '准备项目周报'
-const SELF_ASSIGNED_TASK_TITLE = '负责人自分配任务'
-const NOTIFICATION_PROMPT = '给我发个通知，说你好'
-const NOTIFICATION_COMPLETION = 'WEWORK_GENERAL_NOTIFICATION_SENT'
-const NOTIFICATION_CALL_ID = 'send-general-notification'
-const NOTIFICATION_SEARCH_ID = 'search-general-notification'
-const CLICK_PROMPT = '给我发个你好的通知，然后点击打开看板页面'
-const CLICK_COMPLETION = 'WEWORK_CLICK_NOTIFICATION_SENT'
+const CONTENT = '[data-workspace-tab-content][aria-hidden="false"]'
+const MODEL = 'desktop-e2e-cloud-responses'
+const MODEL_LABEL = 'gpt-6-astra'
+const WORKSPACE = `直接分人空间-${process.pid}`
+const PROJECT = `直接分人项目-${process.pid}`
+const ISSUE = `人工验收项目周报-${process.pid}`
+const MARKER = `DIRECT_HUMAN_DISPATCH_${process.pid}`
+const COMPLETION = `${MARKER}_DELIVERED`
+const CALLS = {
+  createSearch: `${MARKER}-create-search`,
+  create: `${MARKER}-create`,
+  finalizeSearch: `${MARKER}-finalize-search`,
+  finalize: `${MARKER}-finalize`,
+}
+
+function scoped(selector) {
+  return `${CONTENT} ${selector}`
+}
+
+function writeEvents(response, responseId, events) {
+  response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+  response.end(createSse([responseCreated(responseId), ...events, responseCompleted(responseId)]))
+}
 
 async function requestJson(baseUrl, token, pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
@@ -43,411 +62,389 @@ async function requestJson(baseUrl, token, pathname, options = {}) {
   return body
 }
 
-async function systemNotifications(control) {
-  return JSON.parse(await control.command('getSystemNotifications', 'body'))
+function directMcpToolName(body, suffix) {
+  return (body.tools ?? [])
+    .map(tool => tool.name ?? tool.function?.name)
+    .find(name => name?.endsWith(`__${suffix}`))
 }
 
-async function waitForNotification(control, predicate, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  let notifications = []
-  while (Date.now() < deadline) {
-    notifications = await systemNotifications(control)
-    if (notifications.some(predicate)) return notifications
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+function findToolOutput(value, callId) {
+  if (Array.isArray(value)) {
+    for (const candidate of value) {
+      const output = findToolOutput(candidate, callId)
+      if (output !== undefined) return output
+    }
+    return undefined
   }
-  assert.fail(`Expected system notification was not received: ${JSON.stringify(notifications)}`)
-}
-
-async function assertNoNotification(control, message, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const notifications = await systemNotifications(control)
-    assert.equal(notifications.length, 0, message)
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  if (!value || typeof value !== 'object') return undefined
+  if (
+    ['function_call_output', 'custom_tool_call_output'].includes(value.type) &&
+    value.call_id === callId
+  ) {
+    return value.output
   }
+  for (const candidate of Object.values(value)) {
+    const output = findToolOutput(candidate, callId)
+    if (output !== undefined) return output
+  }
+  return undefined
 }
 
-export function createDesktopScenario({ uiTimeoutMs, captureScreenshot, workspacePath }) {
+function findDeliveryDraft(value) {
+  if (typeof value === 'string') {
+    try {
+      return findDeliveryDraft(JSON.parse(value))
+    } catch {
+      return null
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const candidate of value) {
+      const delivery = findDeliveryDraft(candidate)
+      if (delivery) return delivery
+    }
+    return null
+  }
+  if (!value || typeof value !== 'object') return null
+  if (value.id && value.status === 'draft') return value
+  for (const candidate of Object.values(value)) {
+    const delivery = findDeliveryDraft(candidate)
+    if (delivery) return delivery
+  }
+  return null
+}
+
+async function waitForValue(load, predicate, message, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let latest = null
+  while (Date.now() < deadline) {
+    latest = await load()
+    const result = predicate(latest)
+    if (result) return result === true ? latest : result
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  assert.fail(`${message}: ${JSON.stringify(latest)}`)
+}
+
+async function createWorkspaceAndProject(control, request, uiTimeoutMs) {
+  await control.command('click', scoped('[data-testid="collaboration-workspace-create"]'))
+  await control.command('fill', scoped('[data-testid="collaboration-workspace-name-input"]'), {
+    value: WORKSPACE,
+  })
+  await control.command(
+    'clickWhenEnabled',
+    scoped('[data-testid="collaboration-workspace-create-confirm"]'),
+    { timeoutMs: uiTimeoutMs }
+  )
+  const workspace = await waitForValue(
+    async () => (await request('/api/v1/workspaces')).items,
+    items => items.find(item => item.name === WORKSPACE),
+    '端上创建 Workspace 未持久化',
+    uiTimeoutMs
+  )
+
+  await control.command('click', scoped('[data-testid="collaboration-workspace-project-create"]'))
+  await control.command('click', '[data-testid="collaboration-workspace-project-create-blank"]')
+  await control.command('fill', scoped('[data-testid="collaboration-project-name-input"]'), {
+    value: PROJECT,
+  })
+  await control.command('click', scoped('[data-testid="collaboration-project-create-advanced"]'))
+  await control.command('click', scoped('[data-testid="cloud-project-task-provider-local"]'))
+  await control.command(
+    'clickWhenEnabled',
+    scoped('[data-testid="collaboration-project-create-confirm"]'),
+    { timeoutMs: uiTimeoutMs }
+  )
+  const project = await waitForValue(
+    async () => (await request(`/api/v1/workspaces/${workspace.id}/projects`)).items,
+    items => items.find(item => item.name === PROJECT),
+    '端上创建 Project 未持久化',
+    uiTimeoutMs
+  )
+  assert.equal(project.task_provider, 'local')
+  return project
+}
+
+async function createIssue(control, projectId, request, owner, uiTimeoutMs) {
+  await control.command('waitFor', scoped('[data-testid="collaboration-tab-board"]'), {
+    timeoutMs: uiTimeoutMs,
+  })
+  await control.command('click', scoped('[data-testid="collaboration-tab-board"]'))
+  await control.command('click', scoped('[data-testid="collaboration-issue-create"]'))
+  await control.command('fill', scoped('[data-testid="cloud-todo-title"]'), { value: ISSUE })
+  await control.command('fill', scoped('[data-testid="cloud-todo-detail-description"]'), {
+    value: `${MARKER}。通过个人 Runtime Task 整理项目周报并提交 Delivery。`,
+  })
+  await control.command('click', scoped('[data-testid="cloud-todo-create-assignee"]'))
+  await control.command(
+    'click',
+    `[data-testid="cloud-todo-create-assignee-option-user:${owner.id}"]`
+  )
+  await control.command('clickWhenEnabled', scoped('[data-testid="cloud-todo-create-confirm"]'), {
+    timeoutMs: uiTimeoutMs,
+  })
+  return waitForValue(
+    async () => (await request(`/api/v1/cloud-projects/${projectId}/loop-items`)).items,
+    items => items.find(item => item.title === ISSUE),
+    '端上创建 Issue 未持久化',
+    uiTimeoutMs
+  )
+}
+
+export function createDesktopScenario({
+  captureScreenshot,
+  modelResponseTimeoutMs,
+  uiTimeoutMs,
+  workbenchReadyTimeoutMs,
+}) {
   let backendUrl = ''
+  let cloudEnvironment = null
   let ownerToken = ''
   let owner = null
-  let assigner = null
-  let assignerToken = ''
   let project = null
-  let assignedTask = null
-  let selfAssignedTask = null
+  let issue = null
+  let notification = null
+  let delivery = null
   let modelRequestCount = 0
-  let clickRequested = false
-  const modelRequests = []
+  let runtimeTaskId = ''
 
   const ownerRequest = (pathname, options) => requestJson(backendUrl, ownerToken, pathname, options)
-  const assignerRequest = (pathname, options) =>
-    requestJson(backendUrl, assignerToken, pathname, options)
 
   return {
     requiresCloudEnvironment: true,
-
-    async handleHttp(request, response, url) {
-      if (request.method !== 'POST' || !['/responses', '/v1/responses'].includes(url.pathname))
-        return false
-      const chunks = []
-      for await (const chunk of request) chunks.push(chunk)
-      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-      modelRequests.push({
-        model: payload.model,
-        toolNames: (payload.tools ?? []).map(tool => tool.name ?? tool.type),
-        metadata: payload.metadata,
-      })
-      const responseId = `wework-notification-${++modelRequestCount}`
-      // Codex can send its first prewarm before tools or request metadata exist.
-      if (
-        JSON.stringify(payload).includes('"request_kind":"prewarm"') ||
-        (modelRequestCount === 1 && !payload.tools?.length)
-      ) {
-        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
-        response.end(createSse([responseCreated(responseId), responseCompleted(responseId)]))
-        return true
-      }
-      const withClick = clickRequested
-      assert.ok(JSON.stringify(payload).includes(withClick ? CLICK_PROMPT : NOTIFICATION_PROMPT))
-      const callId = withClick ? 'send-click-notification' : NOTIFICATION_CALL_ID
-      const searchId = withClick ? 'search-click-notification' : NOTIFICATION_SEARCH_ID
-      const args = withClick
-        ? { title: '点击打开看板', body: '你好', url: 'wework://boards' }
-        : { title: 'Wework 通知', body: '你好' }
-      let events
-      if (requestContainsToolOutput(payload, callId)) {
-        const inbox = await ownerRequest('/api/v1/wework-notifications')
-        assert.ok(inbox.items.some(item => item.title === args.title && item.body === args.body))
-        events = [assistantMessage(withClick ? CLICK_COMPLETION : NOTIFICATION_COMPLETION)]
-      } else if (requestContainsToolOutput(payload, searchId)) {
-        const tool = selectMcpTool(payload, 'wework_space', 'send_notification', args)
-        events = namespacedFunctionCall(callId, tool.namespace, tool.name, tool.arguments)
-      } else {
-        const directToolName = (payload.tools ?? [])
-          .map(tool => tool.name ?? tool.function?.name)
-          .find(name => name?.endsWith('__send_notification'))
-        events = mcpToolRequestEvents(payload, {
-          toolName: 'send_notification',
-          argumentsValue: args,
-          directToolName,
-          searchCallId: searchId,
-          toolCallId: callId,
-        }).events
-      }
-      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
-      response.end(
-        createSse([responseCreated(responseId), ...events, responseCompleted(responseId)])
-      )
-      return true
-    },
 
     async prepareCloud(cloud) {
       backendUrl = cloud.backendUrl
       ownerToken = cloud.authToken
       owner = await ownerRequest('/api/users/me')
-      assigner = await ownerRequest('/api/admin/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          user_name: ASSIGNER_NAME,
-          password: ASSIGNER_PASSWORD,
-          role: 'user',
-          auth_source: 'password',
-        }),
-      })
-      const login = await requestJson(backendUrl, null, '/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({
-          user_name: ASSIGNER_NAME,
-          password: ASSIGNER_PASSWORD,
-        }),
-      })
-      assignerToken = login.access_token
-      project = await ownerRequest('/api/v1/cloud-projects', {
-        method: 'POST',
-        body: JSON.stringify({
-          projectKey: 'NOTIFY',
-          name: PROJECT_NAME,
-          description: 'Desktop E2E project assignment notification',
-          taskProvider: 'local',
-          providerConfig: {},
-          visibility: 'private',
-        }),
-      })
-      await ownerRequest(`/api/v1/cloud-projects/${project.id}/members`, {
-        method: 'POST',
-        body: JSON.stringify({
-          user_id: assigner.id,
-          role: 'Maintainer',
-          capability_description: 'Assign project tasks during desktop E2E',
-        }),
-      })
-      assignedTask = await assignerRequest(`/api/v1/cloud-projects/${project.id}/loop-items`, {
-        method: 'POST',
-        body: JSON.stringify({ title: ASSIGNED_TASK_TITLE }),
-      })
-      selfAssignedTask = await ownerRequest(`/api/v1/cloud-projects/${project.id}/loop-items`, {
-        method: 'POST',
-        body: JSON.stringify({ title: SELF_ASSIGNED_TASK_TITLE }),
-      })
+    },
+
+    setCloudEnvironment(environment) {
+      cloudEnvironment = environment
+    },
+
+    async handleHttp(requestMessage, response, url) {
+      if (
+        requestMessage.method !== 'POST' ||
+        !['/responses', '/v1/responses'].includes(url.pathname)
+      ) {
+        return false
+      }
+      const body = await readRequestBody(requestMessage)
+      const serialized = JSON.stringify(body)
+      const responseId = `direct-human-${++modelRequestCount}`
+      const kind = codexRequestKind(body)
+      if (kind === 'prewarm' || kind === 'compaction') {
+        writeEvents(response, responseId, [assistantMessage('Ready')])
+        return true
+      }
+      if (!serialized.includes(MARKER)) {
+        writeEvents(response, responseId, [])
+        return true
+      }
+
+      let events
+      if (requestContainsToolOutput(body, CALLS.finalize)) {
+        delivery = await waitForValue(
+          () => ownerRequest(`/api/v1/loop-items/${issue.id}/deliveries`),
+          value => value.items?.find(item => item.status === 'delivered'),
+          '个人 Runtime Task 没有完成 Delivery finalize',
+          modelResponseTimeoutMs
+        )
+        events = [assistantMessage(COMPLETION)]
+      } else if (requestContainsToolOutput(body, CALLS.finalizeSearch)) {
+        const tool = selectMcpTool(body, 'wework_space', 'finalize_delivery', {
+          delivery_id: delivery.id,
+          fulfillments: [],
+        })
+        events = namespacedFunctionCall(CALLS.finalize, tool.namespace, tool.name, tool.arguments)
+      } else if (requestContainsToolOutput(body, CALLS.create)) {
+        delivery = findDeliveryDraft(findToolOutput(body.input ?? [], CALLS.create))
+        assert.ok(delivery, 'create_delivery 没有返回持久化的 Delivery 草稿')
+        events = mcpToolRequestEvents(body, {
+          toolName: 'finalize_delivery',
+          argumentsValue: {
+            delivery_id: delivery.id,
+            fulfillments: [],
+          },
+          directToolName: directMcpToolName(body, 'finalize_delivery'),
+          searchCallId: CALLS.finalizeSearch,
+          toolCallId: CALLS.finalize,
+        }).events
+      } else if (requestContainsToolOutput(body, CALLS.createSearch)) {
+        const tool = selectMcpTool(body, 'wework_space', 'create_delivery', {
+          markdown: `# ${ISSUE}\n\n${MARKER}：项目周报已经整理完成。`,
+        })
+        events = namespacedFunctionCall(CALLS.create, tool.namespace, tool.name, tool.arguments)
+      } else {
+        events = mcpToolRequestEvents(body, {
+          toolName: 'create_delivery',
+          argumentsValue: {
+            markdown: `# ${ISSUE}\n\n${MARKER}：项目周报已经整理完成。`,
+          },
+          directToolName: directMcpToolName(body, 'create_delivery'),
+          searchCallId: CALLS.createSearch,
+          toolCallId: CALLS.create,
+        }).events
+      }
+      writeEvents(response, responseId, events)
+      return true
     },
 
     async verify(control) {
-      assert.ok(owner?.id, 'Notification recipient fixture is missing')
-      assert.ok(assigner?.id, 'Notification assigner fixture is missing')
-      assert.ok(project?.id, 'Notification project fixture is missing')
-      assert.ok(assignedTask?.id, 'Assigned task fixture is missing')
-      assert.ok(selfAssignedTask?.id, 'Self-assigned task fixture is missing')
-
-      await control.command('waitFor', '[data-testid="workspace-tab-add"]', {
+      assert.ok(owner?.id, '当前登录用户 fixture 缺失')
+      await ensureExperimentalFeaturesEnabled(control)
+      await control.command('clearSystemNotifications', 'body')
+      await control.command('waitFor', '[data-testid="workspace-tab-select-fixed-board"]', {
+        timeoutMs: workbenchReadyTimeoutMs,
+      })
+      await control.command('click', '[data-testid="workspace-tab-select-fixed-board"]')
+      await control.command('waitFor', scoped('[data-testid="collaboration-platform-root"]'), {
         timeoutMs: uiTimeoutMs,
       })
-      await control.command('clearSystemNotifications', 'body')
+      await selectCollaborationDomain(control, CONTENT, 'cloud')
 
-      await createSingleRootLocalProject(control, workspacePath, 'general-notification')
-      await selectE2EModel(control)
-      const activeSurface = '[data-workspace-tab-content][aria-hidden="false"]'
-      const composer = `${activeSurface} [data-testid="chat-message-input"]`
+      project = await createWorkspaceAndProject(control, ownerRequest, uiTimeoutMs)
+      const remoteDevice = await cloudEnvironment.waitForDeviceType(
+        REMOTE_DOCKER_DEVICE_ID,
+        'remote'
+      )
+      assert.ok(remoteDevice?.id, 'The real remote Docker Executor device is unavailable')
+      await initializeFirstProjectExecutionEnvironment(
+        control,
+        CONTENT,
+        modelResponseTimeoutMs,
+        remoteDevice.id
+      )
+      issue = await createIssue(control, project.id, ownerRequest, owner, uiTimeoutMs)
+      assert.equal(String(issue.assignee_user_id), String(owner.id))
+      notification = await waitForValue(
+        () => ownerRequest('/api/v1/wework-notifications?category=collaboration'),
+        value =>
+          value.items?.find(
+            item =>
+              item.kind === 'issue_dispatch_assignment' &&
+              item.payload?.itemId === issue.id &&
+              item.payload?.action === 'create_personal_task'
+          ),
+        '直接分人通知没有写入 Wework 协作收件箱',
+        uiTimeoutMs
+      )
+      assert.equal(notification.payload.roundId, 'direct')
+      assert.equal(notification.payload.taskTitle, ISSUE)
+      assert.match(notification.payload.instructions, new RegExp(MARKER))
+      assert.match(notification.payload.dispatchId, /^direct-human:/)
+      assert.ok(notification.payload.assignmentId)
+      assert.ok(notification.payload.humanAssignmentId)
+      await captureScreenshot(control, 'assignment-01-direct-human-notification.png', CONTENT)
+
+      const beforeItems = await ownerRequest(`/api/v1/cloud-projects/${project.id}/loop-items`)
+      assert.deepEqual(
+        beforeItems.items.map(item => item.id),
+        [issue.id],
+        '直接分人错误创建了人工子 Issue'
+      )
+
+      await control.command('click', '[data-testid="wework-notifications-button"]')
+      await control.command('click', '[data-testid="wework-notifications-refresh"]')
+      await control.command('click', '[data-testid="wework-notifications-category-collaboration"]')
+      await control.command('waitFor', '[data-testid="issue-dispatch-notification-create-task"]', {
+        text: ISSUE,
+        timeoutMs: uiTimeoutMs,
+      })
+      await control.command('click', '[data-testid="issue-dispatch-notification-create-task"]')
+      await control.command('waitFor', scoped('[data-testid="ai-chat-modal"]'), {
+        timeoutMs: uiTimeoutMs,
+      })
+      const taskPanel = scoped('[data-testid="work-item-new-task-chat-panel"]')
+      const composer = `${taskPanel} [data-testid="chat-message-input"]`
       await control.command('waitFor', composer, { timeoutMs: uiTimeoutMs })
-      await control.command('fill', composer, { value: NOTIFICATION_PROMPT })
+      assert.match(await control.command('getValue', composer), new RegExp(MARKER))
+      await selectE2EModel(control, MODEL, MODEL_LABEL, taskPanel)
+      await captureScreenshot(control, 'assignment-02-personal-runtime-task.png', CONTENT)
       await control.command('press', composer, { key: 'Enter' })
-      await control.command('waitFor', `${activeSurface} [data-testid="message-assistant"]`, {
-        text: NOTIFICATION_COMPLETION,
-        timeoutMs: uiTimeoutMs,
-      })
-      const sentInbox = await ownerRequest('/api/v1/wework-notifications')
-      const general = sentInbox.items.find(
-        item => item.title === 'Wework 通知' && item.body === '你好'
-      )
-      assert.ok(general, 'Ordinary chat must invoke the real MCP tool and persist the notification')
-      assert.equal(general.url, null, 'General notifications must not invent a board target')
-      const otherInbox = await assignerRequest('/api/v1/wework-notifications')
-      assert.equal(
-        otherInbox.items.some(item => item.id === general.id),
-        false
-      )
-      await control.command('click', '[data-testid="wework-notifications-button"]')
-      await control.command('click', '[data-testid="wework-notifications-refresh"]')
-      await control.command('waitFor', `[data-testid="wework-notification-${general.id}"]`, {
-        text: '你好',
-        timeoutMs: uiTimeoutMs,
-      })
-      await control.command('click', `[data-testid="wework-notification-${general.id}"]`)
-      await waitForSnapshot(
-        control,
-        snapshot =>
-          snapshot.testIds.includes(`wework-notification-${general.id}`) &&
-          !snapshot.testIds.includes('wework-notifications-unread'),
-        'General notification did not stay visible with its saved read state',
-        uiTimeoutMs
-      )
-      const generalInbox = await ownerRequest('/api/v1/wework-notifications')
-      assert.ok(generalInbox.items.find(item => item.id === general.id)?.read_at)
-      await captureScreenshot(control, 'wework-general-notification.png')
-      await control.command('click', '[data-testid="wework-notifications-button"]')
-      clickRequested = true
-      await control.command('fill', composer, { value: CLICK_PROMPT })
-      await control.command('press', composer, { key: 'Enter' })
-      await control.command('waitFor', `${activeSurface} [data-testid="message-assistant"]`, {
-        text: CLICK_COMPLETION,
-        timeoutMs: uiTimeoutMs,
-      })
-      const clickInbox = await ownerRequest('/api/v1/wework-notifications')
-      const clickable = clickInbox.items.find(item => item.title === '点击打开看板')
-      assert.ok(clickable, 'The real MCP must persist the requested click target')
-      assert.equal(clickable.url, 'wework://boards')
-      // The conversation remains active until the user clicks the notification.
-      await control.command('waitFor', composer)
-      await control.command('click', '[data-testid="wework-notifications-button"]')
-      await control.command('click', '[data-testid="wework-notifications-refresh"]')
-      await control.command('waitFor', `[data-testid="wework-notification-${clickable.id}"]`)
-      await control.command('click', `[data-testid="wework-notification-${clickable.id}"]`)
-      await control.command('waitFor', `${activeSurface} [data-testid="cloud-todo-workspace"]`)
-      const afterClick = await ownerRequest('/api/v1/wework-notifications')
-      assert.ok(afterClick.items.find(item => item.id === clickable.id)?.read_at)
-      await captureScreenshot(control, 'wework-notification-board-home.png')
-      await control.command('clearSystemNotifications', 'body')
 
-      assignedTask = await assignerRequest(
-        `/api/v1/cloud-projects/${project.id}/loop-items/${assignedTask.id}/assign`,
+      const binding = await waitForValue(
+        () => ownerRequest(`/api/v1/loop-items/${issue.id}/tasks`),
+        values =>
+          values.find(
+            value => value.human_assignment_id === notification.payload.humanAssignmentId
+          ),
+        '通知创建的个人 Runtime Task 没有绑定回原 Issue',
+        modelResponseTimeoutMs
+      )
+      runtimeTaskId = binding.task_id
+      assert.equal(binding.assignment_id, notification.payload.assignmentId)
+      assert.equal(binding.task_title, ISSUE)
+      await control.command(
+        'waitFor',
+        scoped('[data-testid="ai-chat-modal"] [data-testid="message-assistant"]'),
         {
-          method: 'POST',
-          body: JSON.stringify({
-            version: assignedTask.version,
-            assignee_type: 'user',
-            assignee_id: String(owner.id),
-          }),
+          text: COMPLETION,
+          timeoutMs: modelResponseTimeoutMs,
         }
       )
-      const notifications = await waitForNotification(
-        control,
-        notification =>
-          notification.title === '你有一个新的看板任务' &&
-          notification.body.includes(ASSIGNER_NAME) &&
-          notification.body.includes(ASSIGNED_TASK_TITLE) &&
-          notification.body.includes(PROJECT_NAME),
-        uiTimeoutMs
-      )
-      console.log(
-        '[notification-e2e] notifications after assignment:',
-        JSON.stringify(notifications)
+      await waitForValue(
+        () => ownerRequest(`/api/v1/loop-items/${issue.id}`),
+        value => value.status === 'in_review',
+        '直接人工交付没有把原 Issue 更新为待确认',
+        modelResponseTimeoutMs
       )
       assert.equal(
-        notifications.filter(notification => notification.title === '你有一个新的看板任务').length,
+        delivery.source_task_snapshot.humanAssignmentId,
+        notification.payload.humanAssignmentId
+      )
+      assert.equal(delivery.source_task_snapshot.assignmentId, notification.payload.assignmentId)
+
+      const afterItems = await ownerRequest(`/api/v1/cloud-projects/${project.id}/loop-items`)
+      assert.deepEqual(
+        afterItems.items.map(item => item.id),
+        [issue.id],
+        '完成个人任务后错误创建了人工子 Issue'
+      )
+      const bindingsAfterDelivery = await ownerRequest(`/api/v1/loop-items/${issue.id}/tasks`)
+      assert.equal(
+        bindingsAfterDelivery.filter(
+          value => value.human_assignment_id === notification.payload.humanAssignmentId
+        ).length,
         1,
-        `One assignment produced duplicate notifications: ${JSON.stringify(notifications)}`
+        '同一人工 assignment 创建了重复 Task binding'
       )
+      await captureScreenshot(control, 'assignment-03-delivery-updated-origin-issue.png', CONTENT)
 
-      const inbox = await ownerRequest('/api/v1/wework-notifications')
-      const saved = inbox.items.find(item => item.payload.itemId === assignedTask.id)
-      assert.ok(saved, 'Assignment must persist in the Backend inbox')
-      assert.equal(
-        saved.url,
-        `wework://boards/${project.id}/issues/${encodeURIComponent(assignedTask.id)}`
-      )
-      assert.equal(saved.read_at, null)
-      await control.command('click', '[data-testid="wework-notifications-button"]')
-      await control.command('waitFor', `[data-testid="wework-notification-${saved.id}"]`, {
-        timeoutMs: uiTimeoutMs,
-      })
-      await control.command('click', `[data-testid="wework-notification-${saved.id}"]`)
-      await control.command(
-        'waitFor',
-        '[data-workspace-tab-content][aria-hidden="false"] [data-testid="cloud-todo-detail-title"]',
-        {
-          timeoutMs: uiTimeoutMs,
-        }
-      )
-      assert.equal(
-        await control.command(
-          'getValue',
-          '[data-workspace-tab-content][aria-hidden="false"] [data-testid="cloud-todo-detail-title"]'
-        ),
-        ASSIGNED_TASK_TITLE
-      )
-      const readInbox = await ownerRequest('/api/v1/wework-notifications')
-      assert.ok(
-        readInbox.items.find(item => item.id === saved.id)?.read_at,
-        'Opening a notification must persist its read state'
-      )
-      const forbiddenRead = await fetch(
-        `${backendUrl}/api/v1/wework-notifications/${saved.id}/read`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${assignerToken}` },
-        }
-      )
-      assert.equal(forbiddenRead.status, 404, 'Another user must not read the recipient inbox')
-
-      await control.command('clearSystemNotifications', 'body')
-      assignedTask = await assignerRequest(
-        `/api/v1/cloud-projects/${project.id}/loop-items/${assignedTask.id}/assign`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            version: assignedTask.version,
-            assignee_type: 'user',
-            assignee_id: String(owner.id),
-          }),
-        }
-      )
-      await assertNoNotification(
-        control,
-        'Repeated assignment to the same person produced a notification',
-        uiTimeoutMs
-      )
-
-      await control.command('clearSystemNotifications', 'body')
-      await ownerRequest(
-        `/api/v1/cloud-projects/${project.id}/loop-items/${selfAssignedTask.id}/assign`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            version: selfAssignedTask.version,
-            assignee_type: 'user',
-            assignee_id: String(owner.id),
-          }),
-        }
-      )
-      await assertNoNotification(control, 'Self-assignment produced a notification', uiTimeoutMs)
-
-      const silent = await assignerRequest(`/api/v1/cloud-projects/${project.id}/loop-items`, {
-        method: 'POST',
-        body: JSON.stringify({ title: 'Silent assignment' }),
-      })
-      await assignerRequest(`/api/v1/cloud-projects/${project.id}/loop-items/${silent.id}/assign`, {
-        method: 'POST',
-        body: JSON.stringify({
-          version: silent.version,
-          assigneeType: 'user',
-          assigneeId: String(owner.id),
-          notifyAssignee: false,
-        }),
-      })
-      const finalInbox = await ownerRequest('/api/v1/wework-notifications')
-      assert.equal(
-        finalInbox.items.filter(item => item.payload.itemId === assignedTask.id).length,
-        1
-      )
-      assert.equal(
-        finalInbox.items.some(item => item.payload.itemId === silent.id),
-        false
-      )
-      await control.command('openWeworkScheme', 'body', {
-        value: `wework://boards/${project.id}/issues/${selfAssignedTask.id}`,
-      })
-      await control.command(
-        'waitFor',
-        '[data-workspace-tab-content][aria-hidden="false"] [data-testid="cloud-todo-detail-title"]',
-        {
-          timeoutMs: uiTimeoutMs,
-        }
-      )
-      await control.command(
-        'waitFor',
-        '[data-workspace-tab-content][aria-hidden="false"] [data-testid="cloud-todo-detail-title"]',
-        {
-          text: SELF_ASSIGNED_TASK_TITLE,
-          timeoutMs: uiTimeoutMs,
-        }
-      )
-      assert.equal(
-        await control.command(
-          'getValue',
-          '[data-workspace-tab-content][aria-hidden="false"] [data-testid="cloud-todo-detail-title"]'
-        ),
-        SELF_ASSIGNED_TASK_TITLE
-      )
-      const custom = await ownerRequest('/api/v1/wework-notifications', {
-        method: 'POST',
-        body: JSON.stringify({
-          project_id: project.id,
-          item_id: assignedTask.id,
-          title: 'Review failed',
-          body: 'Please review the blocked Issue',
-        }),
-      })
+      await control.command('click', scoped('[data-testid="ai-chat-modal-close"]'))
       await control.command('click', '[data-testid="wework-notifications-button"]')
       await control.command('click', '[data-testid="wework-notifications-refresh"]')
-      await control.command('waitFor', `[data-testid="wework-notification-${custom.id}"]`, {
+      await control.command('click', '[data-testid="wework-notifications-category-collaboration"]')
+      await control.command('click', '[data-testid="issue-dispatch-notification-create-task"]')
+      await control.command('waitFor', scoped('[data-testid="ai-chat-modal"]'), {
         timeoutMs: uiTimeoutMs,
       })
-      await captureScreenshot(control, 'wework-notifications-inbox.png')
-      await control.command('click', '[data-testid="wework-notifications-read-all"]')
-      await control.command('waitFor', '[data-testid="wework-notifications-popover"]', {
+      await control.command('waitFor', scoped('[data-testid="work-item-task-chat-panel"]'), {
         timeoutMs: uiTimeoutMs,
       })
+      assert.equal(
+        Number(
+          await control.command(
+            'getElementCount',
+            scoped('[data-testid="work-item-new-task-chat-panel"]')
+          )
+        ),
+        0,
+        '重复点击通知错误打开了新建 Runtime Task'
+      )
+      const bindingsAfterReopen = await ownerRequest(`/api/v1/loop-items/${issue.id}/tasks`)
+      assert.equal(bindingsAfterReopen.length, bindingsAfterDelivery.length)
     },
 
     diagnostics() {
       return {
+        deliveryId: delivery?.id ?? null,
+        humanAssignmentId: notification?.payload?.humanAssignmentId ?? null,
+        issueId: issue?.id ?? null,
         modelRequestCount,
-        modelRequests,
-        assignerId: assigner?.id ?? null,
-        assignedTaskId: assignedTask?.id ?? null,
-        ownerId: owner?.id ?? null,
         projectId: project?.id ?? null,
-        selfAssignedTaskId: selfAssignedTask?.id ?? null,
+        runtimeTaskId: runtimeTaskId || null,
       }
     },
   }

@@ -82,6 +82,22 @@ fn running_endpoint() -> &'static StdMutex<Option<RunningBrowserMcpEndpoint>> {
     RUNNING.get_or_init(|| StdMutex::new(None))
 }
 
+#[cfg(not(test))]
+fn local_mcp_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| Uuid::new_v4().to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn browser_mcp_process_token() -> &'static str {
+    "test-browser-mcp-instance-token"
+}
+
+#[cfg(not(test))]
+pub(crate) fn browser_mcp_process_token() -> &'static str {
+    local_mcp_token()
+}
+
 pub(crate) async fn ensure_browser_mcp_http_endpoint() -> Result<BrowserMcpEndpoint, String> {
     if let Some(endpoint) = active_endpoint() {
         if endpoint_is_reachable(&endpoint).await {
@@ -107,7 +123,7 @@ pub(crate) async fn ensure_browser_mcp_http_endpoint() -> Result<BrowserMcpEndpo
         .map_err(|error| format!("failed to read browser MCP endpoint address: {error}"))?;
     let endpoint = BrowserMcpEndpoint {
         url: format!("http://{address}/mcp"),
-        token: Uuid::new_v4().to_string(),
+        token: browser_mcp_process_token().to_owned(),
     };
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(BRIDGE_CONNECT_TIMEOUT_SECONDS))
@@ -190,7 +206,10 @@ pub(crate) async fn ensure_browser_mcp_http_endpoint() -> Result<BrowserMcpEndpo
 
 async fn endpoint_is_reachable(endpoint: &BrowserMcpEndpoint) -> bool {
     let health_url = endpoint.url.trim_end_matches("/mcp").to_owned() + "/health";
-    reqwest::Client::new()
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return false;
+    };
+    client
         .get(health_url)
         .bearer_auth(&endpoint.token)
         .timeout(Duration::from_secs(1))
@@ -376,7 +395,7 @@ mod tests {
         assert_eq!(endpoint.url, same_endpoint.url);
         assert_eq!(endpoint.token, same_endpoint.token);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let unauthorized = client
             .post(&endpoint.url)
             .json(&json!({
@@ -432,5 +451,9 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool["name"] == "browser_open"));
+
+        discard_endpoint(&endpoint);
+        let restarted_endpoint = ensure_browser_mcp_http_endpoint().await.unwrap();
+        assert_eq!(endpoint.token, restarted_endpoint.token);
     }
 }

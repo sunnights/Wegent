@@ -60,6 +60,7 @@ classify_path() {
     .github/workflows/wework-e2e.yml | docker/wework-e2e/* | \
       .github/scripts/archive-wework-core-e2e-build.sh | \
       .github/scripts/classify-wework-desktop-e2e.sh | \
+      .github/scripts/restore-oci-runtime-binary.sh | \
       .github/scripts/restore-wework-core-e2e-build.sh)
       changed[wework_e2e]=true
       ;;
@@ -74,7 +75,11 @@ classify_path() {
       changed[wegent_cli]=true
       changed[platform_e2e]=true
       ;;
-    executor/* | sdk/plugin-auth/* | sdk/plugin-auth-go/* | sdk/dws-auth/* | sdk/plugin-build/*)
+    backend-rs/*)
+      changed[platform_e2e]=true
+      changed[wework_e2e]=true
+      ;;
+    executor/* | sdk/plugin-auth/* | sdk/plugin-auth-go/* | sdk/dws-auth/* | sdk/plugin-build/* | sdk/plugin-creator/*)
       changed[executor]=true
       changed[platform_e2e]=true
       changed[wework_e2e]=true
@@ -98,7 +103,7 @@ classify_path() {
       changed[frontend]=true
       changed[platform_e2e]=true
       ;;
-    packages/chat-core/*)
+    packages/chat-core/* | packages/collaboration/*)
       changed[frontend]=true
       changed[wework]=true
       changed[platform_e2e]=true

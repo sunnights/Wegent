@@ -1,3 +1,15 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export const INTERNAL_CORE_PLUGIN_MANIFEST = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../wecode/dsh/core-plugins.json'
+)
+export const INTERNAL_CORE_PLUGINS = existsSync(INTERNAL_CORE_PLUGIN_MANIFEST)
+  ? JSON.parse(readFileSync(INTERNAL_CORE_PLUGIN_MANIFEST, 'utf8'))
+  : []
+
 export const CORE_PLUGIN_DIRECTORIES = [
   'app-wework',
   'browser-runtime',
@@ -7,6 +19,7 @@ export const CORE_PLUGIN_DIRECTORIES = [
   'terminal-runtime',
   'transcript-sync',
   'plugin-runtime',
+  'conversation-export',
   'ui-core-apps',
   'ui-core-settings',
   'ui-plugin-center',
@@ -17,10 +30,13 @@ export const CORE_PLUGIN_DIRECTORIES = [
   'ui-home-focus',
   'ui-home-developer',
   'ui-git',
+  'ui-outputs',
+  ...INTERNAL_CORE_PLUGINS.map(plugin => plugin.source),
 ]
 
 const CORE_PLUGIN_TARGETS = {
   'app-wework': 'wework-app',
+  'conversation-export': 'wework-conversation-export',
   'browser-runtime': 'wework-browser-runtime',
   'electron-host': 'wework-electron-host',
   'executor-runtime': 'wework-executor-runtime',
@@ -38,10 +54,20 @@ const CORE_PLUGIN_TARGETS = {
   'ui-home-focus': 'wework-ui-home-focus',
   'ui-home-developer': 'wework-ui-home-developer',
   'ui-git': 'wework-ui-git',
+  'ui-outputs': 'wework-ui-outputs',
 }
 
 export function corePluginTarget(directory) {
-  const target = CORE_PLUGIN_TARGETS[directory]
+  const target =
+    CORE_PLUGIN_TARGETS[directory] ||
+    INTERNAL_CORE_PLUGINS.find(plugin => plugin.source === directory)?.directory
   if (!target) throw new Error(`Unsupported Wework core plugin directory: ${directory}`)
   return target
+}
+
+export function corePluginSource(weworkRoot, directory) {
+  const internal = INTERNAL_CORE_PLUGINS.find(plugin => plugin.source === directory)
+  return internal
+    ? join(weworkRoot, 'wecode', 'dsh', internal.source)
+    : join(weworkRoot, 'dsh', directory)
 }

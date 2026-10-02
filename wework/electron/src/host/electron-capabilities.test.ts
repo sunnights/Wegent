@@ -1,5 +1,5 @@
-import { describe, expect, test, vi } from 'vitest'
-import type { WebContents } from 'electron'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { clipboard, type WebContents } from 'electron'
 import { resolve } from 'node:path'
 import type { EmbeddedBrowserManager } from './embedded-browser-manager.js'
 import type {
@@ -9,9 +9,11 @@ import type {
 } from './capability-router.js'
 import {
   captureWebContentsDataUrl,
+  createElectronCapabilityRouter,
   coreGrantedCapabilities,
   cpuLoadRatioBetween,
   e2eOpenDialogOverride,
+  e2eSaveDialogOverride,
   createWorkbenchCapabilityRouter,
   WEWORK_APP_PRINCIPAL,
   WEWORK_WORKBENCH_PRINCIPAL,
@@ -28,6 +30,56 @@ import type { AppUpdateService } from './app-update-service.js'
 import type { FeedbackBundleManager } from './feedback-bundle-manager.js'
 import type { RendererStorageStore } from './renderer-storage-store.js'
 
+const electronMocks = vi.hoisted(() => ({
+  appGetPath: vi.fn(() => '/tmp'),
+  appGetVersion: vi.fn(() => '0.0.0-test'),
+  clipboardAvailableFormats: vi.fn(() => [] as string[]),
+  clipboardRead: vi.fn(() => ''),
+  clipboardReadBuffer: vi.fn(() => Buffer.alloc(0)),
+  clipboardReadText: vi.fn(() => 'native text'),
+  clipboardWriteText: vi.fn(),
+  dialogShowMessageBox: vi.fn(),
+  dialogShowOpenDialog: vi.fn(),
+  dialogShowSaveDialog: vi.fn(),
+  powerMonitorGetSystemIdleTime: vi.fn(() => 0),
+  shellOpenExternal: vi.fn(async () => undefined),
+  shellOpenPath: vi.fn(async () => ''),
+  shellShowItemInFolder: vi.fn(),
+}))
+
+vi.mock('electron', () => ({
+  app: {
+    getPath: electronMocks.appGetPath,
+    getVersion: electronMocks.appGetVersion,
+  },
+  BrowserWindow: class BrowserWindow {},
+  clipboard: {
+    availableFormats: electronMocks.clipboardAvailableFormats,
+    read: electronMocks.clipboardRead,
+    readBuffer: electronMocks.clipboardReadBuffer,
+    readText: electronMocks.clipboardReadText,
+    writeText: electronMocks.clipboardWriteText,
+  },
+  dialog: {
+    showMessageBox: electronMocks.dialogShowMessageBox,
+    showOpenDialog: electronMocks.dialogShowOpenDialog,
+    showSaveDialog: electronMocks.dialogShowSaveDialog,
+  },
+  Notification: class Notification {
+    constructor(readonly options: { title: string; body: string }) {}
+    once = vi.fn()
+    show = vi.fn()
+  },
+  powerMonitor: {
+    getSystemIdleTime: electronMocks.powerMonitorGetSystemIdleTime,
+  },
+  shell: {
+    openExternal: electronMocks.shellOpenExternal,
+    openPath: electronMocks.shellOpenPath,
+    showItemInFolder: electronMocks.shellShowItemInFolder,
+  },
+}))
+
 describe('cpuLoadRatioBetween', () => {
   test('calculates system utilization from cumulative CPU times', () => {
     expect(cpuLoadRatioBetween({ idle: 100, total: 200 }, { idle: 130, total: 300 })).toBeCloseTo(
@@ -41,6 +93,23 @@ describe('Smart App verification capabilities', () => {
   test('grants only the named inspect and verify operations', () => {
     expect(HOST_CAPABILITIES).toContain('smartApps.inspectVerification')
     expect(HOST_CAPABILITIES).toContain('smartApps.verify')
+  })
+
+  test('allows an empty parent and purpose when creating a workbench', async () => {
+    const createDirectory = vi.fn(async () => ({ id: 'created-app' }))
+    const { router } = createIsolatedClipboardRouter(true, undefined, { createDirectory })
+    const input = {
+      parentPath: '',
+      name: 'created-app',
+      displayName: 'Created App',
+      description: '',
+      template: 'web',
+    }
+
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'smartApps.createDirectory', input)
+    ).resolves.toEqual({ id: 'created-app' })
+    expect(createDirectory).toHaveBeenCalledWith(input)
   })
 })
 
@@ -60,6 +129,27 @@ describe('e2eOpenDialogOverride', () => {
   test('does not bypass the native dialog without both E2E signals', () => {
     expect(e2eOpenDialogOverride({ WEWORK_E2E_OPEN_DIALOG_PATH: '/workspace/plugin' })).toBeNull()
     expect(e2eOpenDialogOverride({ WEWORK_E2E_CONTROL_URL: 'http://127.0.0.1:1234' })).toBeNull()
+  })
+})
+
+describe('e2eSaveDialogOverride', () => {
+  test('returns the selected path only for a controlled desktop E2E process', () => {
+    expect(
+      e2eSaveDialogOverride({
+        WEWORK_E2E_CONTROL_URL: 'http://127.0.0.1:1234',
+        WEWORK_E2E_SAVE_DIALOG_PATH: '/workspace/export.zip',
+      })
+    ).toEqual({
+      canceled: false,
+      filePath: resolve('/workspace/export.zip'),
+    })
+  })
+
+  test('does not bypass the native dialog without both E2E signals', () => {
+    expect(
+      e2eSaveDialogOverride({ WEWORK_E2E_SAVE_DIALOG_PATH: '/workspace/export.zip' })
+    ).toBeNull()
+    expect(e2eSaveDialogOverride({ WEWORK_E2E_CONTROL_URL: 'http://127.0.0.1:1234' })).toBeNull()
   })
 })
 
@@ -147,6 +237,76 @@ function createWebContents(input: {
   } as unknown as WebContents
   return { capturePage, contents, debuggerSession }
 }
+
+function createIsolatedClipboardRouter(
+  focused = true,
+  popoutHost?: {
+    openPopoutTaskInMain: (taskAddressId: string) => void
+    setPopoutMode: (mode: 'composer' | 'menu' | 'conversation') => void
+  },
+  smartApps?: { createDirectory: (input: Record<string, string>) => Promise<unknown> }
+) {
+  const targetWindow = {
+    isDestroyed: vi.fn(() => false),
+    isFocused: vi.fn(() => focused),
+  }
+  const router = createElectronCapabilityRouter(
+    () => targetWindow as never,
+    () => ({
+      crashCount: 0,
+      generation: 1,
+      reason: null,
+      state: 'ready',
+      updatedAt: '2026-09-12T00:00:00.000Z',
+    }),
+    () => (smartApps ?? null) as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {
+      cleanupStaleTemporaryImages: vi.fn(),
+      coreDshPlugins: () => null,
+      events: { read: vi.fn(() => ({ events: [], latestSequence: 0, historyLost: false })) },
+      feedback: {} as never,
+      openRuntimeTask: vi.fn(),
+      openScheme: vi.fn(),
+      pendingSchemes: {
+        acknowledge: vi.fn(),
+        read: vi.fn(() => ({ items: [] })),
+      },
+      pluginDevelopment: () => null,
+      secureStorage: {
+        delete: vi.fn(),
+        get: vi.fn(),
+        set: vi.fn(),
+      },
+    } as never,
+    popoutHost as never
+  )
+  return { router, targetWindow }
+}
+
+describe('Popout Window sizing capabilities', () => {
+  test('forwards validated conversation and menu states to the native window', async () => {
+    const popoutHost = {
+      openPopoutTaskInMain: vi.fn(),
+      setPopoutMode: vi.fn(),
+    }
+    const { router } = createIsolatedClipboardRouter(true, popoutHost)
+
+    await router.invoke(WEWORK_APP_PRINCIPAL, 'window.setPopoutMode', { mode: 'menu' })
+    await router.invoke(WEWORK_APP_PRINCIPAL, 'window.openPopoutTaskInMain', {
+      taskAddressId: 'local-device:task-1',
+    })
+
+    expect(popoutHost.openPopoutTaskInMain).toHaveBeenCalledWith('local-device:task-1')
+    expect(popoutHost.setPopoutMode).toHaveBeenCalledWith('menu')
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'window.setPopoutMode', { mode: 'invalid' })
+    ).rejects.toMatchObject({ code: 'invalid_params' })
+  })
+})
 
 describe('captureWebContentsDataUrl', () => {
   test('uses Electron native capturePage for the visible composed surface', async () => {
@@ -504,6 +664,57 @@ describe('registerDesktopServiceCapabilities', () => {
   })
 })
 
+describe('isolated surface clipboard capabilities', () => {
+  beforeEach(() => {
+    electronMocks.clipboardReadText.mockClear()
+    electronMocks.clipboardWriteText.mockClear()
+  })
+
+  test('read and write require a focused window with the active lease', async () => {
+    const { router } = createIsolatedClipboardRouter()
+
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.readText', { leaseId: 'lease-1' })
+    ).rejects.toMatchObject({ code: 'isolated_clipboard_inactive' })
+
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.activate', { leaseId: 'lease-1' })
+    ).resolves.toEqual({ active: true })
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.readText', { leaseId: 'lease-1' })
+    ).resolves.toBe('native text')
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.writeText', {
+        leaseId: 'lease-1',
+        text: '  remote text\n',
+      })
+    ).resolves.toEqual({ written: true })
+
+    expect(clipboard.readText).toHaveBeenCalledOnce()
+    expect(clipboard.writeText).toHaveBeenCalledWith('  remote text\n')
+
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.readText', { leaseId: 'lease-2' })
+    ).rejects.toMatchObject({ code: 'isolated_clipboard_inactive' })
+  })
+
+  test('rejects clipboard activation and access when the Wework window is unfocused', async () => {
+    const { router } = createIsolatedClipboardRouter(false)
+
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.activate', { leaseId: 'lease-1' })
+    ).rejects.toMatchObject({ code: 'window_not_focused' })
+    await expect(
+      router.invoke(WEWORK_APP_PRINCIPAL, 'isolatedClipboard.writeText', {
+        leaseId: 'lease-1',
+        text: 'remote text',
+      })
+    ).rejects.toMatchObject({ code: 'isolated_clipboard_inactive' })
+
+    expect(clipboard.writeText).not.toHaveBeenCalled()
+  })
+})
+
 describe('registerCoreDshPluginCapabilities', () => {
   test('forwards the explicit Core DSH plugin operations', async () => {
     const handlers = new Map<HostCapability, HostCapabilityHandler>()
@@ -683,10 +894,14 @@ describe('createWorkbenchCapabilityRouter', () => {
     expect(browser.capture).not.toHaveBeenCalled()
   })
 
-  test('grants only owner-view capture capabilities to the workbench principal', async () => {
+  test('grants owner-view capture and read-only device diagnostics to the workbench principal', async () => {
     const router = createWorkbenchCapabilityRouter(null, null)
     const granted = router.describe(WEWORK_WORKBENCH_PRINCIPAL)
-    expect(granted).toEqual(['dshCapture.capabilities', 'dshCapture.ownerRect'])
+    expect(granted).toEqual([
+      'dshCapture.capabilities',
+      'dshCapture.ownerRect',
+      'deviceDiagnostics.microphone',
+    ])
     expect(granted).not.toContain('browser.open')
     expect(granted).not.toContain('filesystem.stat')
     expect(granted).not.toContain('executor.*')
@@ -709,6 +924,13 @@ describe('createWorkbenchCapabilityRouter', () => {
     expect(granted).not.toContain('dshCapture.capabilities')
     expect(granted).not.toContain('dshCapture.ownerRect')
     expect(granted).toContain('browser.open')
+    expect(granted).toContain('deviceDiagnostics.microphone')
+  })
+
+  test('grants app.relaunch to the core principal', () => {
+    const granted = coreGrantedCapabilities()
+    expect(granted).toContain('app.relaunch')
+    expect(granted).toContain('app.quit')
   })
 
   test('reports capability available only while the scoped owner is visible', async () => {

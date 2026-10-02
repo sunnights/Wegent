@@ -26,6 +26,7 @@ import { findWorkbenchDevice, getProjectDeviceId } from '@/lib/workbench-device'
 import { EnvironmentInfoPopover } from '../EnvironmentInfoPopover'
 import { DESKTOP_TOP_BAR_BUTTON_CLASS } from '../DesktopTopBar'
 import { TitlebarTooltip } from '@/components/topnav/TitlebarTooltip'
+import { Tooltip } from '@/components/ui/tooltip'
 import { openExternalUrl } from '@/lib/external-links'
 import {
   getActiveKeybinding,
@@ -37,7 +38,13 @@ import { LocalWorkspaceOpenerIcon, LocalWorkspaceOpenerPicker } from './LocalWor
 import { WorkspaceToolbarExtensions } from './WorkspaceToolbarExtensions'
 import type { DeviceInfo, ProjectWithTasks, RuntimeSupervisorState } from '@/types/api'
 import type { EnvironmentInfo } from '@/types/environment'
+import type { WorkbenchMessage } from '@/types/workbench'
 import type { WorkspaceTarget } from '@/types/workspace-files'
+import {
+  resolveWorkspaceOpener,
+  setPreferredWorkspaceOpener,
+  usePreferredWorkspaceOpener,
+} from '@/lib/workspace-opener-preferences'
 
 interface WorkspacePanelActionsProps {
   mode?:
@@ -52,12 +59,14 @@ interface WorkspacePanelActionsProps {
   workspaceTarget?: WorkspaceTarget | null
   workspaceSessionApi?: WorkspaceSessionApi
   environmentInfo: EnvironmentInfo
+  conversationSummaryIsGitRepository?: boolean
+  conversationMessages?: readonly WorkbenchMessage[]
   environmentInfoPopoverContainer: HTMLElement | null
   environmentInfoVisible?: boolean
   environmentInfoDocked?: boolean
   environmentInfoOpen: boolean
   onEnvironmentInfoOpenChange: (open: boolean) => void
-  environmentInfoFloatingFooter?: ReactNode
+  environmentInfoFooter?: ReactNode
   onRefreshEnvironmentInfo: () => Promise<void>
   onCommitEnvironmentChanges: (message: string) => Promise<void>
   onCommitAndPushEnvironmentChanges: (message: string) => Promise<void>
@@ -68,6 +77,7 @@ interface WorkspacePanelActionsProps {
   onGenerateEnvironmentBranch?: (sourceText: string) => Promise<string>
   environmentBranchNameSource?: string
   onOpenEnvironmentChangesReview: () => void
+  onOpenConversationWorkspaceFile?: (path: string) => void
   onDeliver?: () => void
   todoLabel?: string
   onManageTodo?: () => void
@@ -89,12 +99,14 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
   workspaceTarget = null,
   workspaceSessionApi,
   environmentInfo,
+  conversationSummaryIsGitRepository,
+  conversationMessages = [],
   environmentInfoPopoverContainer,
   environmentInfoVisible = true,
   environmentInfoDocked = true,
   environmentInfoOpen,
   onEnvironmentInfoOpenChange,
-  environmentInfoFloatingFooter,
+  environmentInfoFooter,
   onRefreshEnvironmentInfo,
   onCommitEnvironmentChanges,
   onCommitAndPushEnvironmentChanges,
@@ -105,6 +117,7 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
   onGenerateEnvironmentBranch,
   environmentBranchNameSource,
   onOpenEnvironmentChangesReview,
+  onOpenConversationWorkspaceFile,
   onDeliver,
   todoLabel,
   onManageTodo,
@@ -154,6 +167,7 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
   const localWorkspacePath =
     workspaceTarget?.path ?? (currentProject ? configuredWorkspacePath(currentProject) : undefined)
   const normalizedWorkspacePath = localWorkspacePath?.trim()
+  const preferredOpener = usePreferredWorkspaceOpener(normalizedWorkspacePath)
   const projectUsesLocalWorkspace = Boolean(
     currentProject &&
     (currentProject.config?.execution?.targetType === 'local' ||
@@ -205,7 +219,7 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
       )
     : []
   const defaultOpener = openerAvailability
-    ? (availableOpenerIds[0] ?? null)
+    ? resolveWorkspaceOpener(availableOpenerIds, preferredOpener)
     : DEFAULT_LOCAL_WORKSPACE_OPENER_ID
   const defaultOpenerLabel =
     (defaultOpener != null ? openerLabels[defaultOpener] : undefined) ??
@@ -287,6 +301,7 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
         opener,
         path: localWorkspacePath,
       })
+      setPreferredWorkspaceOpener(localWorkspacePath, opener)
     } catch (error) {
       // Unavailable openers are grayed out before launch, so this only logs
       // unexpected launch failures instead of showing a modal.
@@ -309,11 +324,13 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
         <EnvironmentInfoPopover
           key={environmentInfoDocked ? 'docked' : 'floating'}
           info={environmentInfo}
+          isGitRepository={conversationSummaryIsGitRepository}
+          messages={conversationMessages}
           popoverContainer={environmentInfoPopoverContainer}
           docked={environmentInfoDocked}
           open={environmentInfoOpen}
           onOpenChange={onEnvironmentInfoOpenChange}
-          floatingFooter={environmentInfoFloatingFooter}
+          footer={environmentInfoFooter}
           devices={devices}
           onRefresh={onRefreshEnvironmentInfo}
           onCommitChanges={onCommitEnvironmentChanges}
@@ -325,6 +342,7 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
           onGenerateBranchName={onGenerateEnvironmentBranch}
           branchNameSource={environmentBranchNameSource}
           onOpenChangesReview={onOpenEnvironmentChangesReview}
+          onOpenWorkspaceFile={onOpenConversationWorkspaceFile}
           onDeliver={onDeliver}
           todoLabel={todoLabel}
           onManageTodo={onManageTodo}
@@ -364,47 +382,60 @@ export const WorkspacePanelActions = memo(function WorkspacePanelActions({
               {t('workbench.open_workspace_location')}
             </span>
           </button>
-          <LocalWorkspaceOpenerPicker
-            ariaLabel={t('workbench.choose_project_ide')}
-            buttonTestId="open-local-workspace-picker-button"
-            menuTestId="open-local-workspace-picker-menu"
-            optionTestIdPrefix="open-local-workspace-option"
-            disabled={ideLoading}
-            buttonClassName={cn(
-              'flex h-8 w-7 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-text-secondary transition-colors hover:bg-text-primary/[0.06] hover:text-text-primary active:bg-text-primary/[0.10] focus-visible:outline-none disabled:cursor-wait [&_svg]:h-4 [&_svg]:w-4 [&_svg]:stroke-[2]',
-              ideLoading && 'cursor-wait opacity-70'
-            )}
-            availability={
-              (openerAvailability ?? {}) as Record<LocalWorkspaceOpenerId, boolean | undefined>
-            }
-            labels={openerLabels}
-            onChooseOther={handleChooseOther}
-            onOpen={refreshLocalWorkspaceOpeners}
-            onSelect={handleOpenLocalWorkspace}
-          />
+          <Tooltip
+            label={t('workbench.choose_project_ide')}
+            side="bottom"
+            align="end"
+            testId="open-local-workspace-picker-button-tooltip"
+          >
+            <LocalWorkspaceOpenerPicker
+              ariaLabel={t('workbench.choose_project_ide')}
+              buttonTestId="open-local-workspace-picker-button"
+              menuTestId="open-local-workspace-picker-menu"
+              optionTestIdPrefix="open-local-workspace-option"
+              disabled={ideLoading}
+              buttonClassName={cn(
+                'flex h-8 w-7 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-text-secondary transition-colors hover:bg-text-primary/[0.06] hover:text-text-primary active:bg-text-primary/[0.10] focus-visible:outline-none disabled:cursor-wait [&_svg]:h-4 [&_svg]:w-4 [&_svg]:stroke-[2]',
+                ideLoading && 'cursor-wait opacity-70'
+              )}
+              availability={
+                (openerAvailability ?? {}) as Record<LocalWorkspaceOpenerId, boolean | undefined>
+              }
+              labels={openerLabels}
+              onChooseOther={handleChooseOther}
+              onOpen={refreshLocalWorkspaceOpeners}
+              onSelect={handleOpenLocalWorkspace}
+            />
+          </Tooltip>
         </div>
       )}
       {showPrimaryTarget && canOpenCodeServer && !localWorkspaceEnabled && (
-        <button
-          type="button"
-          data-testid="open-code-server-titlebar-button"
-          data-workspace-path={normalizedWorkspacePath || undefined}
-          onClick={() => void handleOpenCodeServer()}
-          disabled={ideLoading || !codeServerEnabled}
-          className={cn(
-            DESKTOP_TOP_BAR_BUTTON_CLASS,
-            !codeServerEnabled && 'cursor-not-allowed opacity-45',
-            ideLoading && 'cursor-wait opacity-70'
-          )}
-          aria-label={t('workbench.open_project_ide')}
-          title={ideTitle}
+        <Tooltip
+          label={ideTitle}
+          side="bottom"
+          align="end"
+          testId="open-code-server-titlebar-button-tooltip"
         >
-          {ideLoading ? (
-            <Loader2 className="animate-spin" />
-          ) : (
-            <LocalWorkspaceOpenerIcon opener="vscode" className="h-[18px] w-[18px]" />
-          )}
-        </button>
+          <button
+            type="button"
+            data-testid="open-code-server-titlebar-button"
+            data-workspace-path={normalizedWorkspacePath || undefined}
+            onClick={() => void handleOpenCodeServer()}
+            disabled={ideLoading || !codeServerEnabled}
+            className={cn(
+              DESKTOP_TOP_BAR_BUTTON_CLASS,
+              !codeServerEnabled && 'cursor-not-allowed opacity-45',
+              ideLoading && 'cursor-wait opacity-70'
+            )}
+            aria-label={t('workbench.open_project_ide')}
+          >
+            {ideLoading ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <LocalWorkspaceOpenerIcon opener="vscode" className="h-[18px] w-[18px]" />
+            )}
+          </button>
+        </Tooltip>
       )}
       {ideError && <CodeServerErrorDialog message={ideError} onClose={() => setIdeError(null)} />}
       {(showBottomPanelToggle || showRightPanelToggle) && (

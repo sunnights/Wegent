@@ -5,6 +5,7 @@ import { copyFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from
 import { createServer } from 'node:net'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { WorkbenchRuntimeLaunch } from '../runtime/workbench-runtime.js'
+import { cloudFetch } from './cloud-http.js'
 import {
   materializeManifestPackages,
   prepareWorkbenchDshLaunch,
@@ -28,6 +29,7 @@ import {
 } from './smart-app-scaffold.js'
 import { SmartAppVerifier, type SmartAppPackResult } from './smart-app-verifier.js'
 import type { SmartAppVerificationReport } from './smart-app-verification-types.js'
+import { ensureDirectory } from './ensure-directory.js'
 
 export interface SmartAppInstallation {
   id: string
@@ -72,7 +74,8 @@ export interface SmartAppRuntimeHost {
 
 export interface SmartAppManagerOptions {
   dataDirectory: string
-  downloadsDirectory: string
+  documentsDirectory: () => string
+  downloadsDirectory: () => string
   logDirectory: string
   runtimeRoot: string
   environment: NodeJS.ProcessEnv
@@ -173,11 +176,16 @@ export class SmartAppManager {
       const name = validEditableName(input.name)
       const displayName = requiredText(input.displayName)
       const template = validSmartAppTemplate(input.template)
-      const parent = await requiredSmartAppDirectory(input.parentPath, 'Smart app parent')
+      const parent = input.parentPath.trim()
+        ? await requiredSmartAppDirectory(input.parentPath, 'Smart app parent')
+        : await this.defaultCreationParent()
       const target = join(parent, name)
       await mkdir(target).catch(error => {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
           throw new Error('Smart app destination already exists')
+        }
+        if (isDirectoryPermissionError(error)) {
+          throw new Error('Smart app save location is not writable', { cause: error })
         }
         throw error
       })
@@ -196,6 +204,16 @@ export class SmartAppManager {
         throw error
       }
     })
+  }
+
+  private async defaultCreationParent(): Promise<string> {
+    try {
+      const parent = join(this.options.documentsDirectory(), 'WeworkSmartApps')
+      await mkdir(parent, { recursive: true, mode: 0o700 })
+      return await requiredSmartAppDirectory(parent, 'Smart app default parent')
+    } catch (error) {
+      throw new Error('Smart app default save location is unavailable', { cause: error })
+    }
   }
 
   async linkDirectory(directoryPath: string): Promise<SmartAppInstallation> {
@@ -312,7 +330,7 @@ export class SmartAppManager {
       directory,
       `market-${input.smartAppId}-${input.releaseId}-${input.sha256}.zip`
     )
-    const response = await fetch(url)
+    const response = await cloudFetch(url)
     if (!response.ok || !response.body) {
       throw new Error(`Smart app download failed with HTTP ${response.status}`)
     }
@@ -501,6 +519,7 @@ export class SmartAppManager {
     )
     if (installation.source === 'linked') {
       const packed = await this.verificationService.pack(installation.packagePath, archivePath)
+      await rejectOversizedPublishArchive(packed.archivePath, packed.sizeBytes)
       return {
         archivePath: packed.archivePath,
         sha256: packed.sha256,
@@ -510,6 +529,7 @@ export class SmartAppManager {
     }
     await archiveDirectory(installation.packagePath, archivePath)
     const metadata = await stat(archivePath)
+    await rejectOversizedPublishArchive(archivePath, metadata.size)
     return {
       archivePath,
       sha256: await fileSha256(archivePath),
@@ -520,9 +540,10 @@ export class SmartAppManager {
 
   async exportToDownloads(installationId: string): Promise<SmartAppSavedExport> {
     const exported = await this.export(installationId)
-    await mkdir(this.options.downloadsDirectory, { recursive: true })
+    const downloadsDirectory = this.options.downloadsDirectory()
+    await ensureDirectory(downloadsDirectory)
     const filename = `${safeName(exported.manifest.name)}-${exported.manifest.version}.zip`
-    const destinationPath = await uniquePath(this.options.downloadsDirectory, filename)
+    const destinationPath = await uniquePath(downloadsDirectory, filename)
     await copyFile(exported.archivePath, destinationPath)
     return { ...exported, destinationPath }
   }
@@ -556,10 +577,13 @@ export class SmartAppManager {
     const url = new URL(uploadUrl)
     if (!isSecureTransferUrl(url)) throw new Error('Smart app upload must use HTTPS')
     const bytes = await readFile(resolve(archivePath))
-    const response = await fetch(url, {
+    const response = await cloudFetch(url, {
       method: 'PUT',
       headers: { 'content-type': 'application/zip' },
       body: bytes,
+      // The link is scoped to one submission, and a 307 or 308 would resend the archive to another
+      // host, so refuse redirects instead of following them.
+      redirect: 'error',
     })
     if (!response.ok) throw new Error(`Smart app upload failed with HTTP ${response.status}`)
   }
@@ -657,6 +681,12 @@ export class SmartAppManager {
   }
 }
 
+async function rejectOversizedPublishArchive(path: string, sizeBytes: number): Promise<void> {
+  if (sizeBytes <= MAX_SMART_APP_ARCHIVE_BYTES) return
+  await rm(path, { force: true })
+  throw new Error('发布包超过 50 MB，请使用项目打包命令生成发布产物，不要直接上传源码压缩包。')
+}
+
 async function refreshLinkedInstallation(installation: SmartAppInstallation): Promise<boolean> {
   try {
     const validated = await validateLinkedSmartAppDirectory(installation.packagePath)
@@ -728,6 +758,11 @@ async function optionalDirectory(path: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+function isDirectoryPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code
+  return code === 'EACCES' || code === 'EPERM'
 }
 
 function validEditableName(value: string): string {

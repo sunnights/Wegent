@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import HTTPException, status
+from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -72,6 +73,7 @@ from app.schemas.runtime_work import (
     RuntimeTaskIMNotificationSubscription,
     RuntimeTaskIMNotificationSubscriptionRequest,
     RuntimeTaskIMNotificationSubscriptionResponse,
+    RuntimeTaskMaterializeRequest,
     RuntimeTaskQueueReorderRequest,
     RuntimeTaskQueueReorderResponse,
     RuntimeTaskRenameRequest,
@@ -116,6 +118,7 @@ from app.stores.tasks.transient import (
     build_transient_task,
 )
 from shared.models.execution import ExecutionRequest
+from shared.telemetry.decorators import trace_async
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +137,6 @@ CLOUD_MODEL_NAMESPACE_OPTION = "weworkCloudModelNamespace"
 CLOUD_MODEL_RESOURCE_USER_ID_OPTION = "weworkCloudModelResourceUserId"
 CLOUD_MODEL_CONTEXT_WINDOW_OPTION = "weworkCloudModelContextWindow"
 CLOUD_MODEL_MAX_OUTPUT_TOKENS_OPTION = "weworkCloudModelMaxOutputTokens"
-CLOUD_MODEL_UPSTREAM_API_FORMAT_OPTION = "weworkCloudModelUpstreamApiFormat"
 CLOUD_MODEL_CODEX_CATALOG_MODEL_ID_OPTION = "weworkCloudModelCodexCatalogModelId"
 CLOUD_MODEL_NATIVE_TOOL_SEARCH_OPTION = "weworkCloudModelNativeToolSearch"
 CLOUD_MODEL_NATIVE_NAMESPACE_TOOLS_OPTION = "weworkCloudModelNativeNamespaceTools"
@@ -369,10 +371,13 @@ async def list_runtime_work(
     *,
     db: Session,
     user_id: int,
+    device_id: str | None = None,
 ) -> RuntimeWorkListResponse:
     """Return runtime-native work grouped by executor workspace."""
 
     devices = await device_service.get_all_devices(db, user_id)
+    if device_id is not None:
+        devices = [device for device in devices if device.get("device_id") == device_id]
     devices_by_id = {str(device.get("device_id")): device for device in devices}
     runtime_workspaces = await _list_online_runtime_workspaces(
         user_id=user_id,
@@ -432,6 +437,7 @@ async def list_runtime_work(
     )
 
 
+@trace_async(span_name="runtime_work.transcript", tracer_name="backend.runtime_work")
 async def get_runtime_transcript(
     *,
     db: Session,
@@ -440,9 +446,14 @@ async def get_runtime_transcript(
 ) -> RuntimeTranscriptResponse:
     """Read a LocalTask transcript from the owning local executor."""
 
-    normalized_address = _normalized_address(address)
-    _ensure_owned_device(db, user_id, normalized_address.device_id)
-    _touch_workspace_mapping(db, user_id, normalized_address)
+    if getattr(address, "project_session", None) is not None:
+        from app.services.project_chat.session_access import resolve_project_transcript
+
+        user_id, normalized_address = resolve_project_transcript(db, user_id, address)
+    else:
+        normalized_address = _normalized_address(address)
+        _ensure_owned_device(db, user_id, normalized_address.device_id)
+        _touch_workspace_mapping(db, user_id, normalized_address)
     payload = _runtime_transcript_payload(address, normalized_address)
     started_at = time.perf_counter()
     logger.info(
@@ -462,6 +473,11 @@ async def get_runtime_transcript(
             method="runtime.tasks.transcript",
             payload=payload,
             timeout_seconds=RUNTIME_TRANSCRIPT_TIMEOUT_SECONDS,
+            **(
+                {"allow_app_device_task_reading": True}
+                if getattr(address, "project_session", None) is not None
+                else {}
+            ),
         )
     except RuntimeRpcError as exc:
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
@@ -495,6 +511,10 @@ async def get_runtime_transcript(
         result.get("hasMoreBefore"),
         result.get("beforeCursor"),
     )
+    if not isinstance(result.get("turns"), list):
+        raise HTTPException(
+            502, "Runtime transcript response is missing canonical turns"
+        )
     return RuntimeTranscriptResponse.model_validate(result)
 
 
@@ -728,10 +748,9 @@ async def _dispatch_runtime_send(
     """Send a runtime task message with the required execution request.
 
     The executor requires ``executionRequest`` to spawn a new turn (it carries
-    model config, user info, skills, etc.). The Wework frontend builds this
-    client-side for direct local sends; the IM continuation path flows through
-    the backend RPC, so we rebuild it from the default task-mode team while
-    preserving the model selected for the bound runtime task.
+    model config, user info, skills, etc.). Backend clients use the same compiler
+    as Wework's Team materialization, preserving the original task binding and
+    selected model. Unbound tasks use the direct Wework execution builder.
     Request-user-input responses use a dedicated executor channel and do not
     spawn a new turn, so they intentionally omit ``executionRequest``.
     """
@@ -1054,6 +1073,7 @@ async def cancel_runtime_task(
     db: Session,
     user_id: int,
     address: RuntimeTaskAddress,
+    runtime_turn_id: Optional[str] = None,
 ) -> RuntimeTaskCancelResponse:
     """Cancel a running LocalTask through the owning local executor."""
 
@@ -1062,6 +1082,17 @@ async def cancel_runtime_task(
         user_id=user_id,
         address=address,
         method="runtime.tasks.cancel",
+        payload_patch=(
+            {
+                "subtask_id": (
+                    int(runtime_turn_id)
+                    if runtime_turn_id.isdigit()
+                    else runtime_turn_id
+                )
+            }
+            if runtime_turn_id is not None
+            else None
+        ),
     )
     return _runtime_cancel_response(result, normalized_address)
 
@@ -1480,6 +1511,7 @@ def _runtime_task_create_payload(
         "modelId": request.model_id,
         "modelType": request.model_type,
         "modelConfig": request.runtime_model_config,
+        "forceStart": request.force_start,
         "cloudProjectId": (
             str(request.cloud_project_id)
             if request.cloud_project_id is not None
@@ -1495,6 +1527,8 @@ def _runtime_task_create_payload(
         payload["runtimeWorkspaceRoots"] = request.runtime_workspace_roots
     if request.project_plugins:
         payload["projectPlugins"] = request.project_plugins
+    if request.additional_skills:
+        payload["additionalSkills"] = request.additional_skills
     if request.bot:
         payload["bot"] = request.bot
     compiled_attachments = list(getattr(execution_request, "attachments", []) or [])
@@ -2349,6 +2383,8 @@ def _runtime_send_response(
     return RuntimeSendResponse(
         accepted=bool(result.get("accepted", True)),
         taskId=str(result.get("taskId") or local_task_id),
+        status=result.get("status"),
+        queuePosition=result.get("queuePosition"),
         error=result.get("error"),
     )
 
@@ -2723,7 +2759,17 @@ async def _runtime_transfer_direct_hosts(
     peer_device_id: str,
 ) -> list[str]:
     hosts: list[str] = []
-    online_info = await device_service.get_device_online_info(user_id, device_id)
+    try:
+        online_info = await device_service.get_device_online_info(user_id, device_id)
+    except RedisError as exc:
+        logger.warning(
+            "runtime_transfer_direct_hosts_unavailable reason=redis_error "
+            "user_id=%s device_id=%s error=%s",
+            user_id,
+            device_id,
+            exc,
+        )
+        return []
     if isinstance(online_info, dict):
         _append_runtime_transfer_host(hosts, online_info.get("runtime_transfer_host"))
         _append_runtime_transfer_host(hosts, online_info.get("client_ip"))
@@ -3786,6 +3832,7 @@ def _normalized_address(address: RuntimeTaskAddress) -> RuntimeTaskAddress:
         deviceId=address.device_id,
         workspacePath=workspace_path,
         localTaskId=address.local_task_id.strip(),
+        runtimeHandle=address.runtime_handle,
     )
 
 
@@ -3826,6 +3873,11 @@ def _runtime_transcript_payload(
     before_cursor = getattr(request, "before_cursor", None)
     after_cursor = getattr(request, "after_cursor", None)
     include_full_content = getattr(request, "include_full_content", False)
+    conversation_context_only = getattr(
+        request,
+        "conversation_context_only",
+        False,
+    )
     if limit is not None:
         payload["limit"] = limit
     if before_cursor:
@@ -3834,6 +3886,8 @@ def _runtime_transcript_payload(
         payload["afterCursor"] = after_cursor
     if include_full_content:
         payload["includeFullContent"] = True
+    if conversation_context_only:
+        payload["conversationContextOnly"] = True
     return payload
 
 
@@ -4192,7 +4246,7 @@ def _build_direct_wework_runtime_execution_request(
 ) -> ExecutionRequest:
     """Build a direct Wework execution without resolving a Wegent Team."""
 
-    from app.services.auth import create_task_token
+    from app.services.auth import create_skill_identity_token, create_task_token
 
     user = _get_user(db, user_id)
     task_id = request.local_task_id or str(_runtime_execution_ids()[0])
@@ -4204,6 +4258,7 @@ def _build_direct_wework_runtime_execution_request(
     )
     model_config = dict(request.runtime_model_config or runtime_model_config or {})
     first_bot = request.bot[0] if request.bot else {}
+    origin = request.origin if isinstance(request.origin, dict) else {}
     execution_request = ExecutionRequest(
         task_id=task_id,
         subtask_id=f"{task_id}-assistant",
@@ -4238,12 +4293,29 @@ def _build_direct_wework_runtime_execution_request(
         collaboration_model="single",
         mode="code",
         task_mode="code",
+        preload_skills=list(request.additional_skills),
         attachments=[],
         auth_token=create_task_token(
             task_id=0,
             subtask_id=0,
             user_id=user.id,
             user_name=user.user_name,
+            dispatch_id=str(origin.get("dispatchId") or origin.get("dispatch_id") or "")
+            or None,
+            dispatch_role=str(
+                origin.get("dispatchRole") or origin.get("dispatch_role") or ""
+            )
+            or None,
+            manager_agent_id=str(
+                origin.get("managerAgentId") or origin.get("manager_agent_id") or ""
+            )
+            or None,
+        ),
+        skill_identity_token=create_skill_identity_token(
+            user_id=user.id,
+            user_name=user.user_name,
+            runtime_type="executor",
+            runtime_name=f"wework-runtime-{task_id}",
         ),
         runtime_permission_profile=":danger-full-access",
     )
@@ -4289,11 +4361,19 @@ def _apply_runtime_create_request(
     execution_request.runtime_project_key = request.runtime_project_key
     execution_request.runtime_project_name = request.runtime_project_name
     execution_request.runtime_workspace_roots = list(request.runtime_workspace_roots)
-    execution_request.project_plugin_ids = [
-        str(plugin["id"])
+    requested_plugin_ids = [
+        str(plugin["id"]).strip()
         for plugin in request.project_plugins
-        if plugin.get("id") is not None
+        if plugin.get("id") is not None and str(plugin["id"]).strip()
     ]
+    execution_request.project_plugin_ids = list(
+        dict.fromkeys(
+            [
+                *getattr(execution_request, "project_plugin_ids", []),
+                *requested_plugin_ids,
+            ]
+        )
+    )
     execution_request.runtime_executable_path = request.runtime_executable_path
     execution_request.claude_permission_mode = request.runtime_permission_mode
     execution_request.client_user_message_id = request.client_user_message_id
@@ -4418,7 +4498,7 @@ def _runtime_model_override_values(
     if not model_id:
         return None, None, False
     if runtime == "codex" and model_type == RUNTIME_MODEL_TYPE:
-        from app.services.chat.trigger.unified import (
+        from app.services.chat.trigger.request_preparation import (
             _build_codex_runtime_model_config,
         )
 
@@ -4430,7 +4510,7 @@ def _runtime_model_override_values(
         )
         return config, None, False
     if runtime == "codex" and model_type in CLOUD_MODEL_TYPES:
-        from app.services.chat.trigger.unified import (
+        from app.services.chat.trigger.request_preparation import (
             _build_cloud_gateway_model_config,
         )
 
@@ -4439,11 +4519,6 @@ def _runtime_model_override_values(
             db,
             model_name=model_id,
             creator=_get_user(db, user_id),
-            upstream_api_format=_string_model_option(
-                model_options,
-                CLOUD_MODEL_UPSTREAM_API_FORMAT_OPTION,
-            )
-            or "openai-responses",
             model_type=model_type,
             namespace=namespace,
             resource_user_id=resource_user_id,
@@ -4462,7 +4537,7 @@ def _runtime_model_override_values(
         from app.services.chat.config.model_resolver import (
             _find_model_with_namespace,
         )
-        from app.services.chat.trigger.unified import (
+        from app.services.chat.trigger.request_preparation import (
             build_wework_runtime_model_config,
         )
         from app.services.runtime_codex_model import (
@@ -4569,9 +4644,21 @@ def _positive_int_model_option(
     return parsed if parsed > 0 else None
 
 
-def _true_model_option(model_options: dict[str, Any], key: str) -> bool:
+def _boolean_model_option(
+    model_options: dict[str, Any],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
     value = model_options.get(key)
-    return isinstance(value, str) and value.strip().lower() == "true"
+    if not isinstance(value, str):
+        return default
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    return default
 
 
 def _apply_runtime_cloud_model_options(
@@ -4581,13 +4668,19 @@ def _apply_runtime_cloud_model_options(
     config["wework_model_kind"] = "cloud"
     config["tool_profile"] = "custom"
     config["codex_responses_compat_proxy"] = True
-    config["native_tool_search"] = _true_model_option(
+    upstream_api_format = str(
+        config.get("upstream_api_format") or "openai-responses"
+    ).strip()
+    native_by_default = upstream_api_format == "openai-responses"
+    config["native_tool_search"] = _boolean_model_option(
         model_options,
         CLOUD_MODEL_NATIVE_TOOL_SEARCH_OPTION,
+        default=native_by_default,
     )
-    config["native_namespace_tools"] = _true_model_option(
+    config["native_namespace_tools"] = _boolean_model_option(
         model_options,
         CLOUD_MODEL_NATIVE_NAMESPACE_TOOLS_OPTION,
+        default=native_by_default,
     )
     context_window = _positive_int_model_option(
         model_options,
@@ -4640,7 +4733,7 @@ def _apply_runtime_model_options(
     user: User,
     payload: SimpleNamespace,
 ) -> None:
-    from app.services.chat.trigger.unified import (
+    from app.services.chat.trigger.request_preparation import (
         _apply_user_runtime_config,
         _reasoning_from_model_options,
         _service_tier_from_model_options,
@@ -4768,9 +4861,11 @@ def _build_runtime_send_execution_request(
         workspace_source="local_path",
     )
     team_id = _runtime_address_team_id(address)
-    request = RuntimeTaskCreateRequest(
+    request = RuntimeTaskMaterializeRequest(
         schemaVersion=3 if team_id is not None else 2,
         wegentTeamId=team_id,
+        newSession=False,
+        taskId=address.local_task_id,
         deviceId=address.device_id,
         workspacePath=address.workspace_path,
         runtime="codex",
@@ -4781,12 +4876,14 @@ def _build_runtime_send_execution_request(
         attachmentIds=attachment_ids,
         additionalContext=additional_context,
     )
-    return _build_runtime_execution_request(
+    execution_request = _build_runtime_execution_request(
         db=db,
         user_id=user_id,
         request=request,
         target=target,
     )
+    execution_request.new_session = False
+    return execution_request
 
 
 def _runtime_address_team_id(address: RuntimeTaskAddress) -> Optional[int]:

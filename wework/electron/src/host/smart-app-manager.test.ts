@@ -1,7 +1,7 @@
 import { ZipArchive } from 'archiver'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,12 @@ import { SmartAppManager } from './smart-app-manager.js'
 import type { WorkbenchAppManifest } from '../runtime/workbench-dsh-runtime.js'
 import type { SmartAppVerificationReport } from './smart-app-verification-types.js'
 
+// The manager reaches the cloud through Chromium's network stack; unit tests exercise the HTTP
+// protocol against loopback fixtures with Node's implementation instead.
+vi.mock('electron', () => ({
+  net: { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+}))
+
 const roots: string[] = []
 
 afterEach(async () => {
@@ -18,6 +24,48 @@ afterEach(async () => {
 })
 
 describe('SmartAppManager', () => {
+  test('creates a workbench under Documents/WeworkSmartApps when no parent is selected', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-default-'))
+    roots.push(root)
+    const manager = createManager(root)
+
+    const created = await manager.createDirectory({
+      parentPath: '',
+      name: 'default-app',
+      displayName: '默认工作台',
+      description: '',
+      template: 'web',
+    })
+
+    expect(created.packagePath).toBe(
+      join(await realpath(root), 'Documents', 'WeworkSmartApps', 'default-app')
+    )
+    expect(created.manifest.description).toBe('')
+    expect((await stat(created.packagePath)).isDirectory()).toBe(true)
+  })
+
+  test('reports an unavailable default folder and accepts a chosen folder on retry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-default-error-'))
+    roots.push(root)
+    await writeFile(join(root, 'Documents'), 'not a directory')
+    const manager = createManager(root)
+    const input = {
+      parentPath: '',
+      name: 'chosen-app',
+      displayName: 'Chosen App',
+      description: '',
+      template: 'web',
+    }
+
+    await expect(manager.createDirectory(input)).rejects.toThrow(
+      'Smart app default save location is unavailable'
+    )
+    const chosenParent = join(root, 'chosen')
+    await mkdir(chosenParent)
+    const created = await manager.createDirectory({ ...input, parentPath: chosenParent })
+    expect(created.packagePath).toBe(join(await realpath(chosenParent), 'chosen-app'))
+  })
+
   test('previews, installs and exports a compatible Smart app', async () => {
     const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-'))
     roots.push(root)
@@ -219,6 +267,54 @@ describe('SmartAppManager', () => {
     ).rejects.toThrow('Smart app upload must use HTTPS')
   })
 
+  test('rejects Smart app upload redirects', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-upload-redirect-'))
+    roots.push(root)
+    const archivePath = join(root, 'smart-app.zip')
+    await writeFile(archivePath, 'smart-app-package')
+    let redirectedBytes = 0
+    const redirectTarget = createServer((request, response) => {
+      request.on('data', chunk => {
+        redirectedBytes += Buffer.from(chunk).byteLength
+      })
+      request.on('end', () => {
+        response.writeHead(204)
+        response.end()
+      })
+    })
+    await new Promise<void>(resolve => redirectTarget.listen(0, '127.0.0.1', resolve))
+    const targetAddress = redirectTarget.address()
+    if (!targetAddress || typeof targetAddress === 'string') {
+      throw new Error('Missing server address')
+    }
+    const uploadServer = createServer((_request, response) => {
+      response.writeHead(307, { location: `http://127.0.0.1:${targetAddress.port}/redirected` })
+      response.end()
+    })
+    await new Promise<void>(resolve => uploadServer.listen(0, '127.0.0.1', resolve))
+    const uploadAddress = uploadServer.address()
+    if (!uploadAddress || typeof uploadAddress === 'string') {
+      throw new Error('Missing server address')
+    }
+
+    try {
+      await expect(
+        createManager(root).upload(
+          archivePath,
+          `http://127.0.0.1:${uploadAddress.port}/api/smart-apps/submissions/1/artifact`
+        )
+      ).rejects.toThrow()
+      expect(redirectedBytes).toBe(0)
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        uploadServer.close(error => (error ? reject(error) : resolve()))
+      )
+      await new Promise<void>((resolve, reject) =>
+        redirectTarget.close(error => (error ? reject(error) : resolve()))
+      )
+    }
+  })
+
   test('creates linked apps, adds local plugins and copies marketplace apps for editing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-editable-'))
     roots.push(root)
@@ -405,6 +501,39 @@ describe('SmartAppManager', () => {
       'Smart app project is not a linked project root'
     )
   })
+
+  test('rejects and removes an oversized release archive', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'wework-smart-app-oversized-export-'))
+    roots.push(root)
+    const parent = join(root, 'projects')
+    const archivePath = join(root, 'oversized.zip')
+    await mkdir(parent)
+    await writeFile(archivePath, 'placeholder')
+    const report = verificationReport()
+    const manager = createManager(root, {
+      verify: vi.fn().mockResolvedValue(report),
+      inspect: vi.fn().mockResolvedValue(report),
+      pack: vi.fn().mockResolvedValue({
+        archivePath,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 50 * 1024 * 1024 + 1,
+        manifest: validManifest(),
+        report,
+      }),
+    })
+    const linked = await manager.createDirectory({
+      parentPath: parent,
+      name: 'oversized-app',
+      displayName: 'Oversized App',
+      description: 'Oversized export fixture',
+      template: 'web',
+    })
+
+    await expect(manager.export(linked.id)).rejects.toThrow(
+      '发布包超过 50 MB，请使用项目打包命令生成发布产物'
+    )
+    await expect(stat(archivePath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 })
 
 function createManager(
@@ -426,7 +555,8 @@ function createManager(
 ): SmartAppManager {
   return new SmartAppManager({
     dataDirectory: join(root, 'data'),
-    downloadsDirectory: join(root, 'downloads'),
+    documentsDirectory: () => join(root, 'Documents'),
+    downloadsDirectory: () => join(root, 'downloads'),
     logDirectory: join(root, 'logs'),
     runtimeRoot: join(root, 'runtime'),
     environment: {},

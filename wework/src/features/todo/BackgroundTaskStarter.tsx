@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef } from 'react'
 
 import type { CloudLoopItem, CloudProject } from '@/api/deliveries'
 import { createRuntimeUserMessage } from '@/features/workbench/runtimeUserMessage'
-import type { ProjectWithTasks, RuntimeTaskAddress } from '@/types/api'
+import { useWorkbenchPaneContext } from '@/features/workbench/useWorkbench'
+import { resolveRuntimeTaskProjects } from '@/lib/runtime-project'
+import { runtimeTaskProjectUiId } from '@/lib/runtime-task-workspace-binding'
+import type { ProjectWithTasks, RuntimeTaskAddress, RuntimeTaskCreateRequest } from '@/types/api'
 import { useProjectRuntimeTaskComposer } from './useProjectRuntimeTaskComposer'
 import { buildWorkItemRuntimeContext } from './workItemRuntimeContext'
 
@@ -12,8 +15,8 @@ interface BackgroundTaskStarterProps {
   task: CloudLoopItem
   input: string
   initialLocalProjectId?: number | null
+  taskRequest?: RuntimeTaskCreateRequest | null
   inheritFromTask?: RuntimeTaskAddress | null
-  workflowNodeId?: string
   prepareTask?: (
     address: RuntimeTaskAddress,
     localProject: ProjectWithTasks | null
@@ -32,30 +35,35 @@ export function BackgroundTaskStarter({
   task,
   input,
   initialLocalProjectId = null,
+  taskRequest = null,
   inheritFromTask = null,
-  workflowNodeId,
   prepareTask,
   onTaskCreated,
   onAddressChange,
   onError,
 }: BackgroundTaskStarterProps) {
+  const { state } = useWorkbenchPaneContext()
   const startedRef = useRef(false)
   const addressReportedRef = useRef(false)
-  const selectedLocalProject = useMemo(
-    () =>
-      localProjects.find(candidate => candidate.id === initialLocalProjectId) ??
-      localProjects.find(candidate => String(candidate.id) === String(project.id)) ??
-      localProjects[0] ??
-      null,
-    [initialLocalProjectId, localProjects, project.id]
+  const runtimeTaskProjects = useMemo(
+    () => resolveRuntimeTaskProjects(localProjects, state?.runtimeWork),
+    [localProjects, state?.runtimeWork]
   )
-  const runtimeContext = useMemo(
-    () => buildWorkItemRuntimeContext(project, task, workflowNodeId),
-    [project, task, workflowNodeId]
-  )
+  const selectedLocalProject = useMemo(() => {
+    const requestedProjectId = runtimeTaskProjectUiId(state?.runtimeWork, taskRequest)
+    return (
+      runtimeTaskProjects.find(candidate => candidate.id === requestedProjectId) ??
+      runtimeTaskProjects.find(candidate => candidate.id === initialLocalProjectId) ??
+      runtimeTaskProjects.find(candidate => String(candidate.id) === String(project.id)) ??
+      runtimeTaskProjects[0] ??
+      null
+    )
+  }, [initialLocalProjectId, project.id, runtimeTaskProjects, state?.runtimeWork, taskRequest])
+  const runtimeContext = useMemo(() => buildWorkItemRuntimeContext(project, task), [project, task])
   const createConversation = useProjectRuntimeTaskComposer({
     project: selectedLocalProject,
     workspaceSource: inheritFromTask,
+    taskRequest,
     runtimeContext,
     prepareTask,
     onTaskCreated,

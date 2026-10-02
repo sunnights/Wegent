@@ -84,6 +84,31 @@ def _subtask(
     )
 
 
+def test_ordered_history_includes_actual_sender_name(test_db: Session) -> None:
+    store = SqlAlchemySubtaskStore()
+    test_db.add(_task(442, owner_id=5, is_group_chat=True))
+    test_db.add(
+        User(
+            id=7,
+            user_name="212680",
+            password_hash="hash",
+            email="b@example.com",
+            is_active=True,
+        )
+    )
+    test_db.add(
+        _subtask(subtask_id=661, task_id=442, user_id=5, sender_user_id=7, message_id=1)
+    )
+    test_db.commit()
+    for order in ("id", "message_id", "created_at"):
+        rows = store.list_by_task_ordered(
+            test_db, task_id=442, owner_user_id=5, order_by=order
+        )
+        assert rows[0].sender_user_id == 7
+        assert rows[0].sender_user_name == "212680"
+        assert rows[0].user_id == 5
+
+
 def test_list_by_task_ordered_excludes_subtasks(test_db: Session) -> None:
     store = SqlAlchemySubtaskStore()
     test_db.add(_task(6, owner_id=10))
@@ -360,6 +385,55 @@ def test_get_by_task_message_or_parent_role(test_db: Session) -> None:
         )
         == assistant_subtask
     )
+
+
+def test_get_user_by_task_source_message_scopes_identity_and_task_owner(
+    test_db: Session,
+) -> None:
+    store = SqlAlchemySubtaskStore()
+    test_db.add(_task(17, owner_id=10, is_group_chat=True))
+    message = _subtask(
+        subtask_id=171, task_id=17, user_id=7, sender_user_id=7, message_id=1
+    )
+    message.result = {
+        "source": {
+            "channel_type": "dingtalk",
+            "channel_id": 77,
+            "message_id": "external-1",
+        }
+    }
+    test_db.add(message)
+    test_db.commit()
+    identity = {
+        "task_id": 17,
+        "channel_type": "dingtalk",
+        "channel_id": 77,
+        "message_id": "external-1",
+    }
+
+    assert store.get_user_by_task_source_message(test_db, **identity) == message
+    assert (
+        store.get_user_by_task_source_message(test_db, **identity, owner_user_id=10)
+        == message
+    )
+    for mismatch in (
+        {"task_id": 18},
+        {"channel_type": "other"},
+        {"channel_id": 78},
+        {"message_id": "external-2"},
+        {"owner_user_id": 7},
+    ):
+        assert (
+            store.get_user_by_task_source_message(test_db, **{**identity, **mismatch})
+            is None
+        )
+    message.role = SubtaskRole.ASSISTANT
+    test_db.flush()
+    assert store.get_user_by_task_source_message(test_db, **identity) is None
+    message.role = SubtaskRole.USER
+    message.result = None
+    test_db.flush()
+    assert store.get_user_by_task_source_message(test_db, **identity) is None
 
 
 def test_mark_task_subtasks_by_statuses_updates_matching_rows(

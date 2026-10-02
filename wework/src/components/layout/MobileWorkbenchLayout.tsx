@@ -219,6 +219,7 @@ const MobileWorkbenchPane = memo(function MobileWorkbenchPane({
         }
       : undefined,
     onModelSelectorOpenChange: (open, closeReason) => {
+      effectiveProjectChat.onModelSelectorOpenChange?.(open, closeReason)
       if (!open && closeReason !== 'selection') pendingModelRetryRef.current = null
     },
     onRefineTrialPrompt: refinePluginTrialPrompt,
@@ -398,6 +399,7 @@ const MobileWorkbenchPane = memo(function MobileWorkbenchPane({
               )}
             </header>
             <ScrollableMessageArea
+              workspacePath={workspaceTarget?.path}
               messages={paneMessages}
               loading={paneSession.transcriptLoading}
               isWaitingForAssistant={
@@ -408,8 +410,6 @@ const MobileWorkbenchPane = memo(function MobileWorkbenchPane({
               turnNavigation={paneSession.turnNavigation}
               loadedTranscriptRanges={paneSession.loadedTranscriptRanges}
               onLoadMoreBefore={paneSession.loadMoreTranscriptBefore}
-              onLoadFullTranscript={paneSession.loadFullTranscript}
-              loadingFullTranscript={paneSession.transcriptLoadingFullContent}
               onLoadTurnNavigationItem={paneSession.loadTranscriptTurnNavigationItem}
               onLoadTranscriptGap={paneSession.loadTranscriptGap}
               conversationKey={
@@ -534,6 +534,7 @@ const MobileWorkbenchPane = memo(function MobileWorkbenchPane({
                       }
                       taskPlan={paneSession.taskPlan}
                       onCancelQueuedMessage={paneSession.cancelQueuedMessage}
+                      onForceStartQueuedMessage={paneSession.forceStartQueuedMessage}
                       onReorderQueuedMessages={paneSession.reorderQueuedMessages}
                       queuePaused={paneSession.queuedMessagesPaused}
                       onResumeQueue={paneSession.resumeQueuedMessages}
@@ -647,6 +648,7 @@ const MobileWorkbenchPane = memo(function MobileWorkbenchPane({
                 }
                 taskPlan={paneSession.taskPlan}
                 onCancelQueuedMessage={paneSession.cancelQueuedMessage}
+                onForceStartQueuedMessage={paneSession.forceStartQueuedMessage}
                 onReorderQueuedMessages={paneSession.reorderQueuedMessages}
                 queuePaused={paneSession.queuedMessagesPaused}
                 onResumeQueue={paneSession.resumeQueuedMessages}

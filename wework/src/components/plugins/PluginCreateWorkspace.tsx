@@ -10,7 +10,7 @@ import { useTranslation } from '@/hooks/useTranslation'
 import { navigateTo } from '@/lib/navigation'
 import { focusComposerAtEnd } from '@/lib/workbenchComposerFocus'
 import { resolveProjectRuntimeWorkspaceTarget } from '@/lib/workspace-target'
-import { track } from '@/telemetry/client'
+import { beginOperation } from '@/telemetry/operationBus'
 
 interface PluginCreateWorkspaceProps {
   sidebarCollapsed?: boolean
@@ -133,15 +133,16 @@ export function PluginCreateWorkspace({ topBarLeftActions }: PluginCreateWorkspa
     setIsSubmitting(true)
     setSubmitError(null)
     const pluginCreatorSkill = {
-      name: 'plugin-creator',
+      name: 'wework-plugin-creator',
       namespace: 'codex',
       is_public: false,
     }
     projectChat.setSelectedSkills([pluginCreatorSkill])
     const message = [
       editPluginName
-        ? `Use the Codex plugin-creator workflow to continue editing the plugin "${editPluginName}" in Wegent.`
-        : 'Use the Codex plugin-creator workflow to create a Codex-compatible plugin for Wegent.',
+        ? `Use the wework-plugin-creator skill to continue editing the plugin "${editPluginName}" in Wegent.`
+        : 'Use the wework-plugin-creator skill to create a Codex-compatible plugin for Wegent.',
+      'Read wework-plugin-creator before scaffolding. For plugin-owned local authentication, use its bundled accountAuth SDK, implement provider callbacks and delegated business commands, and run its Wework validator on the complete manifest.',
       'Choose the storage flow from the Executor environment:',
       '- When DEVICE_TYPE=cloud, the Task workspace is the draft. Create or edit the source only under "$WEGENT_TASK_WORKSPACE/plugins/<plugin-name>". Do not install it into a personal marketplace and do not write the source under $HOME.',
       `- Otherwise, use the existing desktop flow: create and install it in the registered managed local marketplace named "${WEWORK_PERSONAL_MARKETPLACE_ID}". Resolve that marketplace's existing local path first, do not use the defaults under ~/plugins or ~/.agents, and keep both managed marketplace manifests in sync.`,
@@ -155,6 +156,7 @@ export function PluginCreateWorkspace({ topBarLeftActions }: PluginCreateWorkspa
       value,
     ].join('\n')
 
+    const attempt = beginOperation('plugin.create_request')
     try {
       const sent = await sendCurrentInput(message, {
         forceNewTask: true,
@@ -162,13 +164,13 @@ export function PluginCreateWorkspace({ topBarLeftActions }: PluginCreateWorkspa
         onError: setSubmitError,
       })
       if (sent) {
-        track('feature_action_completed', { domain: 'plugin', action: 'create' })
+        attempt.succeed()
         navigateTo('/')
       } else {
-        track('operation_failed', { operation: 'plugin_action' })
+        attempt.fail('request')
       }
     } catch (error) {
-      track('operation_failed', { operation: 'plugin_action' })
+      attempt.fail('request')
       setSubmitError(error instanceof Error ? error.message : String(error))
     } finally {
       setIsSubmitting(false)

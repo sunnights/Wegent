@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from 'react'
-import { cloudDesktopExtension } from '@extensions/cloud-desktop'
+import { deviceSurfaceExtension } from '@extensions/device-surface'
 import { TransientNotice } from '@/components/common/TransientNotice'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ActionMenu } from '@/components/common/ActionMenu'
@@ -117,6 +117,7 @@ import type { BrowserAnnotationCommand } from '@/types/browser-annotation'
 import { browserAnnotationStateToContexts } from '@/lib/browser-annotation-context'
 import { isElectronRuntime } from '@/lib/runtime-environment'
 import { ElectronEmbeddedBrowserView } from './ElectronEmbeddedBrowserView'
+import { resetElectronEmbeddedBrowserView } from './electronEmbeddedBrowserHost'
 
 const EMBEDDED_BROWSER_STATE_INTERVAL_MS = 1000
 const EMBEDDED_BROWSER_BOUNDS_DEBOUNCE_MS = 80
@@ -486,8 +487,8 @@ export function WorkspaceBrowserTabPanel({
   } | null>(null)
   const embeddedBrowserAvailable = canUseEmbeddedBrowser()
   const activePageUrl = pageUrl ?? currentUrl
-  const internalDesktopPage = Boolean(
-    activePageUrl && cloudDesktopExtension.isInternalPageUrl(activePageUrl)
+  const internalExtensionPage = Boolean(
+    activePageUrl && deviceSurfaceExtension.isInternalPageUrl(activePageUrl)
   )
   const embeddedBrowserOccluded =
     browserOcclusion.overlayIds.size > 0 ||
@@ -722,22 +723,12 @@ export function WorkspaceBrowserTabPanel({
 
   useEffect(() => {
     const listener = listenEmbeddedBrowserCloseRequests(event => {
-      if (!activeRef.current || event.label !== currentLabelRef.current) return
-      if (event.nativeLabel !== nativeLabelRef.current) {
-        console.info(
-          '[Wework] Embedded browser close ignored',
-          JSON.stringify({
-            currentNativeLabel: nativeLabelRef.current,
-            eventNativeLabel: event.nativeLabel,
-            label: event.label,
-          })
-        )
-        return
-      }
+      if (event.label !== currentLabelRef.current) return
       console.info(
         '[Wework] Embedded browser close consumed',
         JSON.stringify({ label: event.label, nativeLabel: event.nativeLabel })
       )
+      resetElectronEmbeddedBrowserView(event.label)
       nativeBrowserOpenRef.current = false
       nativeLabelRef.current = null
       adoptedDownloadOwnerLabelRef.current = null
@@ -1041,7 +1032,7 @@ export function WorkspaceBrowserTabPanel({
         nativeBrowserOpen: nativeBrowserOpenRef.current,
       })
       if (
-        internalDesktopPage ||
+        internalExtensionPage ||
         !embeddedBrowserAvailable ||
         !nativeBrowserOpenRef.current ||
         !currentUrl
@@ -1079,7 +1070,7 @@ export function WorkspaceBrowserTabPanel({
       applyAnnotationState,
       currentUrl,
       embeddedBrowserAvailable,
-      internalDesktopPage,
+      internalExtensionPage,
       label,
       t,
     ]
@@ -1235,10 +1226,10 @@ export function WorkspaceBrowserTabPanel({
       const nextUrl = pageState.url || currentUrlRef.current
       if (
         nextUrl &&
-        cloudDesktopExtension.isInternalPageUrl(nextUrl) &&
+        deviceSurfaceExtension.isInternalPageUrl(nextUrl) &&
         annotationModeRef.current
       ) {
-        logBrowserAnnotation('exit annotation mode for internal desktop page', { label })
+        logBrowserAnnotation('exit annotation mode for internal extension page', { label })
         exitAnnotationMode()
       }
       if (!pageState.isLoading && nextUrl && pendingNavigationUrlRef.current === nextUrl) {
@@ -2013,7 +2004,7 @@ export function WorkspaceBrowserTabPanel({
   }
 
   const handleOpenExternal = () => {
-    if (!activePageUrl || internalDesktopPage) return
+    if (!activePageUrl || internalExtensionPage) return
     void openExternalUrl(activePageUrl, { target: 'system' })
   }
 
@@ -2127,7 +2118,7 @@ export function WorkspaceBrowserTabPanel({
 
   // --- Find in page (JS injection; wry has no native find API) ---
 
-  const canUsePageFind = Boolean(activePageUrl) && !internalDesktopPage
+  const canUsePageFind = Boolean(activePageUrl) && !internalExtensionPage
 
   const runFindSearch = useCallback(
     (query: string) => {
@@ -2362,7 +2353,7 @@ export function WorkspaceBrowserTabPanel({
         !active && 'hidden'
       )}
     >
-      {annotationMode && !internalDesktopPage ? (
+      {annotationMode && !internalExtensionPage ? (
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--color-browser-annotation-border)] bg-[var(--color-browser-annotation-surface)] px-2 text-sm text-text-primary">
           <BrowserToolbarButton
             testId="workspace-browser-annotation-close-button"
@@ -2500,7 +2491,7 @@ export function WorkspaceBrowserTabPanel({
           <BrowserToolbarButton
             testId="workspace-browser-annotate-button"
             label={t('workbench.browser_annotation_start')}
-            disabled={!activePageUrl || !embeddedBrowserAvailable || internalDesktopPage}
+            disabled={!activePageUrl || !embeddedBrowserAvailable || internalExtensionPage}
             onClick={() => void enterAnnotationMode()}
           >
             <MessageSquarePlus className="h-4 w-4" />
@@ -2508,7 +2499,7 @@ export function WorkspaceBrowserTabPanel({
           <BrowserToolbarButton
             testId="workspace-browser-open-external-button"
             label={t('workbench.browser_open_external')}
-            disabled={!activePageUrl || internalDesktopPage}
+            disabled={!activePageUrl || internalExtensionPage}
             onClick={handleOpenExternal}
           >
             <ExternalLink className="h-4 w-4" />
@@ -2539,7 +2530,7 @@ export function WorkspaceBrowserTabPanel({
                     ? t('workbench.browser_device_toolbar_hide')
                     : t('workbench.browser_device_toolbar_show'),
                   testId: 'workspace-browser-device-toolbar-item',
-                  disabled: !activePageUrl || internalDesktopPage,
+                  disabled: !activePageUrl || internalExtensionPage,
                   onSelect: toggleDeviceToolbar,
                 },
                 {
@@ -2586,7 +2577,7 @@ export function WorkspaceBrowserTabPanel({
           ) : null}
         </div>
       )}
-      {findOpen && (!annotationMode || internalDesktopPage) ? (
+      {findOpen && (!annotationMode || internalExtensionPage) ? (
         <BrowserFindBar
           query={findQuery}
           result={findResult}
@@ -2596,7 +2587,7 @@ export function WorkspaceBrowserTabPanel({
           onClose={closeFindBar}
         />
       ) : null}
-      {deviceToolbar.isEnabled && (!annotationMode || internalDesktopPage) ? (
+      {deviceToolbar.isEnabled && (!annotationMode || internalExtensionPage) ? (
         <BrowserDeviceToolbar
           state={deviceToolbar}
           zoomPercent={zoomPercent}
@@ -2686,7 +2677,7 @@ export function WorkspaceBrowserTabPanel({
           ) : null}
         </div>
       ) : null}
-      {(!annotationMode || internalDesktopPage) && downloadsOpen ? (
+      {(!annotationMode || internalExtensionPage) && downloadsOpen ? (
         <div
           data-testid="workspace-browser-downloads-panel"
           className="flex max-h-40 shrink-0 flex-col overflow-y-auto border-b border-border bg-surface px-3 py-2"

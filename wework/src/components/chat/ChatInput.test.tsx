@@ -13,13 +13,27 @@ import type {
 } from '@/types/api'
 import type { GuidanceWorkbenchMessage, QueuedWorkbenchMessage } from '@/types/workbench'
 import { WORKSPACE_PATH_DRAG_TYPE } from '@/lib/workspace-path-transfer'
+import * as runtimeEnvironment from '@/lib/runtime-environment'
+import * as desktopHost from '@/api/dsh/desktopHost'
+import { useComposerAttachments } from '@wegent/collaboration/composer'
 import { SELECTED_TEXT_DRAG_TYPE } from '@/lib/selected-text-drag'
+import { WorkbenchContext } from '@/features/workbench/workbenchContexts'
+import type { WorkbenchContextValue } from '@/features/workbench/workbenchContextTypes'
 
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation: () => ({
+    i18n: { language: 'zh-CN' },
     t: (
       key: string,
-      options?: string | { action?: string; count?: number; device?: string; location?: string },
+      options?:
+        | string
+        | {
+            action?: string
+            count?: number
+            device?: string
+            location?: string
+            defaultValue?: string
+          },
       interpolation?: { model?: string }
     ) => {
       if (typeof options === 'string') {
@@ -36,7 +50,7 @@ vi.mock('@/hooks/useTranslation', () => ({
       if (key === 'workbench.remove_code_comments') {
         return '移除代码评论'
       }
-      return key
+      return options?.defaultValue ?? key
     },
   }),
 }))
@@ -96,6 +110,24 @@ function projectChatControls(overrides: Partial<ProjectChatControls> = {}): Proj
     listLocalApps: vi.fn().mockResolvedValue([]),
     ...overrides,
   }
+}
+
+function AttachmentChatInput({ upload }: { upload: (file: File) => Promise<Attachment> }) {
+  const [value, setValue] = useState('')
+  const attachments = useComposerAttachments({
+    uploadAttachment: upload,
+    deleteAttachment: vi.fn(),
+  })
+  return (
+    <ChatInput
+      value={value}
+      onChange={setValue}
+      onSubmit={vi.fn()}
+      disabled={false}
+      variant="desktop"
+      projectChat={projectChatControls(attachments)}
+    />
+  )
 }
 
 const REMOTE_WORKSPACE_TARGET = {
@@ -223,7 +255,8 @@ describe('ChatInput', () => {
       'shadow-[0_0_0_0.5px_rgba(13,13,13,0.12),0_3px_7.5px_rgba(0,0,0,0.04),0_0_20px_rgba(0,0,0,0.05)]'
     )
     expect(input).toHaveAttribute('rows', '2')
-    expect(input).toHaveClass('min-h-12', 'max-h-[112px]', 'pt-1', 'placeholder:text-text-muted/55')
+    expect(input).toHaveClass('min-h-12', 'pt-1', 'placeholder:text-text-muted/55')
+    expect(input.closest('[data-composer-scroll-container]')).toBeInTheDocument()
     fireEvent.click(input)
     expect(form).toHaveAttribute('data-short-expanded', 'true')
     fireEvent.pointerDown(document.body)
@@ -285,6 +318,27 @@ describe('ChatInput', () => {
     expect(editor).toHaveFocus()
     expect(screen.getByTestId('send-message-button')).toBeDisabled()
   })
+
+  test.each(['desktop', 'compact'] as const)(
+    'keeps the %s send action disabled until model selection is ready',
+    async variant => {
+      const onSubmit = vi.fn()
+      render(
+        <ChatInput
+          value="new task"
+          onChange={vi.fn()}
+          onSubmit={onSubmit}
+          disabled={false}
+          variant={variant}
+          projectChat={projectChatControls({ isModelSelectionReady: false })}
+        />
+      )
+
+      expect(screen.getByTestId('send-message-button')).toBeDisabled()
+      await userEvent.click(screen.getByTestId('send-message-button'))
+      expect(onSubmit).not.toHaveBeenCalled()
+    }
+  )
 
   test('does not move selection when an unfocused composer syncs its value', async () => {
     const renderComposers = (backgroundValue?: string) => (
@@ -494,7 +548,9 @@ describe('ChatInput', () => {
 
     expect(screen.getByTestId('runtime-plan-progress')).toHaveClass('z-0')
     expect(screen.getByTestId('project-chat-composer-form')).toHaveClass('z-10')
-    expect(await screen.findByTestId('composer-plugin-picker')).toHaveClass('z-popover')
+    const picker = await screen.findByTestId('composer-plugin-picker')
+    expect(picker).toHaveClass('z-system-popover')
+    expect(picker.parentElement).toBe(document.body)
   })
 
   test('shows the plan mode pill when plan mode is selected', async () => {
@@ -554,17 +610,21 @@ describe('ChatInput', () => {
         onSubmit={vi.fn()}
         disabled={false}
         variant="desktop"
+        collapseWhenIdle
         isStreaming
         onPause={onPause}
       />
     )
 
+    const form = screen.getByTestId('project-chat-composer-form')
+    expect(form).toHaveAttribute('data-short-expanded', 'false')
     expect(screen.getByTestId('pause-response-button')).toBeInTheDocument()
     expect(screen.queryByTestId('send-message-button')).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId('pause-response-button'))
 
     expect(onPause).toHaveBeenCalledTimes(1)
+    expect(form).toHaveAttribute('data-short-expanded', 'true')
   })
 
   test('shows desktop send button for a draft while the assistant is streaming', async () => {
@@ -589,6 +649,46 @@ describe('ChatInput', () => {
     expect(onSubmit).toHaveBeenCalledWith('继续修复')
   })
 
+  test('uses the selected follow-up behavior for the primary streaming action', async () => {
+    const onSubmit = vi.fn()
+
+    render(
+      <WorkbenchContext.Provider
+        value={
+          {
+            services: {},
+            state: {
+              user: {
+                id: 1,
+                user_name: 'alice',
+                email: 'alice@example.com',
+                preferences: {
+                  send_key: 'cmd_enter',
+                  follow_up_behavior: 'guide',
+                },
+              },
+            },
+          } as WorkbenchContextValue
+        }
+      >
+        <ChatInput
+          value="调整当前回复"
+          onChange={vi.fn()}
+          onSubmit={onSubmit}
+          disabled={false}
+          variant="desktop"
+          isStreaming
+        />
+      </WorkbenchContext.Provider>
+    )
+
+    await userEvent.click(screen.getByTestId('send-message-button'))
+
+    expect(onSubmit).toHaveBeenCalledWith('调整当前回复', {
+      guideWhenBusy: true,
+    })
+  })
+
   test('offers interrupt-and-send while the assistant is streaming', async () => {
     const onSubmit = vi.fn()
 
@@ -604,8 +704,14 @@ describe('ChatInput', () => {
     )
 
     const menuButton = screen.getByTestId('send-mode-menu-button')
-    expect(menuButton).toHaveAttribute('title', '选择发送方式')
+    expect(menuButton).not.toHaveAttribute('title')
     expect(menuButton.querySelector('.lucide-chevron-down')).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    fireEvent.pointerEnter(menuButton.parentElement as HTMLElement)
+    act(() => vi.advanceTimersByTime(700))
+    expect(screen.getByTestId('send-mode-menu-button-tooltip')).toHaveTextContent('选择发送方式')
+    vi.useRealTimers()
 
     await userEvent.click(menuButton)
     expect(
@@ -613,7 +719,9 @@ describe('ChatInput', () => {
     ).toBeInTheDocument()
     const sendAfterTurnOption = screen.getByTestId('send-after-turn-option')
     expect(sendAfterTurnOption.querySelector('.lucide-corner-down-left')).toBeInTheDocument()
-    expect(screen.getByTestId('guide-current-turn-option')).toHaveTextContent('⌘')
+    expect(
+      screen.getByTestId('guide-current-turn-option').querySelector('.lucide-corner-down-left')
+    ).not.toBeInTheDocument()
     expect(screen.getByTestId('interrupt-and-send-option')).toHaveTextContent('⇧')
     await userEvent.click(screen.getByTestId('interrupt-and-send-option'))
 
@@ -737,6 +845,65 @@ describe('ChatInput', () => {
 
     expect(setSelectedModel).toHaveBeenCalledWith(targetModel)
     expect(screen.queryByTestId('model-switch-warning-dialog')).not.toBeInTheDocument()
+  })
+
+  test('continues in a new referenced conversation when switching Codex providers', async () => {
+    const activeModel: UnifiedModel = {
+      name: 'gpt-5.6-sol',
+      type: 'runtime',
+      provider: 'local',
+      displayName: 'GPT 5.6 Sol',
+      isActive: true,
+      config: { weworkModelKind: 'codex-official' },
+    }
+    const targetModel: UnifiedModel = {
+      name: 'router-model',
+      type: 'runtime',
+      provider: 'local',
+      displayName: 'Router Model',
+      isActive: true,
+      config: {
+        weworkModelKind: 'codex-provider',
+        codexProviderId: 'wecode-openai',
+      },
+    }
+    const setSelectedModel = vi.fn()
+    const continueInNewConversation = vi.fn()
+
+    render(
+      <ChatInput
+        value="继续排查"
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+        disabled={false}
+        variant="desktop"
+        projectChat={projectChatControls({
+          models: [activeModel, targetModel],
+          activeModel,
+          selectedModel: activeModel,
+          setSelectedModel,
+          continueInNewConversation,
+        })}
+      />
+    )
+
+    await userEvent.click(screen.getByTestId('model-selector-button'))
+    await userEvent.hover(screen.getByTestId('model-control-menu-model'))
+    await userEvent.click(screen.getByTestId('model-option-router-model'))
+
+    expect(screen.getByTestId('model-switch-warning-dialog')).toHaveTextContent(
+      'Router Model uses a different model provider'
+    )
+    expect(screen.getByTestId('model-switch-warning-confirm-button')).toHaveTextContent(
+      'Continue in new conversation'
+    )
+
+    await userEvent.click(screen.getByTestId('model-switch-warning-confirm-button'))
+
+    expect(continueInNewConversation).toHaveBeenCalledWith(targetModel, undefined, {
+      draft: '继续排查',
+    })
+    expect(setSelectedModel).not.toHaveBeenCalled()
   })
 
   test('does not warn when selecting a model before a conversation has an active model', async () => {
@@ -872,6 +1039,48 @@ describe('ChatInput', () => {
     expect(onCancelQueuedMessage).toHaveBeenCalledWith('queued-1')
   })
 
+  test('renders native queued follow-up actions without local queue controls', async () => {
+    const onForceStartQueuedMessage = vi.fn()
+    const onCancelQueuedMessage = vi.fn()
+
+    render(
+      <ChatInput
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+        disabled={false}
+        variant="desktop"
+        queuedMessages={[
+          {
+            id: 'runtime-queued-1',
+            content: '继续修复并行问题',
+            status: 'queued',
+            runtimeQueued: true,
+            runtimeQueuePosition: 2,
+            createdAt: '2026-09-10T15:00:00.000+08:00',
+          },
+        ]}
+        onForceStartQueuedMessage={onForceStartQueuedMessage}
+        onCancelQueuedMessage={onCancelQueuedMessage}
+        onSendQueuedAsGuidance={vi.fn()}
+        onInterruptAndSendQueuedMessage={vi.fn()}
+        onEditQueuedMessage={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('排队中 · 第 2 位')).toBeInTheDocument()
+    expect(screen.getByTestId('queue-force-start-button-runtime-queued-1')).toBeInTheDocument()
+    expect(screen.queryByTestId('queue-guidance-button-runtime-queued-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('queue-interrupt-button-runtime-queued-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('queue-more-button-runtime-queued-1')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId('queue-force-start-button-runtime-queued-1'))
+    await userEvent.click(screen.getByTestId('queue-cancel-button-runtime-queued-1'))
+
+    expect(onForceStartQueuedMessage).toHaveBeenCalledWith('runtime-queued-1')
+    expect(onCancelQueuedMessage).toHaveBeenCalledWith('runtime-queued-1')
+  })
+
   test('restores queued message text into the composer when editing', async () => {
     function Harness() {
       const [value, setValue] = useState('')
@@ -943,7 +1152,7 @@ describe('ChatInput', () => {
 
     const interruptButton = screen.getByTestId('queue-interrupt-button-sending-guidance')
     expect(screen.getByText('引导中')).toBeInTheDocument()
-    expect(interruptButton).toHaveTextContent('workbench.interrupt_and_send_short')
+    expect(interruptButton).toHaveTextContent('立即发送')
     expect(interruptButton).toHaveClass('text-text-secondary', 'hover:bg-muted')
     expect(interruptButton).not.toHaveClass('border', 'bg-base', 'shadow-sm')
     expect(screen.queryByTestId('queue-guidance-button-sending-guidance')).not.toBeInTheDocument()
@@ -1004,6 +1213,7 @@ describe('ChatInput', () => {
         disabled={false}
         variant="desktop"
         queuedMessages={queuedMessages}
+        onReorderQueuedMessages={vi.fn()}
         guidanceMessages={[]}
       />
     )
@@ -1396,6 +1606,62 @@ describe('ChatInput', () => {
     expect(screen.getByTestId('attachment-file-input')).not.toHaveAttribute('accept')
   })
 
+  test.each([
+    ['test-document.md', 'text/markdown'],
+    ['test-document.txt', 'text/plain'],
+    ['test-document.pdf', 'application/pdf'],
+  ])('keeps a selected %s in a file tile throughout upload', async (filename, mimeType) => {
+    const file = new File(['test file content'], filename, { type: mimeType })
+    let finishUpload!: (attachment: Attachment) => void
+    const upload = vi.fn(
+      () =>
+        new Promise<Attachment>(resolve => {
+          finishUpload = resolve
+        })
+    )
+    render(<AttachmentChatInput upload={upload} />)
+
+    await userEvent.click(screen.getByTestId('add-context-button'))
+    const fileInput = screen.getByTestId('attachment-file-input')
+    await userEvent.upload(fileInput, file)
+
+    expect(upload).toHaveBeenCalledWith(file, expect.any(Function))
+    expect(fileInput).toHaveValue('')
+    const editor = screen.getByTestId('chat-message-input')
+    const pending = screen.getByTestId('uploading-attachment-badge')
+    expect(pending).toHaveTextContent(filename)
+    expect(pending).toHaveAttribute('aria-busy', 'true')
+    expect(pending).toHaveClass('w-40', 'h-[122px]')
+    expect(editor.contains(pending)).toBe(false)
+    expect(editor).toHaveValue('')
+
+    await act(async () =>
+      finishUpload({
+        id: 101,
+        filename,
+        file_size: file.size,
+        mime_type: mimeType,
+        file_extension: filename.slice(filename.lastIndexOf('.')),
+        status: 'ready',
+        created_at: '2026-09-19T00:00:00Z',
+      })
+    )
+
+    const ready = await screen.findByTestId('attachment-badge')
+    expect(screen.queryByTestId('uploading-attachment-badge')).not.toBeInTheDocument()
+    expect(ready).toHaveClass('w-40', 'h-[122px]')
+    expect(ready).toHaveTextContent(filename)
+    expect(ready).not.toHaveTextContent('test file content')
+    expect(screen.queryByTestId('attachment-text-preview')).not.toBeInTheDocument()
+    expect(editor.contains(ready)).toBe(false)
+    expect(editor).toHaveValue('')
+    expect(screen.getByTestId('send-message-button')).toBeEnabled()
+
+    await userEvent.click(within(ready).getByTestId('remove-attachment-button'))
+    await waitFor(() => expect(screen.queryByTestId('attachment-badge')).not.toBeInTheDocument())
+    expect(screen.getByTestId('send-message-button')).toBeDisabled()
+  })
+
   test('renders desktop context usage indicator with compact action when usage is available', async () => {
     const onSubmit = vi.fn()
     const onCompactContext = vi.fn()
@@ -1500,9 +1766,59 @@ describe('ChatInput', () => {
       'src',
       'blob:clipboard-preview'
     )
+    expect(screen.getByTestId('pending-image-attachment')).toHaveClass('w-40', 'h-[122px]')
     expect(screen.queryByTestId('uploading-attachment-badge')).not.toBeInTheDocument()
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
   })
+
+  test.each(['paste', 'drop'] as const)(
+    'renders a local Markdown file %s as an attachment outside the text editor',
+    async action => {
+      const file = new File(['test file content'], 'test-document.md', { type: 'text/markdown' })
+      const upload = vi.fn().mockResolvedValue({
+        id: 101,
+        filename: file.name,
+        file_size: file.size,
+        mime_type: file.type,
+        file_extension: '.md',
+        status: 'ready',
+        created_at: '2026-09-19T00:00:00Z',
+      })
+      const runtimeSpy = vi.spyOn(runtimeEnvironment, 'isDesktopRuntime').mockReturnValue(true)
+      const hostSpy = vi
+        .spyOn(desktopHost, 'invokeDesktopHost')
+        .mockResolvedValue([{ path: '/tmp/test-document.md', isDirectory: false }])
+      try {
+        render(<AttachmentChatInput upload={upload} />)
+        const editor = screen.getByTestId('chat-message-input')
+        const transfer = {
+          types: ['Files', 'text/uri-list'],
+          files: [file],
+          getData: (type: string) =>
+            type === 'text/uri-list' ? 'file:///tmp/test-document.md' : '',
+        }
+        fireEvent[action](
+          editor,
+          action === 'paste' ? { clipboardData: transfer } : { dataTransfer: transfer }
+        )
+        await waitFor(() => expect(upload).toHaveBeenCalledWith(file, expect.any(Function)))
+        const card = await screen.findByTestId('attachment-badge')
+        expect(card).toHaveTextContent('test-document.md')
+        expect(card).not.toHaveTextContent('test file content')
+        expect(editor.contains(card)).toBe(false)
+        expect(editor).toHaveValue('')
+        expect(screen.queryByTestId('composer-path-chip-test-document-md')).not.toBeInTheDocument()
+        expect(screen.getByTestId('send-message-button')).toBeEnabled()
+        await userEvent.click(screen.getByTestId('remove-attachment-button'))
+        await waitFor(() =>
+          expect(screen.queryByTestId('attachment-badge')).not.toBeInTheDocument()
+        )
+      } finally {
+        runtimeSpy.mockRestore()
+        hostSpy.mockRestore()
+      }
+    }
+  )
 
   test('uploads pasted documents for a remote desktop workspace', async () => {
     const handleFileSelect = vi.fn().mockResolvedValue(undefined)
@@ -1529,6 +1845,111 @@ describe('ChatInput', () => {
     })
 
     await waitFor(() => expect(handleFileSelect).toHaveBeenCalledWith([documentFile]))
+  })
+
+  test('keeps pasted text identity through upload and restores its complete multiline content', async () => {
+    const text = 'test\n'.repeat(1000)
+    const upload = vi.fn(
+      async (file: File): Promise<Attachment> => ({
+        id: 102,
+        filename: file.name,
+        mime_type: file.type,
+        file_size: file.size,
+        file_extension: '.txt',
+        status: 'ready',
+        created_at: '2026-09-19T00:00:00Z',
+      })
+    )
+    render(<AttachmentChatInput upload={upload} />)
+    const editor = screen.getByTestId('chat-message-input')
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [],
+        types: ['text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    })
+    const card = await screen.findByTestId('attachment-badge')
+    expect(within(card).getByTestId('attachment-text-preview')).toHaveTextContent('test')
+    expect(screen.queryByTestId('uploading-attachment-badge')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('attachment-document-icon')).not.toBeInTheDocument()
+    expect(screen.getByTestId('attachment-badge-list')).toHaveClass('overflow-x-auto')
+    expect(screen.getByTestId('attachment-badge-list')).not.toHaveClass('flex-wrap')
+    expect(editor).toHaveValue('')
+    expect(await upload.mock.calls[0][0].text()).toBe(text)
+    await userEvent.click(screen.getByTestId('show-text-attachment-button'))
+    await waitFor(() => expect(screen.queryByTestId('attachment-badge')).not.toBeInTheDocument())
+    expect(editor).toHaveValue(text)
+  })
+
+  test('keeps a later selected file before pasted text while either upload is pending', async () => {
+    const text = 'test\n'.repeat(1000)
+    const pending = new Map<File, (attachment: Attachment) => void>()
+    const upload = vi.fn(
+      (file: File) => new Promise<Attachment>(resolve => pending.set(file, resolve))
+    )
+    const finish = async (file: File, id: number) => {
+      await act(async () =>
+        pending.get(file)!({
+          id,
+          filename: file.name,
+          mime_type: file.type,
+          file_size: file.size,
+          file_extension: '.txt',
+          status: 'ready',
+          created_at: '2026-09-19T00:00:00Z',
+        })
+      )
+    }
+    render(<AttachmentChatInput upload={upload} />)
+    const editor = screen.getByTestId('chat-message-input')
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [],
+        types: ['text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    })
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+    const pastedFile = upload.mock.calls[0][0]
+    // A selected text file stays a file even when its name resembles a pasted attachment.
+    const file = new File(['test document'], 'clipboard-text-test.txt', { type: 'text/plain' })
+    await userEvent.click(screen.getByTestId('add-context-button'))
+    await userEvent.upload(screen.getByTestId('attachment-file-input'), file)
+
+    const cards = () =>
+      within(screen.getByTestId('attachment-badge-list')).getAllByTestId(
+        /^(uploading-)?attachment-badge$/
+      )
+    expect(cards()).toHaveLength(2)
+    expect(cards()[0]).toHaveTextContent(file.name)
+    expect(cards()[1]).toHaveAttribute('aria-busy', 'true')
+    await waitFor(() =>
+      expect(within(cards()[1]).getByTestId('attachment-text-preview')).toHaveTextContent('test')
+    )
+    expect(cards()[1]).not.toHaveTextContent(pastedFile.name)
+
+    await finish(pastedFile, 101)
+    await screen.findByTestId('attachment-badge')
+    expect(cards()[1]).not.toHaveAttribute('aria-busy')
+    expect(cards()[0]).toHaveTextContent(file.name)
+    expect(within(cards()[1]).getByTestId('attachment-text-preview')).toHaveTextContent('test')
+
+    await finish(file, 102)
+    await waitFor(() =>
+      expect(screen.queryByTestId('uploading-attachment-badge')).not.toBeInTheDocument()
+    )
+    expect(cards()[0]).toHaveTextContent(file.name)
+    expect(within(cards()[0]).getByTestId('attachment-document-icon')).toBeInTheDocument()
+    expect(within(cards()[1]).getByTestId('attachment-text-preview')).toHaveTextContent('test')
+
+    await userEvent.click(within(cards()[0]).getByTestId('remove-attachment-button'))
+    await waitFor(() => expect(cards()).toHaveLength(1))
+    await userEvent.click(screen.getByTestId('show-text-attachment-button'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('attachment-badge-list')).not.toBeInTheDocument()
+    )
+    expect(editor).toHaveValue(text)
   })
 
   test('turns long pasted text from the desktop message textbox into a text attachment', async () => {
@@ -1853,7 +2274,7 @@ describe('ChatInput', () => {
     expect(screen.getByTestId('model-selector-tooltip')).toHaveClass('h-9')
     expect(screen.getByTestId('model-selector-tooltip')).toHaveClass(
       'group-hover/model-selector:opacity-100',
-      'group-hover/model-selector:delay-[1500ms]'
+      'group-hover/model-selector:[transition-delay:1500ms]'
     )
     expect(screen.getByTestId('model-selector-tooltip')).not.toHaveClass(
       'group-focus-within/model-selector:delay-0'
@@ -3424,7 +3845,7 @@ describe('ChatInput', () => {
       />
     )
 
-    expect(screen.getByTestId('goal-status-bar')).not.toHaveTextContent('继续执行中')
+    expect(screen.getByTestId('goal-status-bar')).toHaveTextContent('正在开始下一轮')
     expect(screen.getByTestId('pause-goal-button')).toBeInTheDocument()
   })
 
@@ -3646,7 +4067,7 @@ describe('ChatInput', () => {
     expect(removeAttachment).toHaveBeenCalledWith(42)
   })
 
-  test('renders document attachments as fixed two-line cards', () => {
+  test('renders document attachments as file tiles with a filename footer', () => {
     const attachment: Attachment = {
       id: 42,
       filename: 'brief.pdf',
@@ -3668,24 +4089,27 @@ describe('ChatInput', () => {
       />
     )
 
-    expect(screen.getByTestId('attachment-badge')).toHaveClass('h-14', 'w-[220px]', 'rounded-xl')
-    expect(screen.getByTestId('attachment-document-icon')).toHaveTextContent('PDF')
+    expect(screen.getByTestId('attachment-badge')).toHaveClass('w-40', 'h-[122px]')
+    expect(screen.getByTestId('attachment-document-icon').parentElement).toHaveClass('rounded-2xl')
+    expect(screen.getByTestId('attachment-document-icon').querySelector('svg')).not.toBeNull()
     expect(screen.getByText('brief.pdf')).toHaveClass('truncate')
-    expect(screen.getAllByText('PDF')).toHaveLength(2)
+    expect(screen.queryByText('PDF')).not.toBeInTheDocument()
   })
 
   test('renders pasted text attachments as codex-style preview cards', async () => {
+    const content = 'test row\n'.repeat(625)
     const removeAttachment = vi.fn().mockResolvedValue(undefined)
     const attachment: Attachment = {
       id: 45,
       filename: 'clipboard-text-1783070360990.txt',
-      file_size: 1200,
+      ui_kind: 'pasted-text',
+      file_size: content.length,
       mime_type: 'text/plain',
       status: 'ready',
       file_extension: '.txt',
       created_at: '2026-05-27T00:00:00.000Z',
-      text_preview: '{ "event_type": "http_exchange", "id": "e9972aac" }',
-      text_content: '{\n  "event_type": "http_exchange",\n  "id": "e9972aac"\n}',
+      text_preview: 'test row',
+      text_content: content,
     }
 
     render(
@@ -3699,24 +4123,19 @@ describe('ChatInput', () => {
     )
 
     expect(screen.getByTestId('attachment-badge')).toHaveClass(
-      'h-[72px]',
-      'max-w-[min(420px,100%)]',
-      'rounded-[20px]',
-      'bg-muted'
+      'max-w-64',
+      'rounded-lg',
+      'bg-background'
     )
     expect(screen.getByTestId('attachment-badge')).not.toHaveClass('sm:max-w-[420px]')
-    expect(screen.getByTestId('attachment-text-preview')).toHaveTextContent(
-      '{ "event_type": "http_exchange", "id": "e9972aac" }'
-    )
+    expect(screen.getByTestId('attachment-text-preview')).toHaveTextContent('test row')
     expect(screen.getByTestId('show-text-attachment-button')).toHaveTextContent(
       'workbench.show_text_attachment_in_composer'
     )
 
     await userEvent.click(screen.getByTestId('show-text-attachment-button'))
 
-    expect(screen.getByTestId('chat-message-input')).toHaveValue(
-      '{\n  "event_type": "http_exchange",\n  "id": "e9972aac"\n}'
-    )
+    expect(screen.getByTestId('chat-message-input')).toHaveValue(content)
     expect(removeAttachment).toHaveBeenCalledWith(45)
   })
 
@@ -3895,7 +4314,7 @@ describe('ChatInput', () => {
     )
   })
 
-  test('uses matching overlay remove buttons for image and document attachments', () => {
+  test('uses matching image and document tile dimensions and accessible remove controls', () => {
     const attachments: Attachment[] = [
       {
         id: 43,
@@ -3931,39 +4350,58 @@ describe('ChatInput', () => {
     const removeButtons = screen.getAllByTestId('remove-attachment-button')
 
     expect(removeButtons).toHaveLength(2)
+    screen.getAllByTestId('attachment-badge').forEach(card => {
+      expect(card).toHaveClass('w-40', 'h-[122px]')
+    })
+    expect(removeButtons[0]).toHaveClass('-right-1.5', '-top-1.5', 'focus-visible:opacity-100')
+    expect(removeButtons[1]).toHaveClass('-right-1.5', '-top-1.5', 'focus-visible:opacity-100')
     removeButtons.forEach(button => {
-      expect(button).toHaveClass('absolute', '-right-1.5', '-top-1.5')
-      expect(button).toHaveClass('rounded-full', 'bg-text-primary', 'text-background')
+      expect(button).toHaveClass('absolute', 'h-6', 'w-6')
+      expect(button.querySelector('svg')).toHaveClass(
+        'rounded-full',
+        'bg-text-primary',
+        'text-background'
+      )
     })
   })
 
-  test('enables send when only attachments are present', async () => {
-    const onSubmit = vi.fn()
-    const attachment: Attachment = {
-      id: 44,
-      filename: 'brief.pdf',
-      file_size: 1200,
-      mime_type: 'application/pdf',
-      status: 'ready',
-      file_extension: '.pdf',
-      created_at: '2026-05-27T00:00:00.000Z',
+  test.each([false, true])(
+    'applies requireText=%s to attachment-only submissions',
+    async requireText => {
+      const onSubmit = vi.fn()
+      const attachment: Attachment = {
+        id: 44,
+        filename: 'brief.pdf',
+        file_size: 1200,
+        mime_type: 'application/pdf',
+        status: 'ready',
+        file_extension: '.pdf',
+        created_at: '2026-05-27T00:00:00.000Z',
+      }
+
+      render(
+        <ChatInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={onSubmit}
+          disabled={false}
+          variant="desktop"
+          projectChat={projectChatControls({ attachments: [attachment] })}
+          requireText={requireText}
+        />
+      )
+
+      if (requireText) {
+        expect(screen.getByTestId('send-message-button')).toBeDisabled()
+        fireEvent.keyDown(screen.getByTestId('chat-message-input'), { key: 'Enter' })
+        expect(onSubmit).not.toHaveBeenCalled()
+        return
+      }
+      expect(screen.getByTestId('send-message-button')).toBeEnabled()
+      await userEvent.click(screen.getByTestId('send-message-button'))
+      expect(onSubmit).toHaveBeenCalledTimes(1)
     }
-
-    render(
-      <ChatInput
-        value=""
-        onChange={vi.fn()}
-        onSubmit={onSubmit}
-        disabled={false}
-        variant="desktop"
-        projectChat={projectChatControls({ attachments: [attachment] })}
-      />
-    )
-
-    expect(screen.getByTestId('send-message-button')).toBeEnabled()
-    await userEvent.click(screen.getByTestId('send-message-button'))
-    expect(onSubmit).toHaveBeenCalledTimes(1)
-  })
+  )
 
   test('opens project work menu and selects a project', async () => {
     const onSelectProjectWorkspace = vi.fn()
@@ -4000,6 +4438,7 @@ describe('ChatInput', () => {
   })
 
   test('shows no-project transition from the standalone entry', async () => {
+    const onSelectProject = vi.fn()
     const onSelectStandaloneDevice = vi.fn()
 
     render(
@@ -4029,6 +4468,7 @@ describe('ChatInput', () => {
             },
           ],
           currentProjectId: 7,
+          onSelectProject,
           onSelectStandaloneDevice,
         })}
       />
@@ -4037,10 +4477,12 @@ describe('ChatInput', () => {
     await userEvent.click(screen.getByTestId('project-work-button'))
     await userEvent.click(screen.getByTestId('no-project-option'))
 
-    expect(onSelectStandaloneDevice).toHaveBeenCalledWith(null)
+    expect(onSelectProject).toHaveBeenCalledWith(null)
+    expect(onSelectStandaloneDevice).not.toHaveBeenCalled()
   })
 
   test('shows no-project option before selecting a concrete project', async () => {
+    const onSelectProject = vi.fn()
     const onSelectStandaloneDevice = vi.fn()
 
     render(
@@ -4053,6 +4495,7 @@ describe('ChatInput', () => {
         projectWork={projectWorkControls({
           projects: [{ id: 7, name: 'Wegent', tasks: [] }],
           currentProjectId: undefined,
+          onSelectProject,
           onSelectStandaloneDevice,
         })}
       />
@@ -4064,10 +4507,12 @@ describe('ChatInput', () => {
 
     await userEvent.click(screen.getByTestId('no-project-option'))
 
-    expect(onSelectStandaloneDevice).toHaveBeenCalledWith(null)
+    expect(onSelectProject).toHaveBeenCalledWith(null)
+    expect(onSelectStandaloneDevice).not.toHaveBeenCalled()
   })
 
-  test('hides standalone devices and selects the local device for no-project mode', async () => {
+  test('hides standalone devices and clears the project for no-project mode', async () => {
+    const onSelectProject = vi.fn()
     const onSelectStandaloneDevice = vi.fn()
     const devices: DeviceInfo[] = [
       {
@@ -4110,6 +4555,7 @@ describe('ChatInput', () => {
           projects: [{ id: 7, name: 'Wegent', tasks: [] }],
           devices,
           currentProjectId: 7,
+          onSelectProject,
           onSelectStandaloneDevice,
         })}
       />
@@ -4122,7 +4568,8 @@ describe('ChatInput', () => {
     expect(screen.queryByTestId('standalone-device-option-local-online')).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId('no-project-option'))
-    expect(onSelectStandaloneDevice).toHaveBeenCalledWith('local-online')
+    expect(onSelectProject).toHaveBeenCalledWith(null)
+    expect(onSelectStandaloneDevice).not.toHaveBeenCalled()
   })
 
   test('marks the current project instead of a remembered standalone device', async () => {
@@ -4328,7 +4775,7 @@ describe('ChatInput', () => {
     ).not.toBeInTheDocument()
   })
 
-  test('ignores the projects table when runtime work is empty', async () => {
+  test('keeps configured projects available while runtime work is empty', async () => {
     const onSelectProject = vi.fn()
 
     render(
@@ -4367,9 +4814,9 @@ describe('ChatInput', () => {
 
     await userEvent.click(screen.getByTestId('project-work-button'))
 
-    expect(screen.getByText('暂无项目')).toBeInTheDocument()
-    expect(screen.queryByTestId('project-option-7')).not.toBeInTheDocument()
-    expect(screen.queryByText('Online Project')).not.toBeInTheDocument()
+    expect(screen.getByTestId('project-option-7')).toHaveTextContent('Online Project')
+    expect(screen.getByTestId('project-option-8')).toHaveTextContent('Offline Project')
+    expect(screen.queryByTestId('project-empty-state')).not.toBeInTheDocument()
     expect(onSelectProject).not.toHaveBeenCalled()
   })
 
@@ -4502,7 +4949,6 @@ describe('ChatInput', () => {
   })
 
   test('shows three common plugin tasks and keeps additional tasks secondary', async () => {
-    const applyTrialTemplate = vi.fn()
     const dismissTrialGuide = vi.fn()
     const onSubmit = vi.fn()
     const trialTemplates = Array.from({ length: 4 }, (_, index) => ({
@@ -4524,7 +4970,6 @@ describe('ChatInput', () => {
             logoUrl: 'https://example.com/documents.png',
           },
           trialTemplates,
-          applyTrialTemplate,
           dismissTrialGuide,
         })}
       />
@@ -4546,10 +4991,14 @@ describe('ChatInput', () => {
     expect(screen.getByText('Scenario 4')).toBeInTheDocument()
 
     await userEvent.click(screen.getByText('Scenario 4'))
-    expect(applyTrialTemplate).toHaveBeenCalledWith(trialTemplates[3])
+    expect(
+      (screen.getByTestId('chat-message-input') as HTMLElement & { value: string }).value
+    ).toBe('Prompt 4 ')
 
     await userEvent.click(screen.getByTestId('plugin-trial-recommendation-apply'))
-    expect(applyTrialTemplate).toHaveBeenLastCalledWith(trialTemplates[0])
+    expect(
+      (screen.getByTestId('chat-message-input') as HTMLElement & { value: string }).value
+    ).toBe('Prompt 1 ')
     expect(onSubmit).not.toHaveBeenCalled()
 
     await userEvent.click(screen.getByTestId('plugin-trial-template-dismiss'))
@@ -4576,8 +5025,6 @@ describe('ChatInput', () => {
           projectChat={projectChatControls({
             trialPluginName: 'Browser',
             trialTemplates: [template],
-            applyTrialTemplate: selectedTemplate =>
-              setValue(`${pluginReference} ${selectedTemplate.description} `),
           })}
         />
       )

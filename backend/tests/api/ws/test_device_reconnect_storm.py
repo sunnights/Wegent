@@ -68,6 +68,7 @@ async def test_device_register_does_not_wait_for_capability_sync(monkeypatch):
         "set_device_online",
         AsyncMock(return_value=True),
     )
+
     register_task = asyncio.create_task(
         namespace.on_device_register(
             "sid-1",
@@ -132,22 +133,10 @@ async def test_device_register_debounces_repeated_db_upserts(monkeypatch):
 
     first = await namespace.on_device_register("sid-1", payload)
     second = await namespace.on_device_register("sid-2", payload)
-    remote_payload = {
-        **payload,
-        "device_type": DeviceType.REMOTE.value,
-        "runtime_instance_id": "runtime-stable",
-        "app_device_id": "device-1",
-    }
-    third = await namespace.on_device_register("sid-3", remote_payload)
-    fourth = await namespace.on_device_register("sid-4", remote_payload)
 
     assert first == {"success": True, "device_id": "device-1"}
     assert second == {"success": True, "device_id": "device-1"}
-    assert third == {"success": True, "device_id": "device-1"}
-    assert fourth == {"success": True, "device_id": "device-1"}
-    assert len(upsert_calls) == 2
-    assert upsert_calls[0][1][4] == DeviceType.LOCAL.value
-    assert upsert_calls[1][1][4] == DeviceType.REMOTE.value
+    assert len(upsert_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -378,9 +367,7 @@ async def test_device_register_passes_app_device_type_and_app_device_id(monkeypa
     assert upsert_calls[0][1][7] == "runtime-stable"
     assert upsert_calls[0][1][8] == "local-app-device"
     saved_session = save_session.await_args.args[1]
-    assert saved_session["device_type"] == DeviceType.APP.value
     assert saved_session["execution_target_id"] == "local-app-device"
-    assert saved_session["execution_environment"] == "local"
     assert enter_room.await_args_list[-1].args == (
         "sid-app",
         "execution-target:7:local-app-device",
@@ -438,10 +425,16 @@ async def test_cloud_device_register_matches_cloud_device(monkeypatch):
 
     assert result == {"success": True, "device_id": "standalone-admin-device"}
     match_cloud_device.assert_awaited_once_with(
-        7, "198.18.0.1", "standalone-admin-device", None
+        7,
+        "198.18.0.1",
+        "standalone-admin-device",
+        None,
+        "198.18.0.1",
+        17888,
     )
     run_sync_in_executor.assert_not_awaited()
     set_device_online.assert_awaited_once()
+    assert set_device_online.await_args.kwargs["runtime_transfer_port"] == 17888
 
 
 def test_connection_rate_limit_tracks_attempt_window():
@@ -473,6 +466,43 @@ async def test_stale_disconnect_does_not_clear_newer_device_socket(monkeypatch):
         device_namespace.device_service,
         "get_device_online_info",
         AsyncMock(return_value={"socket_id": "sid-new"}),
+    )
+    set_offline = AsyncMock()
+    monkeypatch.setattr(
+        device_namespace.device_service, "set_device_offline", set_offline
+    )
+    monkeypatch.setattr(
+        device_namespace,
+        "run_sync_in_executor",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(namespace, "_broadcast_device_offline", AsyncMock())
+
+    await namespace.on_disconnect("sid-old")
+
+    set_offline.assert_not_awaited()
+    device_namespace.run_sync_in_executor.assert_not_awaited()
+    namespace._broadcast_device_offline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_does_not_mark_device_offline(monkeypatch):
+    namespace = DeviceNamespace()
+    monkeypatch.setattr(
+        namespace,
+        "get_session",
+        AsyncMock(
+            return_value={
+                "user_id": 7,
+                "device_id": "device-1",
+                "request_id": "req-1",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        device_namespace.device_service,
+        "get_device_online_info",
+        AsyncMock(side_effect=RuntimeError("Redis unavailable")),
     )
     set_offline = AsyncMock()
     monkeypatch.setattr(

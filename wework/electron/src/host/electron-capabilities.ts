@@ -1,3 +1,4 @@
+import { registerModelConfigurationCapabilities } from './model-configuration-capabilities.js'
 import {
   app,
   BrowserWindow,
@@ -30,8 +31,9 @@ import type { BrowserBounds, EmbeddedBrowserManager } from './embedded-browser-m
 import type { ComputerUseService } from './computer-use-service.js'
 import { LocalAttachmentStore } from './local-attachment-store.js'
 import { readLocalFileChunk } from './local-file-reader.js'
+import { registerWorkspaceFileActions } from './workspace-file-actions.js'
 import { getElectronProcessSnapshot } from './process-diagnostics.js'
-import { sendE2EKey } from './e2e-keyboard.js'
+import { sendE2EKey, sendE2EText, type E2EKeyPhase } from './e2e-keyboard.js'
 import {
   extractFilePathsFromNativePayloads,
   inspectWorkspacePaths,
@@ -45,12 +47,16 @@ import type { SchemeQueue } from './scheme-queue.js'
 import {
   listLocalWorkspaceOpeners,
   openLocalWorkspace,
+  openFileInWorkspaceApp,
   saveCustomWorkspaceOpener,
 } from './local-workspace-openers.js'
 import type { DesktopHostEventBroker } from './desktop-host-events.js'
 import type { SecureValueStore } from './secure-value-store.js'
 import type { BrowserAnnotationController } from './browser-annotation-controller.js'
 import { RotatingLog } from '../runtime/rotating-log.js'
+import { registerMicrophoneDiagnostics } from './microphone-diagnostics.js'
+import { readMacosMicrophoneChecks } from './macos-microphone-diagnostics.js'
+import type { WeworkSyncRequest } from './wework-sync-request.js'
 
 export { captureWebContentsDataUrl } from './web-contents-capture.js'
 
@@ -64,6 +70,15 @@ export function e2eOpenDialogOverride(
   const selectedPath = environment.WEWORK_E2E_OPEN_DIALOG_PATH?.trim()
   if (!controlUrl || !selectedPath) return null
   return { canceled: false, filePaths: [resolve(selectedPath)] }
+}
+
+export function e2eSaveDialogOverride(
+  environment: NodeJS.ProcessEnv = process.env
+): { canceled: false; filePath: string } | null {
+  const controlUrl = environment.WEWORK_E2E_CONTROL_URL?.trim()
+  const selectedPath = environment.WEWORK_E2E_SAVE_DIALOG_PATH?.trim()
+  if (!controlUrl || !selectedPath) return null
+  return { canceled: false, filePath: resolve(selectedPath) }
 }
 
 /** Owner-view region capture limits (8K frame envelope). */
@@ -96,6 +111,8 @@ export interface ElectronDesktopServices {
   browserAnnotations?: BrowserAnnotationController
   events: DesktopHostEventBroker
   feedback: FeedbackBundleManager
+  quitApplication: () => void
+  relaunchApplication: () => void
   openRuntimeTask: (taskAddressId: string) => void
   secureStorage: SecureValueStore
   cleanupStaleTemporaryImages: () => Promise<void>
@@ -105,12 +122,7 @@ export interface ElectronDesktopServices {
   openScheme: (url: string) => void
   takePendingWorkspaceOpenRequests?: () => Array<{ path: string; label?: string }>
   updatePreferences?: (patch: Record<string, unknown>) => Promise<Record<string, unknown>>
-  weworkSyncRequest?: (request: {
-    apiBaseUrl: string
-    path: string
-    method: 'GET' | 'POST' | 'PUT'
-    body?: unknown
-  }) => Promise<unknown>
+  weworkSyncRequest?: (request: WeworkSyncRequest) => Promise<unknown>
 }
 
 interface ElectronNotificationHandle {
@@ -193,15 +205,20 @@ export interface ElectronE2EHost {
   startupSplashSnapshot: () => StartupSplashSnapshot | null
   trayActivate: (activation: TrayActivation) => boolean
   traySetState: (state: TrayMenuState) => void
-  traySnapshot: () => TraySnapshot | null
+  traySnapshot: () => (TraySnapshot & { dockBadge: string | null }) | null
   scheduleCoreDshRestart: () => void
   openWorkspace: (input: { label: string; route: string; title: string }) => Promise<void>
+  openPopoutTaskInMain: (taskAddressId: string) => void
   popoutWindowSnapshot: () => {
+    bounds: { width: number; height: number } | null
     exists: boolean
     focused: boolean
     visible: boolean
+    windowId: number | null
+    webContentsId: number | null
   }
   setSystemDragContext: (context: { conversationTitle: string | null }) => void
+  setPopoutMode: (mode: 'composer' | 'menu' | 'conversation') => void
   setSystemSleepEnabled: (enabled: boolean) => void
   setSystemSleepTaskActive: (source: string, active: boolean) => void
   showPopout: () => Promise<void>
@@ -255,8 +272,17 @@ export function createElectronCapabilityRouter(
     traySnapshot: () => null,
     scheduleCoreDshRestart: () => undefined,
     openWorkspace: () => Promise.reject(new Error('Workspace windows are unavailable')),
-    popoutWindowSnapshot: () => ({ exists: false, focused: false, visible: false }),
+    openPopoutTaskInMain: () => undefined,
+    popoutWindowSnapshot: () => ({
+      bounds: null,
+      exists: false,
+      focused: false,
+      visible: false,
+      windowId: null,
+      webContentsId: null,
+    }),
     setSystemDragContext: () => undefined,
+    setPopoutMode: () => undefined,
     setSystemSleepEnabled: () => undefined,
     setSystemSleepTaskActive: () => undefined,
     showPopout: () => Promise.reject(new Error('Popout Window is unavailable')),
@@ -273,7 +299,15 @@ export function createElectronCapabilityRouter(
     maxBytes: 2 * 1024 * 1024,
     retainedFiles: 2,
   })
+  let activeIsolatedClipboardLease: string | null = null
   router.grant(WEWORK_APP_PRINCIPAL, coreGrantedCapabilities())
+  registerModelConfigurationCapabilities(
+    router,
+    window,
+    desktopServices.secureStorage,
+    desktopServices.events
+  )
+  registerMicrophoneDiagnostics(router, readMacosMicrophoneChecks)
 
   router.register('navigation.pendingSchemes', () => desktopServices.pendingSchemes.read())
   router.register('navigation.acknowledgeScheme', params => {
@@ -281,6 +315,12 @@ export function createElectronCapabilityRouter(
     if (id !== undefined) desktopServices.pendingSchemes.acknowledge(id)
   })
   router.register('app.getVersion', () => ({ version: app.getVersion() }))
+  router.register('app.quit', (_params, context) => {
+    context.deferUntilResponseSent(desktopServices.quitApplication)
+  })
+  router.register('app.relaunch', (_params, context) => {
+    context.deferUntilResponseSent(desktopServices.relaunchApplication)
+  })
   router.register('desktop.events', params =>
     desktopServices.events.read(integerParam(params, 'after') ?? 0)
   )
@@ -473,7 +513,35 @@ export function createElectronCapabilityRouter(
       ...fallbackPaths,
     ])
   })
-  router.register('clipboard.writeText', params => clipboard.writeText(stringParam(params, 'text')))
+  router.register('clipboard.writeText', params =>
+    clipboard.writeText(rawStringParam(params, 'text'))
+  )
+  router.register('isolatedClipboard.activate', params => {
+    const leaseId = stringParam(params, 'leaseId')
+    const targetWindow = requiredWindow(window)
+    if (!targetWindow.isFocused()) {
+      throw new HostCapabilityError(
+        'window_not_focused',
+        'The isolated clipboard is available only while the Wework window is focused'
+      )
+    }
+    activeIsolatedClipboardLease = leaseId
+    return { active: true }
+  })
+  router.register('isolatedClipboard.deactivate', params => {
+    const leaseId = stringParam(params, 'leaseId')
+    if (activeIsolatedClipboardLease === leaseId) activeIsolatedClipboardLease = null
+    return { active: false }
+  })
+  router.register('isolatedClipboard.readText', params => {
+    requireActiveIsolatedClipboardLease(activeIsolatedClipboardLease, params, window)
+    return clipboard.readText()
+  })
+  router.register('isolatedClipboard.writeText', params => {
+    requireActiveIsolatedClipboardLease(activeIsolatedClipboardLease, params, window)
+    clipboard.writeText(rawStringParam(params, 'text'))
+    return { written: true }
+  })
   router.register('computerUse.status', () => computerUse.status())
   router.register('computerUse.setEnabled', async params => {
     const enabled = booleanParam(params, 'enabled') ?? false
@@ -543,17 +611,53 @@ export function createElectronCapabilityRouter(
   router.register('e2e.focusWindow', params => {
     e2eHost.focusWindow(optionalStringParam(params, 'windowLabel') ?? 'main')
   })
-  router.register('e2e.pressKey', params => {
+  router.register('e2e.insertText', params => {
     const label = optionalStringParam(params, 'windowLabel') ?? 'main'
     const contents = e2eHost.captureTarget(label)
     if (!contents) {
       throw new HostCapabilityError('e2e_view_unavailable', 'Verification view is unavailable')
     }
-    return sendE2EKey(contents, stringParam(params, 'key'), () =>
-      label === 'main' ? e2eHost.focusMainWindow() : e2eHost.focusWindow(label)
+    return sendE2EText(
+      contents,
+      stringParam(params, 'text'),
+      () => (label === 'main' ? e2eHost.focusMainWindow() : e2eHost.focusWindow(label)),
+      process.env
+    )
+  })
+  router.register('e2e.pressKey', params => {
+    const label = optionalStringParam(params, 'windowLabel') ?? 'main'
+    const phase = optionalStringParam(params, 'phase') ?? 'press'
+    if (!['press', 'down', 'up'].includes(phase)) {
+      throw new HostCapabilityError('e2e_invalid_key_phase', 'Unsupported verification key phase')
+    }
+    const contents = e2eHost.captureTarget(label)
+    if (!contents) {
+      throw new HostCapabilityError('e2e_view_unavailable', 'Verification view is unavailable')
+    }
+    return sendE2EKey(
+      contents,
+      stringParam(params, 'key'),
+      () => (label === 'main' ? e2eHost.focusMainWindow() : e2eHost.focusWindow(label)),
+      process.env,
+      phase as E2EKeyPhase
     )
   })
   router.register('e2e.getProcessSnapshot', () => getElectronProcessSnapshot())
+  router.register('e2e.getRendererHeapUsage', async () => {
+    const contents = e2eHost.captureTarget('main')
+    if (!contents || contents.isDestroyed()) {
+      throw new HostCapabilityError('e2e_view_unavailable', 'Primary DSH view is unavailable')
+    }
+    const debugSession = contents.debugger
+    const alreadyAttached = debugSession.isAttached()
+    if (!alreadyAttached) debugSession.attach('1.3')
+    try {
+      await debugSession.sendCommand('HeapProfiler.collectGarbage')
+      return await debugSession.sendCommand('Runtime.getHeapUsage')
+    } finally {
+      if (!alreadyAttached && debugSession.isAttached()) debugSession.detach()
+    }
+  })
   router.register('e2e.getRuntimeDiagnostics', () => e2eHost.runtimeDiagnostics())
   router.register('e2e.getClipboardText', () => clipboard.readText())
   router.register('e2e.getWindowFocusSnapshot', () => {
@@ -561,9 +665,13 @@ export function createElectronCapabilityRouter(
     const popout = e2eHost.popoutWindowSnapshot()
     return {
       mainFocused: target.isFocused(),
+      mainVisible: target.isVisible(),
       popoutExists: popout.exists,
       popoutFocused: popout.focused,
       popoutVisible: popout.visible,
+      popoutBounds: popout.bounds,
+      popoutWindowId: popout.windowId,
+      popoutWebContentsId: popout.webContentsId,
       workspaceWindows: e2eHost.workspaceWindowSnapshots(),
     }
   })
@@ -608,6 +716,16 @@ export function createElectronCapabilityRouter(
     })
   )
   router.register('window.dismissPopout', () => e2eHost.dismissPopout())
+  router.register('window.openPopoutTaskInMain', params =>
+    e2eHost.openPopoutTaskInMain(stringParam(params, 'taskAddressId'))
+  )
+  router.register('window.setPopoutMode', params => {
+    const mode = stringParam(params, 'mode')
+    if (mode !== 'composer' && mode !== 'menu' && mode !== 'conversation') {
+      invalidParam('mode')
+    }
+    e2eHost.setPopoutMode(mode)
+  })
   router.register('window.showPopout', () => e2eHost.showPopout())
   router.register('window.minimize', () => requiredWindow(window).minimize())
   router.register('window.toggleMaximize', () => {
@@ -620,9 +738,10 @@ export function createElectronCapabilityRouter(
     const override = e2eOpenDialogOverride()
     return override ?? dialog.showOpenDialog(requiredWindow(window), openDialogOptions(params))
   })
-  router.register('dialog.save', params =>
-    dialog.showSaveDialog(requiredWindow(window), saveDialogOptions(params))
-  )
+  router.register('dialog.save', params => {
+    const override = e2eSaveDialogOverride()
+    return override ?? dialog.showSaveDialog(requiredWindow(window), saveDialogOptions(params))
+  })
   router.register('dialog.message', params =>
     dialog.showMessageBox(requiredWindow(window), messageBoxOptions(params))
   )
@@ -688,11 +807,27 @@ export function createElectronCapabilityRouter(
     }
     const method = optionalStringParam(params, 'method') ?? 'GET'
     if (!['GET', 'POST', 'PUT'].includes(method)) invalidParam('method')
+    const file = Object.hasOwn(params, 'file') ? recordParam(params, 'file') : null
     return desktopServices.weworkSyncRequest({
       apiBaseUrl: stringParam(params, 'apiBaseUrl'),
       path: stringParam(params, 'path'),
       method: method as 'GET' | 'POST' | 'PUT',
       ...(Object.hasOwn(params, 'body') ? { body: params.body } : {}),
+      ...(Object.hasOwn(params, 'downloadPath')
+        ? { downloadPath: stringParam(params, 'downloadPath') }
+        : {}),
+      ...(Object.hasOwn(params, 'downloadSizeBytes')
+        ? { downloadSizeBytes: requiredIntegerParam(params, 'downloadSizeBytes') }
+        : {}),
+      ...(file
+        ? {
+            file: {
+              path: stringParam(file, 'path'),
+              name: stringParam(file, 'name'),
+              contentType: stringParam(file, 'contentType'),
+            },
+          }
+        : {}),
     })
   })
   registerRendererStorageCapabilities(router, rendererStorage)
@@ -725,6 +860,13 @@ export function createElectronCapabilityRouter(
     shell.showItemInFolder(stringParam(params, 'path'))
   )
   router.register('workspace.listOpeners', () => listLocalWorkspaceOpeners(app.getPath('userData')))
+  registerWorkspaceFileActions(router, () => requiredWindow(window))
+  router.register('workspace.openFile', params =>
+    openFileInWorkspaceApp(stringParam(params, 'opener'), stringParam(params, 'path'), {
+      open: (opener, path) => openLocalWorkspace(opener, path, app.getPath('userData')),
+      reveal: path => shell.showItemInFolder(path),
+    })
+  )
   router.register(
     'workspace.takePendingOpenRequests',
     () => desktopServices.takePendingWorkspaceOpenRequests?.() ?? []
@@ -760,10 +902,10 @@ export function createElectronCapabilityRouter(
   router.register('smartApps.list', () => requiredSmartApps(smartApps).list())
   router.register('smartApps.createDirectory', params =>
     requiredSmartApps(smartApps).createDirectory({
-      parentPath: stringParam(params, 'parentPath'),
+      parentPath: rawStringParam(params, 'parentPath'),
       name: stringParam(params, 'name'),
       displayName: stringParam(params, 'displayName'),
-      description: stringParam(params, 'description'),
+      description: rawStringParam(params, 'description'),
       template: stringParam(params, 'template'),
     })
   )
@@ -1002,7 +1144,11 @@ export function createWorkbenchCapabilityRouter(
       }),
     }
   })
-  router.grant(WEWORK_WORKBENCH_PRINCIPAL, WORKBENCH_ONLY_CAPABILITIES)
+  registerMicrophoneDiagnostics(router, readMacosMicrophoneChecks)
+  router.grant(WEWORK_WORKBENCH_PRINCIPAL, [
+    ...WORKBENCH_ONLY_CAPABILITIES,
+    'deviceDiagnostics.microphone',
+  ])
   return router
 }
 
@@ -1251,12 +1397,40 @@ function requiredWindow(resolveWindow: () => BrowserWindow | null): BrowserWindo
   return target
 }
 
+function requireActiveIsolatedClipboardLease(
+  activeLease: string | null,
+  params: Record<string, unknown>,
+  resolveWindow: () => BrowserWindow | null
+): void {
+  const leaseId = stringParam(params, 'leaseId')
+  if (activeLease !== leaseId) {
+    throw new HostCapabilityError(
+      'isolated_clipboard_inactive',
+      'The isolated clipboard lease is no longer active'
+    )
+  }
+  if (!requiredWindow(resolveWindow).isFocused()) {
+    throw new HostCapabilityError(
+      'window_not_focused',
+      'The isolated clipboard is available only while the Wework window is focused'
+    )
+  }
+}
+
 function stringParam(params: Record<string, unknown>, key: string): string {
   const value = params[key]
   if (typeof value !== 'string' || !value.trim()) {
     throw new HostCapabilityError('invalid_params', `${key} is required`)
   }
   return value.trim()
+}
+
+function rawStringParam(params: Record<string, unknown>, key: string): string {
+  const value = params[key]
+  if (typeof value !== 'string') {
+    throw new HostCapabilityError('invalid_params', `${key} must be a string`)
+  }
+  return value
 }
 
 function messageBoxOptions(params: Record<string, unknown>): MessageBoxOptions {

@@ -4,19 +4,23 @@
 
 import uuid
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy.orm import Session
 
 from app.models.delivery import (
     CloudProject,
     LoopItem,
+    LoopItemTaskBinding,
     ProjectChatAgent,
     loop_datetime_value_is_unset,
 )
 from app.models.kind import Kind
+from app.models.resource_member import MemberStatus, ResourceMember
+from app.models.share_link import ResourceType
 from app.models.user import User
-from app.services.device.capacity import RuntimeCapacity
+from app.schemas.base_role import BaseRole
+from app.services.loop_item_executions.profile import WeworkExecutionProfileError
 from app.services.loop_item_executions.service import loop_item_execution_service
 
 
@@ -83,7 +87,7 @@ def _make_execution(db: Session, user: User):
     return execution
 
 
-def test_device_pull_claims_and_fences_cloud_execution(
+def test_device_pull_claims_without_recording_unconfirmed_delivery(
     test_db: Session,
     test_user: User,
 ) -> None:
@@ -102,17 +106,6 @@ def test_device_pull_claims_and_fences_cloud_execution(
         ),
         patch(
             "app.services.loop_item_executions.device_pull."
-            "validate_runtime_capacity_observation_sync",
-            return_value=RuntimeCapacity(
-                runtime_instance_id="runtime-1",
-                limit=1,
-                active=0,
-                active_task_ids=frozenset(),
-                queued=0,
-            ),
-        ),
-        patch(
-            "app.services.loop_item_executions.device_pull."
             "loop_item_execution_service.build_executor_runtime_payload",
             return_value={
                 "executionRequest": {
@@ -127,12 +120,6 @@ def test_device_pull_claims_and_fences_cloud_execution(
             runtime_device_id="cloud-device",
             runtime_instance_id="runtime-1",
             environment="cloud",
-            runtime_capacity={
-                "limit": 1,
-                "active": 0,
-                "active_task_ids": [],
-                "queued": 0,
-            },
         )
 
     assert result["success"] is True
@@ -140,7 +127,193 @@ def test_device_pull_claims_and_fences_cloud_execution(
     assert result["task"]["runtime_task_id"] == f"codex-queue-{execution.id}"
     test_db.refresh(execution)
     assert execution.status == "claimed"
+    assert loop_datetime_value_is_unset(execution.start_requested_at)
+    binding = (
+        test_db.query(LoopItemTaskBinding)
+        .filter(
+            LoopItemTaskBinding.loop_item_id == execution.loop_item_id,
+            LoopItemTaskBinding.task_id == f"codex-queue-{execution.id}",
+        )
+        .one()
+    )
+    assert binding.device_id == "cloud-device"
+
+
+def test_device_pull_records_delivery_only_after_runtime_acceptance(
+    test_db: Session,
+    test_user: User,
+) -> None:
+    from app.services.loop_item_executions.device_pull import (
+        _claim_execution,
+        acknowledge_execution,
+    )
+
+    execution = _make_execution(test_db, test_user)
+
+    @contextmanager
+    def _test_session():
+        yield test_db
+
+    with (
+        patch(
+            "app.services.loop_item_executions.device_pull.get_db_session",
+            _test_session,
+        ),
+        patch(
+            "app.services.loop_item_executions.device_pull."
+            "loop_item_execution_service.build_executor_runtime_payload",
+            return_value={
+                "executionRequest": {
+                    "prompt": "Build the calculator.",
+                }
+            },
+        ),
+    ):
+        pulled = _claim_execution(
+            owner_user_id=test_user.id,
+            execution_target_id="cloud-device",
+            runtime_device_id="cloud-device",
+            runtime_instance_id="runtime-1",
+            environment="cloud",
+        )
+        test_db.refresh(execution)
+        assert loop_datetime_value_is_unset(execution.start_requested_at)
+
+        acknowledged = acknowledge_execution(
+            owner_user_id=test_user.id,
+            runtime_device_id="cloud-device",
+            runtime_instance_id="runtime-1",
+            execution_id=execution.id,
+            runtime_task_id=pulled["task"]["runtime_task_id"],
+            accepted=True,
+            prompt=pulled["task"]["prompt"],
+            error=None,
+        )
+
+    assert acknowledged == {"success": True}
+    test_db.refresh(execution)
     assert not loop_datetime_value_is_unset(execution.start_requested_at)
+    assert execution.observed_state == "accepted"
+
+
+def test_device_pull_marks_profile_preflight_failure_terminal(
+    test_db: Session,
+    test_user: User,
+) -> None:
+    from app.services.loop_item_executions.device_pull import _claim_execution
+
+    execution = _make_execution(test_db, test_user)
+
+    @contextmanager
+    def _test_session():
+        yield test_db
+
+    with (
+        patch(
+            "app.services.loop_item_executions.device_pull.get_db_session",
+            _test_session,
+        ),
+        patch(
+            "app.services.loop_item_executions.device_pull."
+            "loop_item_execution_service.build_executor_runtime_payload",
+            side_effect=WeworkExecutionProfileError("invalid runtime profile"),
+        ),
+    ):
+        result = _claim_execution(
+            owner_user_id=test_user.id,
+            execution_target_id="cloud-device",
+            runtime_device_id="cloud-device",
+            runtime_instance_id="runtime-1",
+            environment="cloud",
+        )
+
+    assert result == {
+        "success": False,
+        "error": "invalid runtime profile",
+        "task": None,
+    }
+    test_db.refresh(execution)
+    assert execution.status == "failed"
+    assert execution.error_message == "invalid runtime profile"
+
+
+def test_device_pull_redelivers_same_unconfirmed_claim_before_new_work(
+    test_db: Session,
+    test_user: User,
+) -> None:
+    from app.services.loop_item_executions.device_pull import _claim_execution
+
+    first = _make_execution(test_db, test_user)
+    first_item = test_db.get(LoopItem, first.loop_item_id)
+    first_agent = test_db.get(ProjectChatAgent, first.agent_id)
+    assert first_item is not None
+    assert first_agent is not None
+    second_item = LoopItem(
+        id=f"T{uuid.uuid4().hex[:10]}",
+        cloud_project_id=first_item.cloud_project_id,
+        title="Run me second",
+        description="Build the calculator again.",
+        status="inbox",
+        created_by_user_id=test_user.id,
+        metadata_json={},
+    )
+    test_db.add(second_item)
+    test_db.commit()
+    second = loop_item_execution_service.create_for_assignment(
+        test_db,
+        loop_item_id=second_item.id,
+        cloud_project_id=second_item.cloud_project_id,
+        agent=first_agent,
+        assigner_user_id=test_user.id,
+        environment="cloud",
+        execution_device_id="cloud-device",
+        priority="medium",
+    )
+    test_db.commit()
+
+    @contextmanager
+    def _test_session():
+        yield test_db
+
+    with (
+        patch(
+            "app.services.loop_item_executions.device_pull.get_db_session",
+            _test_session,
+        ),
+        patch(
+            "app.services.loop_item_executions.device_pull."
+            "loop_item_execution_service.build_executor_runtime_payload",
+            side_effect=lambda _db, execution, **_kwargs: {
+                "executionRequest": {"prompt": execution.loop_item_id}
+            },
+        ),
+    ):
+        first_pull = _claim_execution(
+            owner_user_id=test_user.id,
+            execution_target_id="cloud-device",
+            runtime_device_id="cloud-device",
+            runtime_instance_id="runtime-1",
+            environment="cloud",
+        )
+        repeated_pull = _claim_execution(
+            owner_user_id=test_user.id,
+            execution_target_id="cloud-device",
+            runtime_device_id="cloud-device",
+            runtime_instance_id="runtime-1",
+            environment="cloud",
+        )
+
+    assert first_pull["task"]["execution_id"] == first.id
+    assert repeated_pull["task"]["execution_id"] == first.id
+    assert (
+        repeated_pull["task"]["runtime_task_id"]
+        == first_pull["task"]["runtime_task_id"]
+    )
+    test_db.refresh(first)
+    test_db.refresh(second)
+    assert first.status == "claimed"
+    assert loop_datetime_value_is_unset(first.start_requested_at)
+    assert second.status == "queued"
 
 
 def test_periodic_scan_does_not_dispatch_runtime_work(
@@ -183,6 +356,179 @@ def test_periodic_scan_does_not_dispatch_runtime_work(
         "reconciled": 0,
         "stalled": 0,
     }
+
+
+def test_periodic_scan_publishes_with_write_only_redis_manager(
+    test_db: Session,
+    test_user: User,
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks.robot_queue_tasks import scan_robot_queue
+
+    _make_execution(test_db, test_user)
+
+    @contextmanager
+    def _acquired(*args, **kwargs):
+        yield True
+
+    @contextmanager
+    def _test_session():
+        yield test_db
+
+    manager = MagicMock()
+    monkeypatch.setattr(settings, "ROBOT_QUEUE_SCHEDULER_ENABLED", True)
+    with (
+        patch("app.db.session.get_db_session", _test_session),
+        patch(
+            "app.tasks.robot_queue_tasks.loop_item_execution_service.recovery_scan",
+            return_value=(0, 0),
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.loop_item_execution_service.stall_scan",
+            return_value=[],
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.distributed_lock.acquire_context",
+            _acquired,
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.socketio.RedisManager",
+            return_value=manager,
+        ) as redis_manager,
+    ):
+        result = scan_robot_queue.run()
+
+    assert result["status"] == "ok"
+    redis_manager.assert_called_once_with(settings.REDIS_URL, write_only=True)
+    manager.emit.assert_called_once_with(
+        "runtime.tasks.available",
+        {},
+        room=f"execution-target:{test_user.id}:cloud-device",
+        namespace="/local-executor",
+    )
+
+
+def test_periodic_scan_publishes_unbound_work_to_project_environment(
+    test_db: Session,
+    test_user: User,
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks.robot_queue_tasks import scan_robot_queue
+
+    execution = _make_execution(test_db, test_user)
+    device = (
+        test_db.query(Kind)
+        .filter(
+            Kind.kind == "Device",
+            Kind.name == "cloud-device",
+            Kind.user_id == test_user.id,
+        )
+        .one()
+    )
+    execution.execution_device_id = ""
+    test_db.add(
+        ResourceMember.create(
+            resource_type=ResourceType.DEVICE.value,
+            resource_id=device.id,
+            entity_type="project",
+            entity_id=execution.cloud_project_id,
+            role=BaseRole.Developer.value,
+            status=MemberStatus.APPROVED.value,
+            invited_by_user_id=test_user.id,
+        )
+    )
+    test_db.commit()
+
+    @contextmanager
+    def _acquired(*args, **kwargs):
+        yield True
+
+    @contextmanager
+    def _test_session():
+        yield test_db
+
+    manager = MagicMock()
+    monkeypatch.setattr(settings, "ROBOT_QUEUE_SCHEDULER_ENABLED", True)
+    with (
+        patch("app.db.session.get_db_session", _test_session),
+        patch(
+            "app.tasks.robot_queue_tasks.loop_item_execution_service.recovery_scan",
+            return_value=(0, 0),
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.loop_item_execution_service.stall_scan",
+            return_value=[],
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.distributed_lock.acquire_context",
+            _acquired,
+        ),
+        patch(
+            "app.tasks.robot_queue_tasks.socketio.RedisManager",
+            return_value=manager,
+        ),
+    ):
+        result = scan_robot_queue.run()
+
+    assert result["status"] == "ok"
+    manager.emit.assert_called_once_with(
+        "runtime.tasks.available",
+        {},
+        room=f"execution-target:{test_user.id}:cloud-device",
+        namespace="/local-executor",
+    )
+
+
+def test_runtime_cancel_routes_through_execution_target() -> None:
+    """A local Runtime may report a hardware ID that differs from its socket route."""
+
+    from app.models.loop_item_execution import LoopItemExecution
+    from app.tasks.robot_queue_tasks import emit_runtime_cancels
+
+    execution = LoopItemExecution(
+        id=13,
+        executor_owner_user_id=9,
+        execution_device_id="app-record-65",
+        runtime_device_id="electron-runtime-device",
+        runtime_task_id="codex-queue-13",
+    )
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"emitted": True, "accepted": True}
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.post.return_value = response
+
+    @contextmanager
+    def _test_session():
+        yield MagicMock()
+
+    with (
+        patch("httpx.Client", return_value=client),
+        patch("app.db.session.get_db_session", _test_session),
+        patch(
+            "app.tasks.robot_queue_tasks.loop_item_execution_service."
+            "confirm_runtime_cancelled"
+        ) as confirm_runtime_cancelled,
+    ):
+        cancelled = emit_runtime_cancels([execution])
+
+    assert cancelled == {13}
+    client.post.assert_called_once()
+    assert client.post.call_args.kwargs["json"] == {
+        "user_id": 9,
+        "device_id": "app-record-65",
+        "method": "runtime.tasks.cancel",
+        "payload": {
+            "taskId": "codex-queue-13",
+            "deviceId": "electron-runtime-device",
+        },
+        "wait_ack": True,
+        "ack_timeout_seconds": 15,
+    }
+    confirm_runtime_cancelled.assert_called_once()
+    assert confirm_runtime_cancelled.call_args.kwargs["execution_id"] == 13
 
 
 async def test_queue_wakeup_only_emits_availability(

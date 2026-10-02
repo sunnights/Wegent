@@ -37,6 +37,7 @@ from app.services.device.identity import (
     RuntimeInstanceMismatchError,
     find_registration_device,
     owned_active_device,
+    resolve_owned_device_alias,
     validate_persistent_runtime_instance_id,
 )
 from shared.telemetry.decorators import trace_sync
@@ -84,6 +85,7 @@ class DeviceService:
         executor_version: Optional[str] = None,
         client_ip: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
         runtime_instance_id: Optional[str] = None,
         runtime_features: Optional[Dict[str, Any]] = None,
     ) -> bool:
@@ -98,6 +100,7 @@ class DeviceService:
             executor_version: Executor version (e.g., '1.0.0')
             client_ip: Device-reported or websocket-observed IP address
             runtime_transfer_host: Host peers should use for direct transfers
+            runtime_transfer_port: Executor session gateway port
             runtime_instance_id: Stable Runtime installation ID
             runtime_features: Features implemented by the online Runtime
 
@@ -114,6 +117,7 @@ class DeviceService:
             executor_version=executor_version,
             client_ip=client_ip,
             runtime_transfer_host=runtime_transfer_host,
+            runtime_transfer_port=runtime_transfer_port,
             runtime_instance_id=runtime_instance_id,
             runtime_features=runtime_features,
         )
@@ -125,6 +129,7 @@ class DeviceService:
         running_task_ids: list[int] = None,
         executor_version: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
         runtime_instance_id: Optional[str] = None,
         runtime_capacity: Optional[Dict[str, Any]] = None,
         runtime_features: Optional[Dict[str, Any]] = None,
@@ -136,6 +141,7 @@ class DeviceService:
             device_id: Device unique identifier
             running_task_ids: List of task IDs currently running on this device
             executor_version: Executor version (e.g., '1.0.0')
+            runtime_transfer_port: Executor session gateway port
 
         Returns:
             True if refreshed successfully
@@ -147,6 +153,7 @@ class DeviceService:
             running_task_ids=running_task_ids,
             executor_version=executor_version,
             runtime_transfer_host=runtime_transfer_host,
+            runtime_transfer_port=runtime_transfer_port,
             runtime_instance_id=runtime_instance_id,
             runtime_capacity=runtime_capacity,
             runtime_features=runtime_features,
@@ -337,6 +344,8 @@ class DeviceService:
         device_type: Optional[str] = None,
         bind_shell: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
+        update_runtime_transfer_port: bool = False,
         runtime_instance_id: Optional[str] = None,
         app_device_id: Optional[str] = None,
         capabilities: Optional[List[str]] = None,
@@ -359,6 +368,8 @@ class DeviceService:
             device_type=device_type,
             bind_shell=bind_shell,
             runtime_transfer_host=runtime_transfer_host,
+            runtime_transfer_port=runtime_transfer_port,
+            update_runtime_transfer_port=update_runtime_transfer_port,
             runtime_instance_id=runtime_instance_id,
             app_device_id=app_device_id,
             capabilities=capabilities,
@@ -375,6 +386,8 @@ class DeviceService:
         device_type: Optional[str] = None,
         bind_shell: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
+        update_runtime_transfer_port: bool = False,
         runtime_instance_id: Optional[str] = None,
         app_device_id: Optional[str] = None,
         capabilities: Optional[List[str]] = None,
@@ -396,6 +409,8 @@ class DeviceService:
                         If None, defaults to 'claudecode' for new devices or
                         preserves existing value.
             runtime_transfer_host: Host peers should use for direct transfers
+            runtime_transfer_port: Executor session gateway port
+            update_runtime_transfer_port: Whether to persist or clear the gateway port
             runtime_instance_id: Stable runtime installation ID shared by all routes
             app_device_id: Desktop app IPC device ID for app registrations
 
@@ -439,6 +454,8 @@ class DeviceService:
                 device_json["spec"]["clientIp"] = client_ip
             if runtime_transfer_host is not None:
                 device_json["spec"]["runtimeTransferHost"] = runtime_transfer_host
+            if update_runtime_transfer_port:
+                device_json["spec"]["runtimeTransferPort"] = runtime_transfer_port
             if runtime_instance_id is not None:
                 device_json["spec"]["runtimeInstanceId"] = runtime_instance_id
             if app_device_id is not None:
@@ -510,6 +527,8 @@ class DeviceService:
                     "state": "Available",
                 },
             }
+            if update_runtime_transfer_port:
+                device_json["spec"]["runtimeTransferPort"] = runtime_transfer_port
             set_device_display_name(device_json, name)
 
             device_kind = Kind(
@@ -601,17 +620,16 @@ class DeviceService:
         user_id: int,
         device_id: str,
     ) -> Optional[Kind]:
-        """Get a device CRD by device_id.
-
-        Args:
-            db: Database session
-            user_id: Device owner user ID
-            device_id: Device unique identifier (stored in Kind.name)
+        """Get one unambiguous Device CRD by any registered identity.
 
         Returns:
             Kind model instance or None if not found
         """
-        return owned_active_device(db, user_id, device_id)
+        return resolve_owned_device_alias(
+            db,
+            user_id=user_id,
+            device_id=device_id,
+        )
 
     @staticmethod
     def get_default_device_for_type(

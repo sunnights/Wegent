@@ -67,6 +67,7 @@ pub struct CodexLocalConfig {
     codex_home: String,
     config_path: String,
     remote_apps_enabled: bool,
+    enabled_plugin_keys: Vec<String>,
 }
 
 fn default_remote_apps_enabled() -> bool {
@@ -93,7 +94,7 @@ pub fn initialize_codex_home(
 pub fn import_external_content(
     request: ExternalContentImportRequest,
 ) -> Result<ExternalContentImportResult, String> {
-    let home = dirs::home_dir().ok_or_else(|| "Unable to resolve home directory".to_owned())?;
+    let home = external_content_home_path()?;
     let destination = wework_codex_home_path()?;
     import_external_content_from_paths(&request.source, &home, &destination)
 }
@@ -173,6 +174,19 @@ fn native_codex_home_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Unable to resolve native Codex home".to_owned())
 }
 
+fn external_content_home_path() -> Result<PathBuf, String> {
+    if env::var("VITE_WEWORK_E2E").as_deref() == Ok("true") {
+        if let Some(path) = non_empty_path(E2E_NATIVE_CODEX_HOME_ENV) {
+            return path
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "Native Codex home parent is unavailable".to_owned());
+        }
+    }
+    crate::local::command::configured_home_dir()
+        .ok_or_else(|| "Unable to resolve home directory".to_owned())
+}
+
 fn read_codex_local_config_from_path(codex_home: &Path) -> Result<CodexLocalConfig, String> {
     let config_path = codex_home.join("config.toml");
     let content = read_optional_config(&config_path)?;
@@ -185,7 +199,34 @@ fn read_codex_local_config_from_path(codex_home: &Path) -> Result<CodexLocalConf
                 config_path.display()
             )
         })?,
+        enabled_plugin_keys: read_enabled_plugin_keys(&content).map_err(|error| {
+            format!(
+                "Failed to parse Codex config {}: {error}",
+                config_path.display()
+            )
+        })?,
     })
+}
+
+fn read_enabled_plugin_keys(content: &str) -> Result<Vec<String>, String> {
+    let config = content
+        .parse::<DocumentMut>()
+        .map_err(|error| error.to_string())?;
+    let mut keys = config
+        .get("plugins")
+        .and_then(|plugins| plugins.as_table_like())
+        .map(|plugins| {
+            plugins
+                .iter()
+                .filter(|(_, plugin)| {
+                    plugin.get("enabled").and_then(|enabled| enabled.as_bool()) == Some(true)
+                })
+                .map(|(key, _)| key.to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    Ok(keys)
 }
 
 fn read_remote_apps_enabled(content: &str) -> Result<bool, String> {
@@ -502,12 +543,18 @@ mod tests {
         assert!(read_remote_apps_enabled("model = \"gpt-5\"\n").unwrap());
         fs::write(
             codex_home.join("config.toml"),
-            "model = \"gpt-5\"\n\n[features]\napps = true # enabled\n",
+            concat!(
+                "model = \"gpt-5\"\n\n",
+                "[features]\napps = true # enabled\n\n",
+                "[plugins.\"enabled@wework-personal\"]\nenabled = true\n\n",
+                "[plugins.\"disabled@wework-personal\"]\nenabled = false\n",
+            ),
         )
         .unwrap();
 
         let current = read_codex_local_config_from_path(&codex_home).unwrap();
         assert!(current.remote_apps_enabled);
+        assert_eq!(current.enabled_plugin_keys, vec!["enabled@wework-personal"]);
 
         write_remote_apps_enabled(&codex_home, false).unwrap();
 

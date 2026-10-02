@@ -64,6 +64,10 @@ export async function createDesktopScenario({
   workbenchReadyTimeoutMs,
 }) {
   const dwsSourceRoot = join(resultDir, 'dws-source')
+  const reconcileMarker = join(resultDir, 'plugin-account-reconcile.log')
+  const retrySignal = join(resultDir, 'plugin-account-retry.signal')
+  let retrySignalGeneration = 0
+  const signalAutomaticRetry = () => writeFile(retrySignal, String((retrySignalGeneration += 1)))
   for (const name of ['config', 'keychain']) {
     await mkdir(join(dwsSourceRoot, name), { recursive: true })
   }
@@ -77,7 +81,18 @@ export async function createDesktopScenario({
   await mkdir(join(fixtureRoot, 'scripts'), { recursive: true })
   await writeFile(
     join(fixtureRoot, 'scripts/legacy-auth.py'),
-    'import json, sys\nassert sys.argv[1:] == ["health"], "Legacy login must not run"\nprint(json.dumps({"status":"need_login"}))\n'
+    `import json, os, sys
+from pathlib import Path
+source = Path.home() / "account-auth-synthetic.json"
+assert os.environ.get("WEGENT_PLUGIN_AUTH_BROKER"), "Local auth did not receive the broker"
+if sys.argv[1:] == ["login"]:
+    source.write_text(json.dumps({"username":"alice@example.test","password":"${secret}-updated"}))
+elif sys.argv[1:] == ["logout"]:
+    source.unlink(missing_ok=True)
+else:
+    assert sys.argv[1:] == ["health"]
+print(json.dumps({"status":"ok" if sys.argv[1] != "health" or source.exists() else "need_login"}))
+`
   )
   await writeFile(
     join(fixtureRoot, '.codex-plugin/plugin.json'),
@@ -92,11 +107,26 @@ export async function createDesktopScenario({
       connectors: [
         {
           slug: 'mail',
+          displayName: 'git.one.example',
+          authorizationGroup: { id: 'sites', displayName: 'Authentication sites' },
           authPolicy: 'on_install',
           localAuth: {
             kind: 'browser_oauth',
-            health: ['scripts/legacy-auth.py', 'health'],
-            start: ['scripts/legacy-auth.py', 'login'],
+            health: [
+              process.platform === 'win32' ? 'python' : 'python3',
+              'scripts/legacy-auth.py',
+              'health',
+            ],
+            start: [
+              process.platform === 'win32' ? 'python' : 'python3',
+              'scripts/legacy-auth.py',
+              'login',
+            ],
+            logout: [
+              process.platform === 'win32' ? 'python' : 'python3',
+              'scripts/legacy-auth.py',
+              'logout',
+            ],
           },
           accountAuth: {
             protocolVersion: 1,
@@ -106,6 +136,8 @@ export async function createDesktopScenario({
         },
         {
           slug: 'oauth',
+          displayName: 'git.two.example',
+          authorizationGroup: { id: 'sites', displayName: 'Authentication sites' },
           authPolicy: 'optional',
           accountAuth: {
             protocolVersion: 1,
@@ -116,6 +148,8 @@ export async function createDesktopScenario({
         },
         {
           slug: 'transfer',
+          displayName: 'git.three.example',
+          authorizationGroup: { id: 'sites', displayName: 'Authentication sites' },
           authPolicy: 'optional',
           accountAuth: {
             protocolVersion: 1,
@@ -340,6 +374,9 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
       DWS_CONFIG_DIR: join(dwsSourceRoot, 'config'),
       DWS_KEYCHAIN_DIR: join(dwsSourceRoot, 'keychain'),
       DWS_DISABLE_KEYCHAIN: '1',
+      WEWORK_E2E_PLUGIN_ACCOUNT_RECONCILE_INTERVAL_MS: '1000',
+      WEWORK_E2E_PLUGIN_ACCOUNT_RECONCILE_MARKER: reconcileMarker,
+      WEWORK_E2E_PLUGIN_ACCOUNT_RETRY_SIGNAL: retrySignal,
     },
     setCloudEnvironment(environment) {
       cloud = environment
@@ -448,6 +485,22 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
         !page.testIds.includes('local-connector-auth-dialog'),
         'Install required a second authorization'
       )
+      await control.command('waitFor', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('click', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('waitFor', '[data-testid="plugin-connector-source-dialog"]', {
+        text: 'git.three.example',
+      })
+      await control.command('fill', '[data-testid="plugin-connector-source-select"]', {
+        value: 'oauth',
+      })
+      await control.command('click', '[data-testid="plugin-connector-source-continue"]')
+      // An account export declaration is not a cloud OAuth app registration.
+      await control.command('waitFor', '[data-testid="plugin-detail-action-error"]', {
+        text: '此连接尚未提供页面登录入口',
+      })
+      await control.command('waitFor', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('click', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('click', '[data-testid="plugin-connector-source-cancel"]')
       await captureScreenshot(control, 'plugin-auth-transparent-detail.png', 'body')
 
       await waitForValue(
@@ -465,6 +518,7 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
       )
       assert.equal(await connectionFor('transfer'), undefined)
       const abortedId = await marker(transferFence)
+      await signalAutomaticRetry()
       await writeFile(
         sourceAuth,
         JSON.stringify({ username: 'alice@example.test', password: secret }),
@@ -483,6 +537,7 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
       )
       assert.notEqual(await marker(transferReceipt), abortedId)
       await assert.rejects(readFile(transferSource), { code: 'ENOENT' })
+      await signalAutomaticRetry()
       // Device grants also advance the revision; settle both grants before
       // using a revision change as proof that the source credential changed.
       const mail = await waitForValue(
@@ -500,6 +555,7 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
         JSON.stringify({ username: 'alice@example.test', password: secret + '-updated' }),
         { mode: 0o600 }
       )
+      await signalAutomaticRetry()
       await waitForValue(
         () => connectionFor('mail'),
         item => item.revision > mail.revision,
@@ -565,6 +621,43 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
         await readFile(join(resultDir, 'oauth-provider-revoked.marker'), 'utf8'),
         'revoked'
       )
+      const localAuth = async (action, sessionId) =>
+        JSON.parse(
+          await control.command('localConnectorAuth', 'body', {
+            value: JSON.stringify({ pluginKey: slug, connectorSlug: 'mail', action, sessionId }),
+          })
+        )
+      // The legacy source is gone. The original entry must show the managed account.
+      assert.equal((await localAuth('health')).status, 'ok')
+      assert.equal((await localAuth('logout')).status, 'ok')
+      assert.equal((await connectionFor('mail')).status, 'disconnected')
+      command = `python3 ${quote(join(cloudRoot, 'scripts/cli.py'))} read`
+      await invokeCloud('plugin_auth_device_not_granted')
+      assert.equal((await localAuth('health')).status, 'need_login')
+      await control.command('click', '[data-testid="plugins-button"]')
+      await control.command(
+        'waitFor',
+        `[data-testid="plugins-installed-strip-item-${installedId}"]`
+      )
+      await control.command('click', `[data-testid="plugins-installed-strip-item-${installedId}"]`)
+      await control.command('waitFor', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('click', '[data-testid="plugin-connection-manage-group:sites"]')
+      await control.command('fill', '[data-testid="plugin-connector-source-select"]', {
+        value: 'mail',
+      })
+      await control.command('click', '[data-testid="plugin-connector-source-continue"]')
+      await control.command('waitFor', '[data-testid="plugin-connector-section"]', {
+        text: '已连接 · git.one.example',
+      })
+      await waitForValue(
+        () => connectionFor('mail'),
+        item => item?.status === 'connected' && item.device_ids.includes(CLOUD_DEVICE_ID),
+        workbenchReadyTimeoutMs,
+        'Fresh login did not resume cloud authentication'
+      )
+      await rm(sourceAuth)
+      assert.equal((await localAuth('health')).status, 'ok')
+      await invokeCloud('cloud-account-updated')
       await verifyDwsCloudAccount({
         cloud,
         resultDir,
@@ -572,6 +665,7 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
         api,
         waitForValue,
         managedRoot,
+        reconcileMarker,
         timeoutMs: workbenchReadyTimeoutMs,
         invoke: async (nextCommand, expected) => {
           command = nextCommand
@@ -580,9 +674,7 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
       })
       // Return to the visible plugin detail after a long background-only workflow.
       await control.command('click', '[data-testid="plugins-button"]')
-      await control.command('waitFor', '[data-testid="plugins-workspace"]', {
-        timeoutMs: workbenchReadyTimeoutMs,
-      })
+      await control.command('waitFor', '[data-testid="plugin-connection-manage-group:sites"]')
       const finalPage = JSON.parse(await control.command('snapshot', 'body'))
       assert.ok(!finalPage.testIds.some(id => id.startsWith('plugin-account-')))
       await captureScreenshot(control, 'plugin-auth-automatic-complete.png', 'body')
@@ -618,6 +710,9 @@ raise SystemExit(delegated if delegated is not None else provider.execute(provid
             exclusiveTransferCloudExecution: true,
             sourceOfflineOAuthRefresh: true,
             oauthProviderRevocation: true,
+            legacyManagedHealth: true,
+            localLogoutDisconnectsCloud: true,
+            originalLoginReconnectsCloud: true,
             dwsOfficialSourceStoreAutomaticMigration: true,
             dwsUnrelatedAccountPreserved: true,
             dwsCloudExecution: true,

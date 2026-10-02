@@ -4,6 +4,8 @@ import { remoteDeviceE2EExtension } from '../remote-device-extension.mjs'
 import { randomBytes } from 'node:crypto'
 import { LocalPluginObjectStorage } from './local-plugin-object-storage.mjs'
 import { rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 
 import {
   CLOUD_DEVICE_ID,
@@ -11,6 +13,7 @@ import {
   CLOUD_MODEL_CASES,
   CLOUD_MULTIMODAL_VISION_CASE,
   CLOUD_PUBLIC_MODEL_NAME,
+  CLOUD_PUBLIC_MODEL_OPTIONS,
   CLOUD_VISION_SIDECAR_CASE,
   DEFAULT_STEP_TIMEOUT_MS,
   MODEL_API_KEY,
@@ -44,12 +47,137 @@ const REDIS_START_ATTEMPTS = 5
 const REDIS_READY_PATTERN = /Ready to accept connections/
 const REDIS_PORT_CONFLICT_PATTERN = /Address already in use|Failed listening on port/
 const MANAGED_CLOUD_SANDBOX_ID = 'wework-e2e-managed-cloud-sandbox'
-const CLOUD_PUBLIC_MODEL_OPTIONS = {
-  weworkCloudModelNamespace: 'default',
-  weworkCloudModelResourceUserId: '0',
-  weworkCloudModelUpstreamApiFormat: 'openai-responses',
+const MYSQL_READY_TIMEOUT_MS = 60_000
+const MYSQL_HELPER = join(repoDir, 'wework', 'e2e', 'desktop', 'support', 'mysql-helper.py')
+
+async function mysqlRequest(request) {
+  const output = await commandOutputAsync('uv', ['run', 'python', MYSQL_HELPER], {
+    cwd: join(repoDir, 'backend'),
+    env: {
+      ...process.env,
+      WEWORK_E2E_MYSQL_REQUEST: JSON.stringify(request),
+    },
+  })
+  return JSON.parse(output)
 }
 
+async function waitForMysqlReady(connectionOptions, mysqlProcess, logPath) {
+  const startedAt = Date.now()
+  let lastError = null
+  while (Date.now() - startedAt < MYSQL_READY_TIMEOUT_MS) {
+    if (mysqlProcess.exitCode !== null || mysqlProcess.signalCode !== null) {
+      const output = await readFile(logPath, 'utf8').catch(() => '')
+      throw new Error(`MySQL exited before becoming ready: ${output.trim() || 'no process output'}`)
+    }
+    try {
+      await mysqlRequest({ ...connectionOptions, operation: 'ping' })
+      return
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 250))
+  }
+  throw new Error(`Timed out waiting for MySQL readiness: ${String(lastError)}`)
+}
+
+async function startMysqlServer(logPath) {
+  const mysqlBinary = process.env.WEWORK_E2E_MYSQLD_BIN?.trim() || 'mysqld'
+  const dataDirectory = join(resultDir, `cloud-mysql-${process.pid}`)
+  await rm(dataDirectory, { recursive: true, force: true })
+  await mkdir(dataDirectory, { recursive: true })
+
+  const initializeArgs = ['--no-defaults', '--initialize-insecure', `--datadir=${dataDirectory}`]
+  if (process.platform !== 'win32') initializeArgs.push('--user=root')
+  await runChecked(mysqlBinary, initializeArgs)
+
+  const port = await reservePort()
+  const socketPath = join(tmpdir(), `wework-mysql-${process.pid}.sock`)
+  await rm(socketPath, { force: true })
+  const serverArgs = [
+    '--no-defaults',
+    `--datadir=${dataDirectory}`,
+    '--bind-address=127.0.0.1',
+    `--port=${port}`,
+    '--mysqlx=0',
+    '--skip-log-bin',
+    '--max-connections=64',
+    '--innodb-buffer-pool-size=64M',
+    '--sql-mode=NO_ENGINE_SUBSTITUTION',
+  ]
+  if (process.platform !== 'win32') {
+    serverArgs.push('--user=root', `--socket=${socketPath}`)
+  } else {
+    serverArgs.push('--console')
+  }
+  const server = spawn(mysqlBinary, serverArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+  })
+  await Promise.all([
+    appendProcessOutput(server.stdout, logPath),
+    appendProcessOutput(server.stderr, logPath),
+  ])
+  const connectionOptions = {
+    host: '127.0.0.1',
+    port,
+  }
+  try {
+    await waitForMysqlReady(connectionOptions, server, logPath)
+  } catch (error) {
+    await stopProcessGroup(server)
+    throw error
+  }
+
+  const databaseName = `wework_e2e_${process.pid}_${randomBytes(4).toString('hex')}`
+  try {
+    await mysqlRequest({
+      ...connectionOptions,
+      operation: 'execute',
+      sql: `CREATE DATABASE \`${databaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    })
+  } catch (error) {
+    await stopProcessGroup(server)
+    throw error
+  }
+  return {
+    databaseName,
+    databaseUrl: `mysql+pymysql://root@127.0.0.1:${port}/${databaseName}`,
+    connectionOptions,
+    server,
+  }
+}
+
+async function resolveBackendRsBinary() {
+  const configured = process.env.WEWORK_E2E_BACKEND_RS_BIN?.trim()
+  if (configured) {
+    assert.ok(
+      await pathExists(configured),
+      `Configured backend-rs binary does not exist: ${configured}`
+    )
+    return configured
+  }
+  const manifestPath = join(repoDir, 'backend-rs', 'Cargo.toml')
+  const metadata = JSON.parse(
+    await commandOutputAsync(
+      'cargo',
+      ['metadata', '--manifest-path', manifestPath, '--no-deps', '--format-version', '1'],
+      { cwd: repoDir }
+    )
+  )
+  const binary = join(
+    metadata.target_directory,
+    'debug',
+    process.platform === 'win32' ? 'wegent-backend-rs.exe' : 'wegent-backend-rs'
+  )
+  if (!(await pathExists(binary))) {
+    await runChecked(
+      'cargo',
+      ['build', '--manifest-path', manifestPath, '--bin', 'wegent-backend-rs'],
+      { cwd: repoDir }
+    )
+  }
+  return binary
+}
 async function waitForRedisReady(redis, logPath, fromOffset) {
   let spawnError = null
   const captureSpawnError = error => {
@@ -110,8 +238,82 @@ async function startRedisServer(
   throw new Error(`Redis did not start after ${REDIS_START_ATTEMPTS} attempts`)
 }
 
+class LocalNevisSandboxService {
+  constructor() {
+    this.restartRequests = []
+  }
+
+  async start() {
+    this.port = await reservePort()
+    this.server = createServer((request, response) => {
+      void this.handle(request, response).catch(error => {
+        if (response.headersSent) {
+          response.destroy(error instanceof Error ? error : undefined)
+          return
+        }
+        response.writeHead(500)
+        response.end()
+      })
+    })
+    await new Promise((resolvePromise, reject) => {
+      this.server.once('error', reject)
+      this.server.listen(this.port, '127.0.0.1', resolvePromise)
+    })
+    this.endpoint = `http://127.0.0.1:${this.port}`
+  }
+
+  sendJson(response, body) {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(body))
+  }
+
+  async handle(request, response) {
+    const url = new URL(request.url ?? '/', this.endpoint)
+    const restartMatch = url.pathname.match(
+      /^\/apis\/sandboxes\/v1\/managers\/([^/]+)\/sandboxes\/([^/]+)\/restart$/
+    )
+    if (request.method === 'POST' && restartMatch) {
+      request.resume()
+      const restartRequest = {
+        managerId: decodeURIComponent(restartMatch[1]),
+        sandboxId: decodeURIComponent(restartMatch[2]),
+      }
+      this.restartRequests.push(restartRequest)
+      this.sendJson(response, { id: restartRequest.sandboxId, status: 'restarting' })
+      return
+    }
+    if (request.method === 'POST' && url.pathname.endsWith('/metrics/raw_query')) {
+      request.resume()
+      this.sendJson(response, { data: { data: { result: [] } } })
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  }
+
+  async waitForRestartRequest(afterCount) {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < DEFAULT_STEP_TIMEOUT_MS) {
+      if (this.restartRequests.length > afterCount) {
+        return this.restartRequests[afterCount]
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 50))
+    }
+    throw new Error('The local Nevis service did not receive a restart request')
+  }
+
+  async stop() {
+    if (!this.server) return
+    await new Promise(resolvePromise => {
+      this.server.close(resolvePromise)
+      this.server.closeAllConnections?.()
+    })
+  }
+}
+
 class RealCloudEnvironment {
   constructor({
+    backendEnv = {},
     claudeBinary,
     codexBinary,
     managedCloudIdentity = false,
@@ -119,6 +321,7 @@ class RealCloudEnvironment {
     scenarioConfigToml = '',
     workspacePath,
   }) {
+    this.scenarioBackendEnv = backendEnv
     this.claudeBinary = claudeBinary
     this.codexBinary = codexBinary
     this.managedCloudIdentity = managedCloudIdentity
@@ -131,27 +334,37 @@ class RealCloudEnvironment {
 
   async startBackend() {
     const backendDirectory = join(repoDir, 'backend')
-    this.databasePath = join(resultDir, 'cloud-backend.sqlite3')
     this.backendLogPath = join(resultDir, 'cloud-backend.log')
     this.redisLogPath = join(resultDir, 'cloud-redis.log')
+    this.mysqlLogPath = join(resultDir, 'cloud-mysql.log')
     this.remoteExecutorLogPath = join(resultDir, 'cloud-executor.log')
     this.remoteDockerExecutorLogPath = join(resultDir, 'remote-docker-executor.log')
     this.remoteExecutorRuntimeLogPath = join(resultDir, 'cloud-executor-runtime.log')
     this.remoteDockerExecutorRuntimeLogPath = join(resultDir, 'remote-docker-executor-runtime.log')
     this.pluginObjectStorage = new LocalPluginObjectStorage()
     await this.pluginObjectStorage.start()
+    this.nevisSandboxService = new LocalNevisSandboxService()
+    await this.nevisSandboxService.start()
 
     const redisServer = await startRedisServer(this.redisLogPath)
     this.redisPort = redisServer.port
     this.redis = redisServer.redis
+    const mysqlServer = await startMysqlServer(this.mysqlLogPath)
+    this.mysql = mysqlServer.server
+    this.mysqlConnectionOptions = mysqlServer.connectionOptions
+    this.databaseName = mysqlServer.databaseName
+    this.databaseUrl = mysqlServer.databaseUrl
 
     this.backendPort = await reservePort()
+    do {
+      this.pythonBackendPort = await reservePort()
+    } while (this.pythonBackendPort === this.backendPort)
     this.backendUrl = `http://127.0.0.1:${this.backendPort}`
     this.socketUrl = `http://localhost:${this.backendPort}`
 
     const backendEnv = {
       ...process.env,
-      DATABASE_URL: `sqlite:///${this.databasePath}`,
+      DATABASE_URL: this.databaseUrl,
       REDIS_URL: `redis://127.0.0.1:${this.redisPort}/0`,
       CELERY_BROKER_URL: `redis://127.0.0.1:${this.redisPort}/0`,
       CELERY_RESULT_BACKEND: `redis://127.0.0.1:${this.redisPort}/0`,
@@ -170,6 +383,7 @@ class RealCloudEnvironment {
       CHAT_SHELL_MODE: 'package',
       CHAT_SHELL_TOKEN: MODEL_API_KEY,
       WEGENT_SOCKET_URL: this.socketUrl,
+      FLOW_SCHEDULER_INTERVAL_SECONDS: '5',
       ...remoteDeviceE2EExtension.backendEnv,
       TERMINAL_PROTOCOL_V2_ENABLED: 'true',
       PYTHONIOENCODING: 'utf-8',
@@ -182,6 +396,11 @@ class RealCloudEnvironment {
       ATTACHMENT_S3_ACCESS_KEY: 'desktop-e2e-access-key',
       ATTACHMENT_S3_SECRET_KEY: 'desktop-e2e-secret-key',
       ATTACHMENT_S3_USE_SSL: 'false',
+      NEVIS_BASE_URL: this.nevisSandboxService.endpoint,
+      NEVIS_MANAGER_ID: 'wework-e2e-manager',
+      NEVIS_IMAGE_ID: 'wework-e2e-image',
+      NEVIS_SIGNATURE: 'wework-e2e-signature',
+      ...this.scenarioBackendEnv,
     }
     this.backendEnv = backendEnv
     await runChecked('uv', ['run', 'alembic', 'upgrade', 'head'], {
@@ -203,7 +422,9 @@ class RealCloudEnvironment {
   }
 
   async launchBackend() {
-    this.backend = spawn(
+    const rustLogDirectory = join(resultDir, 'backend-rs-logs')
+    await mkdir(rustLogDirectory, { recursive: true })
+    this.pythonBackend = spawn(
       'uv',
       [
         'run',
@@ -215,7 +436,7 @@ class RealCloudEnvironment {
         '--host',
         '127.0.0.1',
         '--port',
-        String(this.backendPort),
+        String(this.pythonBackendPort),
       ],
       {
         cwd: join(repoDir, 'backend'),
@@ -225,19 +446,70 @@ class RealCloudEnvironment {
       }
     )
     await Promise.all([
-      appendProcessOutput(this.backend.stdout, this.backendLogPath),
-      appendProcessOutput(this.backend.stderr, this.backendLogPath),
+      appendProcessOutput(this.pythonBackend.stdout, this.backendLogPath),
+      appendProcessOutput(this.pythonBackend.stderr, this.backendLogPath),
     ])
     await waitForUrl(
-      `${this.backendUrl}/api/docs`,
-      `Real cloud backend did not start; see ${this.backendLogPath}`
+      `http://127.0.0.1:${this.pythonBackendPort}/api/docs`,
+      `Real cloud Python backend did not start; see ${this.backendLogPath}`
     )
+
+    const backendRsBinary = await resolveBackendRsBinary()
+    this.rustBackend = spawn(backendRsBinary, [], {
+      cwd: join(repoDir, 'backend-rs'),
+      env: {
+        ...this.backendEnv,
+        WEGENT_RS_LISTEN_HOST: '127.0.0.1',
+        WEGENT_RS_LISTEN_PORT: String(this.backendPort),
+        WEGENT_PYTHON_UPSTREAM_URL: `http://127.0.0.1:${this.pythonBackendPort}`,
+        WEGENT_RS_ROUTES_FILE: join(repoDir, 'backend-rs', 'config', 'routes.toml'),
+        WEGENT_BACKEND_RS_ENV_FILE: join(repoDir, 'backend', '.env.example'),
+        BREEZE_LOG_DIR: rustLogDirectory,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    })
+    await Promise.all([
+      appendProcessOutput(this.rustBackend.stdout, this.backendLogPath),
+      appendProcessOutput(this.rustBackend.stderr, this.backendLogPath),
+    ])
+    await waitForUrl(
+      `${this.backendUrl}/api/startup`,
+      `Real cloud Rust gateway did not start; see ${this.backendLogPath}`
+    )
+  }
+
+  async stopBackend() {
+    await stopProcessGroup(this.rustBackend)
+    await stopProcessGroup(this.pythonBackend)
+    this.rustBackend = null
+    this.pythonBackend = null
+  }
+
+  async queryDatabase(sql, params = []) {
+    return mysqlRequest({
+      ...this.mysqlConnectionOptions,
+      database: this.databaseName,
+      operation: 'query',
+      sql,
+      params,
+    })
+  }
+
+  async executeDatabase(sql, params = []) {
+    return mysqlRequest({
+      ...this.mysqlConnectionOptions,
+      database: this.databaseName,
+      operation: 'execute',
+      sql,
+      params,
+    })
   }
 
   async restartBackendWithTerminalProtocolV2(enabled) {
     assert.equal(typeof enabled, 'boolean')
     assert.ok(this.backendEnv, 'The cloud backend environment is not initialized')
-    await stopProcessGroup(this.backend)
+    await this.stopBackend()
     const fromOffset = (await readFile(this.backendLogPath, 'utf8')).length
     this.backendEnv = {
       ...this.backendEnv,
@@ -252,6 +524,17 @@ class RealCloudEnvironment {
       { fromOffset, timeoutMs: WORKBENCH_READY_TIMEOUT_MS }
     )
     await this.waitForDevice(CLOUD_DEVICE_ID, this.remoteExecutorLogPath)
+  }
+
+  async restartBackendWithFrontendUrl(frontendUrl) {
+    assert.ok(frontendUrl, 'The cloud frontend URL is required')
+    assert.ok(this.backendEnv, 'The cloud backend environment is not initialized')
+    await this.stopBackend()
+    this.backendEnv = {
+      ...this.backendEnv,
+      FRONTEND_URL: frontendUrl,
+    }
+    await this.launchBackend()
   }
 
   async publishOfficialSmartApp(sourcePath) {
@@ -484,14 +767,18 @@ class RealCloudEnvironment {
   }
 
   async configureManagedCloudIdentity() {
-    await runChecked('sqlite3', [
-      this.databasePath,
-      [
-        'UPDATE kinds',
-        `SET json = json_set(json, '$.spec.cloudConfig.sandboxId', '${MANAGED_CLOUD_SANDBOX_ID}', '$.spec.cloudConfig.deviceId', '${CLOUD_DEVICE_ID}')`,
-        `WHERE kind = 'Device' AND name = '${CLOUD_DEVICE_ID}';`,
-      ].join(' '),
-    ])
+    await this.executeDatabase(
+      `UPDATE kinds
+       SET json = JSON_SET(
+         json,
+         '$.spec.cloudConfig', JSON_OBJECT(
+           'sandboxId', %s,
+           'deviceId', %s
+         )
+       )
+       WHERE kind = 'Device' AND name = %s`,
+      [MANAGED_CLOUD_SANDBOX_ID, CLOUD_DEVICE_ID, CLOUD_DEVICE_ID]
+    )
 
     const configured = await this.device(CLOUD_DEVICE_ID)
     assert.equal(
@@ -592,6 +879,7 @@ class RealCloudEnvironment {
         runtime: 'codex',
         message,
         title,
+        additionalSkills: [{ name: 'wework-plugin-creator', namespace: 'codex', is_public: false }],
         modelId: CLOUD_PUBLIC_MODEL_NAME,
         modelType: 'public',
         modelOptions: CLOUD_PUBLIC_MODEL_OPTIONS,
@@ -625,7 +913,7 @@ class RealCloudEnvironment {
         throw new Error(`Cloud runtime task ${address.taskId} settled as ${task.status}`)
       }
       const active =
-        task?.running === true || ['creating', 'queued', 'active', 'running'].includes(task?.status)
+        task?.running === true || ['creating', 'queued', 'running'].includes(task?.status)
       if (task?.workspacePath === address.workspacePath && !active) return task
       await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
     }
@@ -675,7 +963,24 @@ class RealCloudEnvironment {
     return devices.find(device => device.device_id === deviceId) ?? null
   }
 
+  async setExecutorLatestVersion(version) {
+    await runChecked(
+      'redis-cli',
+      [
+        '-h',
+        '127.0.0.1',
+        '-p',
+        String(this.redisPort),
+        'SET',
+        'executor:latest_version',
+        JSON.stringify(version),
+      ],
+      { env: this.backendEnv }
+    )
+  }
+
   async devices() {
+    // Exercise the public hybrid endpoint so Cloud E2E covers Rust routing and shared MySQL state.
     const devices = await fetchJson(`${this.backendUrl}/api/devices`, {
       headers: { Authorization: `Bearer ${this.authToken}` },
     })
@@ -693,6 +998,57 @@ class RealCloudEnvironment {
       await new Promise(resolvePromise => setTimeout(resolvePromise, 250))
     }
     throw new Error('The desktop local executor did not register as an app device')
+  }
+
+  async startDuplicateAppDeviceIdentity() {
+    assert.ok(this.executorBinary, 'The real Executor binary is not ready')
+    const appDevice = await this.waitForConnectedAppDevice()
+    const home = join(resultDir, `duplicate-app-executor-home-${process.pid}`)
+    const codexHome = join(home, 'codex')
+    const logPath = join(resultDir, `duplicate-app-executor-${process.pid}.log`)
+    await writeCodexConfig(codexHome, this.modelServerUrl)
+    const env = this.executorEnv({
+      deviceId: appDevice.device_id,
+      deviceName: 'Wework E2E Duplicate App Device',
+      deviceType: 'app',
+      home,
+      codexHome,
+      logFile: `duplicate-app-executor-${process.pid}-runtime.log`,
+    })
+    const executor = spawn(this.executorBinary, [], {
+      cwd: weworkDir,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    })
+    this.generatedRemoteExecutors.push(executor)
+    await Promise.all([
+      appendProcessOutput(executor.stdout, logPath),
+      appendProcessOutput(executor.stderr, logPath),
+    ])
+    const startedAt = Date.now()
+    let matching = []
+    while (Date.now() - startedAt < WORKBENCH_READY_TIMEOUT_MS) {
+      matching = (await this.devices()).filter(
+        device =>
+          device.device_type === 'app' &&
+          device.device_id === appDevice.device_id &&
+          device.status === 'online'
+      )
+      if (matching.length === 2) break
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 250))
+    }
+    assert.equal(
+      matching.length,
+      2,
+      `The second real app Executor did not register; see ${logPath}`
+    )
+    assert.equal(
+      new Set(matching.map(device => device.execution_target_id)).size,
+      2,
+      'The real app Executors did not receive independent record-scoped routes'
+    )
+    return appDevice
   }
 
   async waitForDeviceType(deviceId, expectedType) {
@@ -802,6 +1158,33 @@ class RealCloudEnvironment {
     })
   }
 
+  revokeTerminalSession(sessionId) {
+    assert.match(
+      sessionId,
+      /^[A-Za-z0-9:_-]+$/u,
+      'The terminal session ID is not safe for the Redis fixture'
+    )
+    const subscriberCount = Number(
+      commandOutput('redis-cli', [
+        '-p',
+        String(this.redisPort),
+        '--raw',
+        'EVAL',
+        "redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]); return redis.call('PUBLISH', ARGV[3], ARGV[4])",
+        '1',
+        `terminal_session:${sessionId}`,
+        '{"revoked":true}',
+        '3600',
+        'terminal_session:invalidations',
+        `revoke|${sessionId}`,
+      ])
+    )
+    assert.ok(
+      Number.isInteger(subscriberCount) && subscriberCount >= 1,
+      'The Backend did not observe the terminal-session revocation'
+    )
+  }
+
   async restartCloudExecutor() {
     assert.ok(this.remoteExecutorEnv, 'The cloud Executor environment is not initialized')
     const previousDevice = await this.device(CLOUD_DEVICE_ID)
@@ -828,6 +1211,15 @@ class RealCloudEnvironment {
       runtimeInstanceId: device.runtime_instance_id,
       logOffset: previousLog.length,
     }
+  }
+
+  nevisRestartRequestCount() {
+    return this.nevisSandboxService?.restartRequests.length ?? 0
+  }
+
+  async waitForNevisRestartRequest(afterCount) {
+    assert.ok(this.nevisSandboxService, 'The local Nevis service is not running')
+    return this.nevisSandboxService.waitForRestartRequest(afterCount)
   }
 
   async startGeneratedRemoteDevice({
@@ -1107,17 +1499,15 @@ class RealCloudEnvironment {
     assert.match(
       localDevice.device_id,
       /^[A-Za-z0-9._-]+$/,
-      'The connected local app device ID is not safe for the SQLite fixture'
+      'The connected local app device ID is not safe for the database fixture'
     )
 
-    await runChecked('sqlite3', [
-      this.databasePath,
-      [
-        'UPDATE kinds',
-        `SET json = json_set(json, '$.spec.appDeviceId', '${localDevice.device_id}')`,
-        `WHERE kind = 'Device' AND name = '${CLOUD_DEVICE_ID}';`,
-      ].join(' '),
-    ])
+    await this.executeDatabase(
+      `UPDATE kinds
+       SET json = JSON_SET(json, '$.spec.appDeviceId', %s)
+       WHERE kind = 'Device' AND name = %s`,
+      [localDevice.device_id, CLOUD_DEVICE_ID]
+    )
 
     const updated = await fetchJson(`${this.backendUrl}/api/devices`, {
       headers: { Authorization: `Bearer ${this.authToken}` },
@@ -1174,9 +1564,11 @@ class RealCloudEnvironment {
     await stopProcessGroup(this.remoteExecutor)
     await stopProcessGroup(this.remoteDockerExecutor)
     await Promise.all(this.generatedRemoteExecutors.map(executor => stopProcessGroup(executor)))
-    await stopProcessGroup(this.backend)
+    await this.stopBackend()
     await this.pluginObjectStorage?.stop()
+    await this.nevisSandboxService?.stop()
     await stopProcess(this.redis)
+    await stopProcessGroup(this.mysql)
   }
 }
 

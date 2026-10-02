@@ -31,6 +31,7 @@ from app.api.endpoints import (
     knowledge_video_upload,
     local_executor,
     loop_item_executions,
+    mcp_identity,
     mcp_providers,
     oauth_clients,
     oauth_provider,
@@ -60,14 +61,18 @@ from app.api.endpoints import (
     users,
     utils,
     web_scraper,
+    wework_api,
     wework_auth,
     wework_notifications,
     wework_transcripts,
     wiki,
     wizard,
     work_queue,
+    workspaces,
 )
+from app.api.endpoints.admin.device_ip import router as admin_device_ip_router
 from app.api.endpoints.dingtalk_wikispace import router as dingtalk_wikispace_router
+from app.api.endpoints.external_wiki import router as external_wiki_router
 from app.core.config import settings
 
 # RAG module is heavy (llama_index, scipy, pandas, grpc) - skip in standalone mode
@@ -159,11 +164,25 @@ api_router.include_router(
 )
 api_router.include_router(pet.router, prefix="/users/me/pet", tags=["pet"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(
+    admin_device_ip_router,
+    prefix="/internal/admin/devices",
+    tags=["internal-admin"],
+)
 api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(im_sessions.im_router, prefix="/im", tags=["im"])
 api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 api_router.include_router(
     cloud_projects.router, prefix="/v1/cloud-projects", tags=["cloud-projects"]
+)
+api_router.include_router(
+    cloud_projects.router, prefix="/v1/projects", tags=["projects"]
+)
+api_router.include_router(
+    workspaces.router, prefix="/v1/workspaces", tags=["workspaces"]
+)
+api_router.include_router(
+    workspaces.resources_router, prefix="/v1/resources", tags=["resources"]
 )
 api_router.include_router(
     project_automations.router,
@@ -198,11 +217,6 @@ api_router.include_router(
 api_router.include_router(
     loop_item_executions.router,
     prefix="/v1/cloud-projects",
-    tags=["cloud-projects"],
-)
-api_router.include_router(
-    loop_item_executions.claim_router,
-    prefix="/v1",
     tags=["cloud-projects"],
 )
 api_router.include_router(deliveries.router, prefix="/v1", tags=["deliveries"])
@@ -263,6 +277,7 @@ api_router.include_router(wizard.router, prefix="/wizard", tags=["wizard"])
 api_router.include_router(
     openapi_responses.router, prefix="/v1/responses", tags=["openapi-responses"]
 )
+api_router.include_router(wework_api.router, tags=["openapi-discovery"])
 api_router.include_router(sites.router, prefix="/sites", tags=["sites"])
 api_router.include_router(deep_research.router, prefix="/v1", tags=["deep-research"])
 api_router.include_router(
@@ -379,6 +394,7 @@ api_router.include_router(
     system_skills.router, prefix="/system-skills", tags=["system-skills"]
 )
 api_router.include_router(skill_identity.router, tags=["skill-identity"])
+api_router.include_router(mcp_identity.router, tags=["mcp-identity"])
 api_router.include_router(
     prompt_optimization.router,
     prefix="/prompt-optimization",
@@ -397,6 +413,9 @@ api_router.include_router(
 # RAG internal router is conditionally registered based on STANDALONE_MODE
 if not settings.STANDALONE_MODE:
     api_router.include_router(rag_router, prefix="/internal", tags=["internal-rag"])
+
+# External Wiki management and synchronized import are independent of MCP.
+api_router.include_router(external_wiki_router, tags=["external-wiki"])
 
 api_router.include_router(
     knowledge_router, prefix="/internal", tags=["internal-knowledge"]

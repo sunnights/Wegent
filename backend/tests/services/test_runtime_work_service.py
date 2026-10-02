@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from fastapi import HTTPException
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.core.constants import CLIENT_ORIGIN_WEWORK
 from app.models.kind import Kind
@@ -1289,6 +1290,7 @@ async def test_open_runtime_transcript_dispatches_to_owned_mapped_device_without
             "taskId": "codex-1",
             "workspacePath": "/repo/Wegent",
             "runtime": "codex",
+            "turns": [],
             "messages": [
                 {
                     "id": "m1",
@@ -1356,6 +1358,7 @@ async def test_runtime_transcript_dispatches_pagination_payload(
             "taskId": "codex-1",
             "workspacePath": "/repo/Wegent",
             "runtime": "codex",
+            "turns": [],
             "messages": [
                 {
                     "id": "assistant-1",
@@ -1523,6 +1526,7 @@ async def test_runtime_transcript_dispatches_full_content_payload(
             "taskId": "codex-1",
             "workspacePath": "/repo/Wegent",
             "runtime": "codex",
+            "turns": [],
             "messages": [],
             "fullContent": True,
         }
@@ -1538,6 +1542,7 @@ async def test_runtime_transcript_dispatches_full_content_payload(
             workspacePath="/repo/Wegent",
             afterCursor="offset:10",
             includeFullContent=True,
+            conversationContextOnly=True,
         ),
     )
 
@@ -1552,6 +1557,7 @@ async def test_runtime_transcript_dispatches_full_content_payload(
             "taskId": "codex-1",
             "afterCursor": "offset:10",
             "includeFullContent": True,
+            "conversationContextOnly": True,
         },
         timeout_seconds=30,
     )
@@ -1843,10 +1849,12 @@ async def test_unarchive_conversation_dispatches_to_owned_device(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_turn_id", [None, "2001"])
 async def test_cancel_runtime_task_dispatches_to_owned_device_without_task_rows(
     test_db,
     test_user,
     monkeypatch,
+    runtime_turn_id,
 ):
     from app.schemas.runtime_work import RuntimeTaskAddress
     from app.services import runtime_work_service
@@ -1873,6 +1881,7 @@ async def test_cancel_runtime_task_dispatches_to_owned_device_without_task_rows(
             deviceId="device-1",
             localTaskId="codex-1",
         ),
+        runtime_turn_id=runtime_turn_id,
     )
 
     assert response.accepted is True
@@ -1884,6 +1893,7 @@ async def test_cancel_runtime_task_dispatches_to_owned_device_without_task_rows(
         payload={
             "deviceId": "device-1",
             "taskId": "codex-1",
+            **({"subtask_id": 2001} if runtime_turn_id else {}),
         },
         timeout_seconds=30,
     )
@@ -1990,6 +2000,56 @@ async def test_delete_archived_conversations_bulk_groups_by_device(
         },
         timeout_seconds=30,
     )
+
+
+@pytest.mark.asyncio
+async def test_send_runtime_message_preserves_executor_queue_status(
+    test_db,
+    test_user,
+    monkeypatch,
+):
+    from app.schemas.runtime_work import RuntimeSendRequest, RuntimeTaskAddress
+    from app.services import runtime_work_service
+
+    monkeypatch.setattr(
+        runtime_work_service.device_service,
+        "get_device_by_device_id",
+        lambda db, user_id, device_id: object(),
+    )
+    monkeypatch.setattr(
+        runtime_work_service,
+        "_build_runtime_send_execution_request",
+        lambda **kwargs: SimpleNamespace(to_dict=lambda: {"prompt": kwargs["message"]}),
+    )
+    monkeypatch.setattr(
+        runtime_work_service.runtime_rpc_service,
+        "call",
+        AsyncMock(
+            return_value={
+                "success": True,
+                "accepted": True,
+                "taskId": "codex-1",
+                "status": "queued",
+                "queuePosition": 2,
+            }
+        ),
+    )
+
+    response = await runtime_work_service.send_runtime_message(
+        db=test_db,
+        user_id=test_user.id,
+        request=RuntimeSendRequest(
+            address=RuntimeTaskAddress(
+                deviceId="device-1",
+                localTaskId="codex-1",
+            ),
+            message="continue",
+        ),
+    )
+
+    assert response.accepted is True
+    assert response.status == "queued"
+    assert response.queue_position == 2
 
 
 @pytest.mark.asyncio
@@ -2653,6 +2713,7 @@ def test_compile_explicit_bot_request_resolves_backend_project_workspace(
             taskId="codex-queue-44",
             runtime="codex",
             message="Implement the issue",
+            forceStart=True,
             bot=[{"id": "robot-1", "name": "Robot", "shell_type": "Codex"}],
             origin={
                 "type": "board_task",
@@ -2665,6 +2726,7 @@ def test_compile_explicit_bot_request_resolves_backend_project_workspace(
     assert compiled.target.workspace_path == "/srv/workspaces/Wegent"
     assert compiled.payload["workspacePath"] == "/srv/workspaces/Wegent"
     assert compiled.payload["schemaVersion"] == 2
+    assert compiled.payload["forceStart"] is True
     assert "local_project_id" not in compiled.payload
     assert compiled.payload["executionRequest"]["project_workspace_path"] == (
         "/srv/workspaces/Wegent"
@@ -2787,6 +2849,75 @@ def test_team_create_v3_keeps_executor_wire_protocol_at_v2(
 
     assert payload["schemaVersion"] == 2
     assert "wegentTeamId" not in payload
+
+
+def test_runtime_create_payload_preserves_additional_skill_refs(
+    test_db,
+    test_user,
+) -> None:
+    from app.schemas.runtime_work import RuntimeTaskCreateRequest
+    from app.services import runtime_work_service
+
+    additional_skills = [
+        {
+            "name": "wework-plugin-creator",
+            "namespace": "codex",
+            "is_public": False,
+        }
+    ]
+    payload = runtime_work_service._runtime_task_create_payload(
+        db=test_db,
+        user_id=test_user.id,
+        request=RuntimeTaskCreateRequest(
+            schemaVersion=2,
+            deviceId="cloud-device-1",
+            workspacePath="/srv/workspaces/Wegent",
+            runtime="claude_code",
+            message="Review the implementation",
+            additionalSkills=additional_skills,
+        ),
+        target=runtime_work_service.RuntimeTaskTarget(
+            device_id="cloud-device-1",
+            workspace_path="/srv/workspaces/Wegent",
+        ),
+        execution_request=SimpleNamespace(
+            team_id=0,
+            system_prompt="",
+            attachments=[],
+            to_dict=lambda: {"team_id": 0},
+        ),
+    )
+
+    assert payload["additionalSkills"] == additional_skills
+    assert "preload_skills" not in payload["executionRequest"]
+    assert "user_selected_skills" not in payload["executionRequest"]
+
+
+def test_runtime_create_merges_agent_and_project_plugins() -> None:
+    from app.schemas.runtime_work import RuntimeTaskCreateRequest
+    from app.services import runtime_work_service
+
+    execution_request = SimpleNamespace(
+        project_plugin_ids=["agent-tool@official", "shared-tool@official"]
+    )
+    request = RuntimeTaskCreateRequest(
+        deviceId="cloud-device-1",
+        workspacePath="/srv/workspaces/Wegent",
+        runtime="codex",
+        message="Review the implementation",
+        projectPlugins=[
+            {"id": "shared-tool@official"},
+            {"id": "project-tool@team-market"},
+        ],
+    )
+
+    runtime_work_service._apply_runtime_create_request(execution_request, request)
+
+    assert execution_request.project_plugin_ids == [
+        "agent-tool@official",
+        "shared-tool@official",
+        "project-tool@team-market",
+    ]
 
 
 def test_materialize_runtime_task_requires_team_intent(
@@ -4589,6 +4720,27 @@ async def test_runtime_transfer_direct_hosts_filters_loopback_for_cross_device(
     )
 
 
+@pytest.mark.asyncio
+async def test_runtime_transfer_direct_hosts_ignores_redis_failure(monkeypatch):
+    from app.services import runtime_work_service
+
+    monkeypatch.setattr(
+        runtime_work_service.device_service,
+        "get_device_online_info",
+        AsyncMock(side_effect=RedisConnectionError("Redis unavailable")),
+    )
+
+    assert (
+        await runtime_work_service._runtime_transfer_direct_hosts(
+            db=None,
+            user_id=7,
+            device_id="target-device",
+            peer_device_id="source-device",
+        )
+        == []
+    )
+
+
 def _codex_provider_model(
     test_db,
     user_id: int,
@@ -5196,6 +5348,13 @@ def test_build_runtime_execution_request_v2_without_team_uses_direct_wework_path
     assert execution_request.team_id == 0
     assert execution_request.bot == []
     assert execution_request.model_config["model_id"] == "doubao-seed-2.0-lite"
+    from app.services.auth import verify_skill_identity_token
+
+    skill_identity = verify_skill_identity_token(execution_request.skill_identity_token)
+    assert skill_identity is not None
+    assert skill_identity.user_id == test_user.id
+    assert skill_identity.runtime_type == "executor"
+    assert skill_identity.runtime_name.startswith("wework-runtime-")
 
 
 def test_runtime_address_team_binding_is_additive() -> None:
@@ -5211,6 +5370,52 @@ def test_runtime_address_team_binding_is_additive() -> None:
 
     assert runtime_work_service._runtime_address_team_id(legacy) is None
     assert runtime_work_service._runtime_address_team_id(bound) == 7
+
+
+@pytest.mark.asyncio
+async def test_send_preserves_desktop_task_binding_and_compiles_continuation(
+    monkeypatch,
+):
+    from app.schemas.runtime_work import RuntimeSendRequest, RuntimeTaskAddress
+    from app.services import runtime_work_service as service
+
+    compiled = SimpleNamespace(new_session=True, to_dict=lambda: {"new_session": False})
+    compile_calls = []
+
+    def compile_request(**kwargs):
+        compile_calls.append(kwargs["request"])
+        return compiled
+
+    monkeypatch.setattr(service, "_ensure_owned_device", lambda *args: None)
+    monkeypatch.setattr(service, "_touch_workspace_mapping", lambda *args: None)
+    monkeypatch.setattr(service, "_build_runtime_execution_request", compile_request)
+    rpc = AsyncMock(return_value={"accepted": True, "taskId": "original-task"})
+    monkeypatch.setattr(service.runtime_rpc_service, "call", rpc)
+    handle = {"wegentTeam": {"id": 42}}
+
+    await service.send_runtime_message(
+        db=None,
+        user_id=7,
+        request=RuntimeSendRequest(
+            address=RuntimeTaskAddress(
+                deviceId="device-1",
+                taskId="original-task",
+                workspacePath="/project",
+                runtimeHandle=handle,
+            ),
+            message="continue",
+        ),
+    )
+
+    assert len(compile_calls) == 1
+    intent = compile_calls[0]
+    assert intent.wegent_team_id == 42
+    assert intent.local_task_id == "original-task"
+    assert intent.workspace_path == "/project"
+    assert intent.new_session is False
+    assert compiled.new_session is False
+    assert rpc.await_args.kwargs["method"] == "runtime.tasks.send"
+    assert rpc.await_args.kwargs["payload"]["runtimeHandle"] == handle
 
 
 def test_build_runtime_send_execution_request_includes_valid_task_token(

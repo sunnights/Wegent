@@ -16,6 +16,7 @@ use wegent_executor::local::{
     app_ipc::{app_ipc_stdio_ready_log_line, AppIpcError, AppIpcServer, RuntimeWorkHandler},
     command::{CommandRequest, CommandResult, DeviceCommandHandler},
 };
+use wegent_executor::task_runtime::LocalTaskStore;
 
 const LOCAL_GIT_ENV_VARS: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -36,16 +37,25 @@ const LOCAL_GIT_ENV_VARS: &[&str] = &[
 ];
 
 struct EnvLockGuard {
+    _codex_home: EnvGuard,
+    _codex_home_directory: tempfile::TempDir,
     _guard: MutexGuard<'static, ()>,
 }
 
 async fn env_lock() -> EnvLockGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("environment lock should be available");
+    // Project listing imports the native Codex catalog independently of the
+    // executor home. Keep personal projects out of every IPC fixture.
+    let codex_home_directory = tempfile::tempdir().unwrap();
+    let codex_home = EnvGuard::set("CODEX_HOME", codex_home_directory.path().to_str().unwrap());
     EnvLockGuard {
-        _guard: LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("environment lock should be available"),
+        _codex_home: codex_home,
+        _codex_home_directory: codex_home_directory,
+        _guard: guard,
     }
 }
 
@@ -586,12 +596,17 @@ async fn app_ipc_imports_external_codex_content() {
     let _lock = env_lock().await;
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
+    let native_codex_home = home.join(".codex");
     let codex_home = root.path().join("wework-codex");
-    fs::create_dir_all(home.join(".codex/skills/example")).unwrap();
-    fs::write(home.join(".codex/config.toml"), "model = \"gpt-5\"\n").unwrap();
-    fs::write(home.join(".codex/skills/example/SKILL.md"), "example").unwrap();
-    let _home = EnvGuard::set("HOME", &home.display().to_string());
+    fs::create_dir_all(native_codex_home.join("skills/example")).unwrap();
+    fs::write(native_codex_home.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+    fs::write(native_codex_home.join("skills/example/SKILL.md"), "example").unwrap();
     let _codex_home = EnvGuard::set("WEGENT_CODEX_HOME", &codex_home.display().to_string());
+    let _e2e = EnvGuard::set("VITE_WEWORK_E2E", "true");
+    let _native_home = EnvGuard::set(
+        "WEWORK_E2E_NATIVE_CODEX_HOME",
+        &native_codex_home.display().to_string(),
+    );
 
     let result = AppIpcServer::new()
         .dispatch(
@@ -763,6 +778,16 @@ async fn app_ipc_manages_local_projects_and_nested_todos() {
     assert_eq!(todos.as_array().unwrap().len(), 2);
     assert_eq!(child["parent_id"], parent["id"]);
 
+    let read_child = server
+        .dispatch(
+            "todos.mark_read",
+            json!({"project_id": project_id, "task_id": child["id"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read_child["id"], child["id"]);
+    assert_ne!(read_child["metadata"]["is_unread"], json!(true));
+
     let updated = server
         .dispatch(
             "todos.update",
@@ -831,23 +856,20 @@ async fn app_ipc_manages_local_projects_and_nested_todos() {
 }
 
 #[tokio::test]
-async fn app_ipc_reconciles_runtime_status_at_task_service_boundaries() {
+async fn app_ipc_preserves_task_binding_model_selection() {
     let _lock = env_lock().await;
     let executor_home = tempfile::tempdir().unwrap();
     let _executor_home = EnvGuard::set(
         "WEGENT_EXECUTOR_HOME",
         &executor_home.path().display().to_string(),
     );
-    let reconciliations = Arc::new(Mutex::new(0));
-    let server = AppIpcServer::new().with_runtime_work_handler(ProjectionRuntimeHandler {
-        reconciliations: Arc::clone(&reconciliations),
-    });
+    let server = AppIpcServer::new();
     let project = server
         .dispatch(
             "projects.create",
             json!({
-                "name": "Bound Runtime",
-                "project_key": "BOUND",
+                "name": "Bound Model",
+                "project_key": "MODEL",
                 "task_provider": "local"
             }),
         )
@@ -858,34 +880,46 @@ async fn app_ipc_reconciles_runtime_status_at_task_service_boundaries() {
             "todos.create",
             json!({
                 "project_id": project["id"],
-                "todo": {"title": "Track running task"}
+                "todo": {"title": "Preserve the session model"}
             }),
         )
         .await
         .unwrap();
 
-    server
+    let binding = server
         .dispatch(
             "todos.bind",
             json!({
                 "project_id": project["id"],
                 "item_id": task["id"],
                 "task": {
-                    "device_id": "local-device",
-                    "task_id": "runtime-running-1",
-                    "task_title": "Track running task"
+                    "deviceId": "local-device",
+                    "taskId": "runtime-model-1",
+                    "taskTitle": "Preserve the session model",
+                    "modelSelection": {
+                        "modelName": "gpt-5.6-sol",
+                        "modelType": "public",
+                        "options": {"reasoning": "high"}
+                    }
                 }
             }),
         )
         .await
         .unwrap();
 
-    server
-        .dispatch("todos.list", json!({"project_id": project["id"]}))
+    assert_eq!(binding["modelSelection"]["modelName"], "gpt-5.6-sol");
+    let bindings = server
+        .dispatch("todos.bindings.batch", json!({"task_ids": [task["id"]]}))
         .await
         .unwrap();
-
-    assert_eq!(*reconciliations.lock().unwrap(), 2);
+    assert_eq!(
+        bindings[0]["modelSelection"],
+        json!({
+            "modelName": "gpt-5.6-sol",
+            "modelType": "public",
+            "options": {"reasoning": "high"}
+        })
+    );
 }
 
 #[tokio::test]
@@ -1121,21 +1155,14 @@ async fn app_ipc_reclaims_expired_local_robot_runs() {
         .await
         .unwrap();
 
-    let claimed = server
-        .dispatch(
-            "executions.claim_next",
-            json!({
-                "claim": {
-                    "execution_device_id": "local-device",
-                    "lease_seconds": 300
-                }
-            }),
-        )
-        .await
+    let claimed = LocalTaskStore::open(executor_home.path().join("data/tasks.sqlite"))
+        .unwrap()
+        .claim_next_execution_for_runtime(Some("local-device"), "runtime-1", 300)
+        .unwrap()
         .unwrap();
-    let execution_id = claimed["id"].as_i64().unwrap();
-    assert_eq!(claimed["status"], "claimed");
-    assert_eq!(claimed["display_state"], "starting");
+    let execution_id = claimed.id;
+    assert_eq!(claimed.status, "claimed");
+    assert_eq!(claimed.display_state, "starting");
 
     // Crash the run out-of-band: expire the lease without a terminal event.
     let connection =
@@ -1347,6 +1374,7 @@ async fn app_ipc_resolves_configured_device_command() {
     assert_eq!(
         *seen_request.lock().unwrap(),
         Some(CommandRequest {
+            command_key: Some("ls_dirs".to_owned()),
             command: "ls -a -p".to_owned(),
             argv: vec!["ls".to_owned(), "-a".to_owned(), "-p".to_owned()],
             cwd: Some("/tmp/project".to_owned()),
@@ -1604,6 +1632,17 @@ async fn app_ipc_lists_codex_skills_from_runtime_directories() {
     assert_eq!(response["ok"], true);
     assert_eq!(response["result"]["success"], true);
     let skills = response["result"]["stdout"].as_array().unwrap();
+    assert_eq!(skills.len(), 4);
+    let creator = skills
+        .iter()
+        .find(|skill| skill["name"] == "wework-plugin-creator")
+        .unwrap();
+    assert_eq!(creator["source"], "codex");
+    assert!(Path::new(creator["path"].as_str().unwrap()).is_file());
+    let skills = skills
+        .iter()
+        .filter(|skill| skill["name"] != "wework-plugin-creator")
+        .collect::<Vec<_>>();
     assert_eq!(skills.len(), 3);
     assert_eq!(skills[0]["name"], json!("codex-review"));
     assert_eq!(
@@ -2392,27 +2431,6 @@ impl RuntimeWorkHandler for RuntimeHandler {
                 })
             );
             Ok(json!({"success": true, "workspaces": []}))
-        })
-    }
-}
-
-struct ProjectionRuntimeHandler {
-    reconciliations: Arc<Mutex<usize>>,
-}
-
-impl RuntimeWorkHandler for ProjectionRuntimeHandler {
-    fn handle_runtime_rpc<'a>(
-        &'a self,
-        _data: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, AppIpcError>> + Send + 'a>> {
-        Box::pin(async { Ok(json!({})) })
-    }
-
-    fn reconcile_bound_task_statuses<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            *self.reconciliations.lock().unwrap() += 1;
         })
     }
 }

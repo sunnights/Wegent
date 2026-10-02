@@ -34,11 +34,19 @@ Vite watch 构建，再通过 `WEWORK_APP_WEB_ROOT`/`WEWORK_APP_HOT_RELOAD` 让
 一致）。因此切换分支或修改 renderer 源码后，无需手动同步打包插件产物即可
 生效。
 
-运行时与 Executor 构建缓存默认放在 `%LOCALAPPDATA%\wegent\`（可用
-`WEWORK_DEV_CACHE_ROOT`、`WEGENT_CARGO_TARGET_ROOT` 覆盖），首次准备较慢，
-之后为增量。可用 `-- --executor-isolation` 使用临时 Executor Home，或用
-`WEWORK_DRY_RUN=1` 只打印启动配置。若下载卡住，先设置
-`HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
+脚本同样对齐 macOS 的开发实例模型：按 worktree 推导稳定身份和标题，为
+Electron 提供隔离的应用标识与用户数据目录，并为源码 Core DSH 插件生成组件
+资源。重命名可执行文件 bundle 是 macOS 特有实现；Windows 开发标题由
+Electron 进程身份承载。
+
+不可变的 Runtime 归档和 Executor 构建缓存默认放在
+`%LOCALAPPDATA%\wegent\`（可用 `WEWORK_DEV_CACHE_ROOT`、
+`WEGENT_CARGO_TARGET_ROOT` 覆盖）。当系统盘空间不足且尚无可用缓存时，Cargo
+target 会按 `D:` 到 `H:` 的顺序回退。可变且按 worktree 隔离的 materialized
+runtime 仍保留在当前检出的 `wework/node_modules/.cache`，避免不同 worktree
+共享活跃文件。首次准备较慢，之后为增量。可用
+`-- --executor-isolation` 使用临时 Executor Home，或用 `WEWORK_DRY_RUN=1`
+只打印启动配置。若下载卡住，先设置 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
 
 ## 构建
 
@@ -51,12 +59,8 @@ NSIS 安装器写入
 插件、运行时描述和 sidecar 统一来自 `wework/resources/`，由
 `wework/electron/scripts/prepare-package-assets.mjs` 复制到应用资源目录。
 
-该安装器同时承担旧 Tauri 版本到 Electron 的迁移：它兼容 Tauri updater 传入的
-`/P` 参数，读取旧版 `Software\you\WeWork` 注册表项，并沿用
-`%LOCALAPPDATA%\WeWork` 安装目录。旧版点击“升级”后会先安装 Electron，再按同一
-`WeWork.exe` 路径重启，因此不会产生第二套安装目录，且不会删除用户数据。
-Electron 启动的 Executor 继续直接使用用户目录下原有的 `.wework`，不执行目录
-复制或数据迁移。
+安装器使用 Electron Builder 的标准 NSIS 安装流程，不再处理旧 updater 的 `/P`
+参数或旧安装注册表迁移。
 
 ## 验证
 
@@ -85,7 +89,7 @@ Windows Desktop Core E2E 复用 Linux 的同一份 Core 分片矩阵。完整回
 分片。Windows 路径、盘符、UNC 路径、命名管道和 `.exe` sidecar 行为必须由这个
 Windows job 验证，其他平台的通过结果不能替代它。
 
-正式安装器、代码签名、Electron YAML 更新清单和旧 Tauri JSON/签名桥接清单由
+正式安装器、代码签名和 Electron YAML 更新清单由
 `.github/workflows/wework-app.yml` 在 `windows-latest` 上生成。
 
 ## 常见问题

@@ -8,6 +8,7 @@ use std::{collections::HashMap, future::Future, path::Path, pin::Pin, sync::Arc}
 #[cfg(windows)]
 use std::{env, path::PathBuf};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -30,6 +31,7 @@ use crate::{
         CodexLocalConfigUpdateRequest, ExternalContentImportRequest,
     },
     local::command::{CommandHandler, CommandRequest, CommandResult, DeviceCommandHandler},
+    local::environment_prepare::execute_environment_prepare,
     local::git_commands::{
         branch_diff, branch_diff_shortstat, hosting_cli_status, push_current_branch,
         workspace_diff, worktree_add, worktree_remove,
@@ -40,6 +42,7 @@ use crate::{
         PrepareLocalHarnessLaunchRequest,
     },
     local::local_skills::list_local_skills,
+    local::native_git::run_git_capture_with_input,
     local::plugin_catalog::{
         list_wegent_store_plugins, read_plugin_manifest, save_plugin_example,
         ReadPluginManifestRequest, SavePluginExampleRequest,
@@ -66,8 +69,8 @@ use crate::{
     runtime_work::RuntimeWorkRpcHandler,
     task_runtime::{
         BinaryInput, ChatAgentCreate, ChatAgentUpdate, DeliveryCreate, DeliveryFinalize,
-        LocalCommentCreate, LocalExecutionClaim, ProjectCreate, ProjectDescriptor, ProjectUpdate,
-        RuntimeTaskAddress, TaskCreate, TaskReorder, TaskRuntime, TaskUpdate,
+        LocalCommentCreate, ProjectCreate, ProjectDescriptor, ProjectUpdate, RuntimeTaskAddress,
+        TaskCreate, TaskReorder, TaskRuntime, TaskUpdate,
     },
     version::get_version,
 };
@@ -77,11 +80,13 @@ pub const APP_IPC_PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_TIMEOUT_SECONDS: f64 = 60.0;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const APP_IPC_REQUEST_TIMEOUT_SECONDS: u64 = 75;
+const TRANSCRIPT_EXPORT_TIMEOUT_SECONDS: u64 = 10 * 60;
 
 fn app_ipc_request_timeout_seconds(method: Option<&str>) -> u64 {
     match method {
         Some("executor.plugin_auth.migrate") => 280,
         Some("executor.plugin_auth.run") => 200,
+        Some("runtime.tasks.transcript.export") => TRANSCRIPT_EXPORT_TIMEOUT_SECONDS,
         _ => APP_IPC_REQUEST_TIMEOUT_SECONDS,
     }
 }
@@ -99,6 +104,7 @@ const APP_IPC_CAPABILITIES: &[&str] = &[
     "runtime.archives",
     "runtime.automations",
     "runtime.codex",
+    "runtime.composer",
     "runtime.connectors",
     "runtime.harness",
     "runtime.hooks",
@@ -825,72 +831,6 @@ impl AppIpcServer {
             return self.handle_device_command(params).await;
         }
 
-        if method == "executions.claim_next" {
-            let Some(handler) = &self.runtime_work_handler else {
-                return Err(AppIpcError::new(
-                    "runtime_unavailable",
-                    "Runtime work handler is not available",
-                ));
-            };
-            let runtime_instance_id = self.runtime_instance_id.as_ref().ok_or_else(|| {
-                AppIpcError::new(
-                    "runtime_identity_unavailable",
-                    "Runtime instance identity is not available",
-                )
-            })?;
-            let capacity = handler
-                .handle_runtime_rpc(json!({
-                    "method": "runtime.capacity.get",
-                    "payload": {},
-                }))
-                .await?;
-            let limit = capacity
-                .get("limit")
-                .and_then(Value::as_u64)
-                .filter(|value| (1..=20).contains(value))
-                .ok_or_else(|| {
-                    AppIpcError::new(
-                        "runtime_capacity_unavailable",
-                        "Runtime capacity is not available",
-                    )
-                })?;
-            let mut params = params.as_object().cloned().ok_or_else(|| {
-                AppIpcError::new("invalid_request", "Claim params must be an object")
-            })?;
-            let claim = params
-                .get_mut("claim")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| AppIpcError::new("invalid_request", "Claim must be an object"))?;
-            claim.insert(
-                "execution_device_id".to_owned(),
-                Value::String(self.device_id.clone()),
-            );
-            claim.insert(
-                "runtime_instance_id".to_owned(),
-                Value::String(runtime_instance_id.clone()),
-            );
-            claim.insert("device_capacity".to_owned(), Value::from(limit));
-            claim.insert(
-                "runtime_active".to_owned(),
-                capacity.get("active").cloned().ok_or_else(|| {
-                    AppIpcError::new(
-                        "runtime_capacity_unavailable",
-                        "Runtime active capacity is not available",
-                    )
-                })?,
-            );
-            claim.insert(
-                "runtime_active_task_ids".to_owned(),
-                capacity.get("active_task_ids").cloned().ok_or_else(|| {
-                    AppIpcError::new(
-                        "runtime_capacity_unavailable",
-                        "Runtime active task identities are not available",
-                    )
-                })?,
-            );
-            return handle_task_runtime_request(method, Value::Object(params)).await;
-        }
-
         if method.starts_with("projects.")
             || method.starts_with("external_projects.")
             || method.starts_with("dws.")
@@ -1526,6 +1466,9 @@ impl AppIpcServer {
         .round() as usize;
         let native_args = string_list(params.get("args")).unwrap_or_default();
         let native_result = match command_key {
+            "environment_prepare" => {
+                Some(execute_environment_prepare(&native_args, native_timeout).await)
+            }
             "git_diff" => Some(
                 workspace_diff(
                     native_path.clone(),
@@ -1562,6 +1505,16 @@ impl AppIpcServer {
             "git_push" => Some(
                 push_current_branch(
                     native_path.clone(),
+                    &native_env,
+                    native_timeout,
+                    native_max_output,
+                )
+                .await,
+            ),
+            "git_apply_patch" => Some(
+                apply_git_patch(
+                    &native_args,
+                    native_path.as_deref(),
                     &native_env,
                     native_timeout,
                     native_max_output,
@@ -1649,6 +1602,7 @@ impl AppIpcServer {
         })?;
 
         let request = CommandRequest {
+            command_key: Some(command_key.to_owned()),
             command: command.command.to_owned(),
             argv: command
                 .argv
@@ -1897,13 +1851,40 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                 .map_err(task_runtime_error)?;
             Ok(json!({}))
         }
-        "projects.list" => {
-            serialize_task_value(runtime.list_projects().map_err(task_runtime_error)?)
-        }
+        "projects.list" => serialize_task_value(
+            runtime
+                .list_collaboration_projects()
+                .map_err(task_runtime_error)?,
+        ),
         "projects.create" => {
             let input = serde_json::from_value::<ProjectCreate>(params)
                 .map_err(|error| AppIpcError::new("bad_request", error.to_string()))?;
             serialize_task_value(runtime.create_project(input).map_err(task_runtime_error)?)
+        }
+        "projects.import_code_project" => {
+            let project_key = required_task_string(&params, "project_key")?;
+            let name = required_task_string(&params, "name")?;
+            let roots = params
+                .get("roots")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|root| !root.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if roots.is_empty() {
+                return Err(AppIpcError::new(
+                    "bad_request",
+                    "roots must contain at least one workspace path",
+                ));
+            }
+            serialize_task_value(
+                runtime
+                    .import_code_project(project_key, name, &roots)
+                    .map_err(task_runtime_error)?,
+            )
         }
         "projects.update" => {
             let project_id = required_task_string(&params, "project_id")?;
@@ -2179,6 +2160,17 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                     .map_err(task_runtime_error)?,
             )
         }
+        "todos.mark_read" => {
+            let project_id = required_task_string(&params, "project_id")?;
+            let task_id = required_task_string(&params, "task_id")?;
+            let activity_sequence = params.get("activity_sequence").and_then(Value::as_i64);
+            serialize_task_value(
+                runtime
+                    .mark_task_read(project_id, task_id, activity_sequence)
+                    .await
+                    .map_err(task_runtime_error)?,
+            )
+        }
         "todos.create" => {
             let project_id = required_task_string(&params, "project_id")?;
             let input = serde_json::from_value::<TaskCreate>(
@@ -2249,6 +2241,40 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
             let create = task_input::<LocalCommentCreate>(&params, "comment")?;
             serialize_task_value(runtime.create_comment(create).map_err(task_runtime_error)?)
         }
+        "todos.comment.agent.start" => {
+            let project_id = required_task_string(&params, "project_id")?;
+            let task_id = required_task_string(&params, "task_id")?;
+            let agent_id = required_task_string(&params, "agent_id")?;
+            let trigger_message_id = required_task_string(&params, "trigger_message_id")?;
+            let runtime_device_id = required_task_string(&params, "runtime_device_id")?;
+            let runtime_task_id = required_task_string(&params, "runtime_task_id")?;
+            serialize_task_value(
+                runtime
+                    .start_runtime_comment(&crate::task_runtime::LocalRuntimeCommentStart {
+                        project_id,
+                        task_id,
+                        agent_id,
+                        trigger_message_id,
+                        runtime_device_id,
+                        runtime_task_id,
+                        prompt: params.get("prompt").and_then(Value::as_str),
+                        model: params.get("model").and_then(Value::as_str),
+                    })
+                    .map_err(task_runtime_error)?,
+            )
+        }
+        "todos.comment.agent.fail" => {
+            let message_id = required_task_string(&params, "message_id")?;
+            let error = params
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Local runtime run failed");
+            serialize_task_value(
+                runtime
+                    .fail_runtime_comment(message_id, error)
+                    .map_err(task_runtime_error)?,
+            )
+        }
         "executions.enqueue" => {
             let project_id = required_task_string(&params, "project_id")?;
             let task_id = required_task_string(&params, "task_id")?;
@@ -2258,6 +2284,20 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
             serialize_task_value(
                 runtime
                     .enqueue_execution(project_id, task_id, agent_id, payload, trigger_message_id)
+                    .map_err(task_runtime_error)?,
+            )
+        }
+        "executions.list" => {
+            let project_id = required_task_string(&params, "project_id")?;
+            let agent_id = params.get("agent_id").and_then(Value::as_str);
+            let status = params.get("status").and_then(Value::as_str);
+            let include_terminal = params
+                .get("include_terminal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            serialize_task_value(
+                runtime
+                    .list_executions(project_id, agent_id, status, include_terminal)
                     .map_err(task_runtime_error)?,
             )
         }
@@ -2363,6 +2403,15 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                     .map_err(task_runtime_error)?,
             )
         }
+        "chat_agents.ensure_default" => {
+            let project_id = required_task_string(&params, "project_id")?;
+            let input = task_input::<ChatAgentCreate>(&params, "agent")?;
+            serialize_task_value(
+                runtime
+                    .ensure_default_chat_agent(project_id, input)
+                    .map_err(task_runtime_error)?,
+            )
+        }
         "chat_agents.update" => {
             let project_id = required_task_string(&params, "project_id")?;
             let agent_id = required_task_string(&params, "agent_id")?;
@@ -2384,20 +2433,6 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
                 .archive_chat_agent(project_id, agent_id, version)
                 .map_err(task_runtime_error)?;
             Ok(json!({}))
-        }
-        "executions.list" => {
-            let project_id = required_task_string(&params, "project_id")?;
-            let agent_id = params.get("agent_id").and_then(Value::as_str);
-            let status = params.get("status").and_then(Value::as_str);
-            let include_terminal = params
-                .get("include_terminal")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            serialize_task_value(
-                runtime
-                    .list_executions(project_id, agent_id, status, include_terminal)
-                    .map_err(task_runtime_error)?,
-            )
         }
         "executions.approve" | "executions.reject" => {
             let execution_id = required_task_i64(&params, "execution_id")?;
@@ -2421,14 +2456,6 @@ async fn handle_task_runtime_request(method: &str, params: Value) -> Result<Valu
             serialize_task_value(
                 runtime
                     .cancel_execution(execution_id, note)
-                    .map_err(task_runtime_error)?,
-            )
-        }
-        "executions.claim_next" => {
-            let input = task_input::<LocalExecutionClaim>(&params, "claim")?;
-            serialize_task_value(
-                runtime
-                    .claim_next_local_execution(input)
                     .map_err(task_runtime_error)?,
             )
         }
@@ -2765,26 +2792,6 @@ async fn handle_builtin_device_command(
     params: &Value,
 ) -> Option<(CommandResult, Option<PostProcessor>)> {
     match command_key {
-        "home_dir" => Some((
-            CommandResult::ok(
-                dirs::home_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| ".".to_string()),
-            ),
-            None,
-        )),
-        "pwd" => Some((
-            CommandResult::ok(
-                std::env::current_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|_| ".".to_string()),
-            ),
-            None,
-        )),
-        "project_workspace_root" => match project_workspace_root_path() {
-            Ok(path) => Some((CommandResult::ok(path), None)),
-            Err(error) => Some((CommandResult::error(error, 0.0, false), None)),
-        },
         "mkdir_p" => {
             let args = string_list(params.get("args")).ok()?;
             let path = args.first()?;
@@ -2933,6 +2940,68 @@ fn git_is_worktree(path: &str) -> bool {
     })
 }
 
+async fn apply_git_patch(
+    args: &[String],
+    cwd: Option<&str>,
+    env: &HashMap<String, String>,
+    timeout_seconds: f64,
+    max_output_bytes: usize,
+) -> CommandResult {
+    let action = args.first().map(String::as_str).unwrap_or_default();
+    let encoded_patch = args.get(1).map(String::as_str).unwrap_or_default();
+    let git_args = match action {
+        "stage" => vec![
+            "apply".to_owned(),
+            "--cached".to_owned(),
+            "--whitespace=nowarn".to_owned(),
+            "-".to_owned(),
+        ],
+        "unstage" => vec![
+            "apply".to_owned(),
+            "--cached".to_owned(),
+            "--reverse".to_owned(),
+            "--whitespace=nowarn".to_owned(),
+            "-".to_owned(),
+        ],
+        "revert" => vec![
+            "apply".to_owned(),
+            "--reverse".to_owned(),
+            "--whitespace=nowarn".to_owned(),
+            "-".to_owned(),
+        ],
+        _ => {
+            return CommandResult::error("Unsupported patch action".to_owned(), 0.0, false);
+        }
+    };
+    let patch = match BASE64_STANDARD.decode(encoded_patch) {
+        Ok(patch) => patch,
+        Err(_) => return CommandResult::error("Invalid patch payload".to_owned(), 0.0, false),
+    };
+    let Some(cwd) = cwd.map(Path::new) else {
+        return CommandResult::error("Workspace is not a Git repository".to_owned(), 0.0, false);
+    };
+    if !git_is_worktree(cwd.to_string_lossy().as_ref()) {
+        return CommandResult::error("Workspace is not a Git repository".to_owned(), 0.0, false);
+    }
+
+    match run_git_capture_with_input(
+        &git_args,
+        &patch,
+        Some(cwd),
+        env,
+        Duration::from_secs_f64(timeout_seconds.max(0.001)),
+        max_output_bytes,
+    )
+    .await
+    {
+        Ok(capture) if capture.success => {
+            CommandResult::ok(String::from_utf8_lossy(&capture.stdout).into_owned())
+        }
+        Ok(capture) => CommandResult::error(capture.stderr, 0.0, false),
+        Err(error) => CommandResult::error(error.message, 0.0, error.timed_out),
+    }
+}
+
 fn looks_like_git_dir(path: &Path) -> bool {
     path.join("HEAD").is_file()
         && (path.join("objects").is_dir()
@@ -2965,35 +3034,6 @@ fn is_git_workspace_inspection_command(command_key: &str) -> bool {
             | "git_status_porcelain"
             | "git_remote_url"
     )
-}
-
-#[cfg(windows)]
-fn project_workspace_root_path() -> Result<String, String> {
-    if let Ok(value) = env::var("WEGENT_EXECUTOR_PROJECTS_DIR") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_owned());
-        }
-    }
-    if let Ok(value) = env::var("WECODE_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed)
-                .join("wegent-executor")
-                .join("workspace")
-                .join("projects")
-                .display()
-                .to_string());
-        }
-    }
-    let home = dirs::home_dir().ok_or_else(|| "Home directory is not available".to_string())?;
-    Ok(home
-        .join(".wecode")
-        .join("wegent-executor")
-        .join("workspace")
-        .join("projects")
-        .display()
-        .to_string())
 }
 
 pub fn app_ipc_stdio_ready_log_line(device_id: &str) -> String {
@@ -3295,6 +3335,11 @@ fn local_app_command(command_key: &str) -> Option<LocalAppCommandDefinition> {
             None,
         )),
         "git_add_all" => Some(command_definition("git add --all", &["git", "add", "--all"], None)),
+        "git_apply_patch" => Some(command_definition(
+            "git apply <validated patch>",
+            &["git", "apply"],
+            None,
+        )),
         "git_commit" => Some(command_definition("git commit", &["git", "commit"], None)),
         "browser_relay_restart" => Some(command_definition(
             "sh -lc <browser_relay_restart>",
@@ -3545,9 +3590,21 @@ mod tests {
     use tokio::time::Duration;
 
     use super::{
-        app_ipc_request_metadata, is_bulk_app_ipc_event, local_app_command, AppIpcServer,
-        BlockingSingleFlight,
+        app_ipc_request_metadata, app_ipc_request_timeout_seconds, is_bulk_app_ipc_event,
+        local_app_command, AppIpcServer, BlockingSingleFlight,
     };
+
+    #[test]
+    fn transcript_export_allows_large_snapshot_packaging() {
+        assert_eq!(
+            app_ipc_request_timeout_seconds(Some("runtime.tasks.transcript.export")),
+            10 * 60
+        );
+        assert_eq!(
+            app_ipc_request_timeout_seconds(Some("runtime.tasks.list")),
+            75
+        );
+    }
 
     #[test]
     fn app_ipc_request_metadata_includes_device_command_key() {

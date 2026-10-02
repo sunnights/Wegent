@@ -16,7 +16,7 @@ use tokio::{process::Command, time::timeout};
 
 use crate::{path_compat::strip_windows_verbatim_prefix, process_environment};
 
-const HARNESS_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const HARNESS_VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
 struct LocalHarnessDefinition {
@@ -427,15 +427,29 @@ async fn read_command_version(path: &Path, args: &[&str]) -> Option<String> {
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let output = timeout(HARNESS_VERSION_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
+    let output = match timeout(HARNESS_VERSION_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            eprintln!("failed to run local harness version command: {error}");
+            return None;
+        }
+        Err(error) => {
+            eprintln!("local harness version command timed out: {error}");
+            return None;
+        }
+    };
+    let version = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(str::to_owned)
+        .map(str::to_owned);
+    if version.is_none() {
+        eprintln!(
+            "local harness version command returned no version: {}",
+            output.status
+        );
+    }
+    version
 }
 
 #[cfg(test)]

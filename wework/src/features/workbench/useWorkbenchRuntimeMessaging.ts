@@ -1,3 +1,7 @@
+import {
+  loadRuntimeFileChangesDiff,
+  revertRuntimeFileChanges,
+} from '@wegent/chat-core/runtime-file-changes'
 import { useCallback } from 'react'
 import type { Dispatch } from 'react'
 import { ApiError } from '@/api/http'
@@ -69,7 +73,6 @@ import {
   createRuntimeTaskIdFromSeed,
   findProjectDeviceWorkspace,
   findRuntimeTask,
-  getCommandStdoutObject,
   isRecord,
   isSameRuntimeTaskIdentity,
   mergeRuntimeTaskHandles,
@@ -81,6 +84,7 @@ import {
 } from './runtimeConversationCache'
 import { findFileChangesBySubtaskId } from './runtimePaneMessages'
 import { isRuntimeTaskBusyError } from './runtimePaneStatus'
+import { prepareRuntimeContinuationModel } from './runtimeContinuationModel'
 import type { RuntimeTaskLifecycleStore } from './runtimeTaskLifecycle'
 import {
   inferRuntimeName,
@@ -115,17 +119,7 @@ export interface PreparedRuntimeTaskIntent {
 import { getDesktopE2ERuntimeConfig } from '@/e2e/runtime-config'
 import type { WorkbenchServices } from './workbenchServices'
 import { track } from '@/telemetry/client'
-import type { ExecutionTarget } from '@/telemetry/events'
-
-function telemetryExecutionTarget(
-  deviceId: string,
-  devices: WorkbenchState['devices']
-): ExecutionTarget {
-  const device = devices.find(item => item.device_id === deviceId)
-  if (device?.device_type === 'local' || device?.device_type === 'app') return 'local'
-  if (device?.device_type === 'cloud' || device?.device_type === 'remote') return 'cloud'
-  return deviceId === 'local-device' ? 'local' : 'unknown'
-}
+import { telemetryExecutionTarget } from '@/telemetry/executionTarget'
 
 interface RuntimeAttachmentTransport {
   attachmentIds: number[]
@@ -405,7 +399,10 @@ export function useWorkbenchRuntimeMessaging({
   )
 
   const prepareRuntimeSendRequest = useCallback(
-    async (request: RuntimeSendRequest): Promise<RuntimeSendRequest> => {
+    async (input: RuntimeSendRequest): Promise<RuntimeSendRequest> => {
+      const request = await prepareRuntimeContinuationModel(input, state.runtimeWork, () =>
+        executorClient.runtime.listRuntimeWork()
+      )
       if (!request.attachments?.length) return request
       const prepared = await prepareRuntimeAttachmentsForDevice(
         request.address.deviceId,
@@ -420,7 +417,7 @@ export function useWorkbenchRuntimeMessaging({
         attachments: prepared.attachments,
       }
     },
-    [services.attachmentApi, state.devices]
+    [executorClient, services.attachmentApi, state.devices, state.runtimeWork]
   )
 
   const blockRuntimeSendForUnavailableModel = useCallback(
@@ -454,6 +451,9 @@ export function useWorkbenchRuntimeMessaging({
       if (blockRuntimeSendForUnavailableModel(request.address, options)) return false
 
       let sendRequested = false
+      const isRequestUserInputResponse = Boolean(
+        request.requestUserInputResponse ?? request.request_user_input_response
+      )
       const optimisticUserMessage = options?.optimisticUserMessage
       const outboundRequestWithClientId = optimisticUserMessage
         ? {
@@ -469,7 +469,7 @@ export function useWorkbenchRuntimeMessaging({
       }
       try {
         const outboundRequest = await prepareRuntimeSendRequest(outboundRequestWithClientId)
-        if (!options?.silentBusyRetry) {
+        if (!options?.silentBusyRetry && !isRequestUserInputResponse) {
           lifecycleStore.sendRequested(outboundRequest.address)
           sendRequested = true
         }
@@ -477,10 +477,17 @@ export function useWorkbenchRuntimeMessaging({
         if (!response.accepted) {
           throw new Error(response.error || '发送失败')
         }
-        if (options?.silentBusyRetry) {
+        if (options?.silentBusyRetry && !isRequestUserInputResponse) {
           lifecycleStore.sendRequested(outboundRequest.address)
         }
-        lifecycleStore.sendAccepted(outboundRequest.address)
+        if (isRequestUserInputResponse) {
+          lifecycleStore.userInputResponded(outboundRequest.address)
+        } else if (response.status === 'queued') {
+          lifecycleStore.sendQueued(outboundRequest.address, response.queuePosition)
+          options?.onQueued?.(response)
+        } else {
+          lifecycleStore.sendAccepted(outboundRequest.address)
+        }
         try {
           await refreshWorkLists()
         } catch (error) {
@@ -926,6 +933,7 @@ export function useWorkbenchRuntimeMessaging({
         | 'initialSupervisor'
         | 'onError'
         | 'onRuntimeTaskOptimisticOpen'
+        | 'onRuntimeTaskOptimisticRemoved'
         | 'prepareRuntimeTask'
         | 'additionalContext'
         | 'runtime'
@@ -943,6 +951,7 @@ export function useWorkbenchRuntimeMessaging({
         openInMainPane?: boolean
         refreshWorkListsOnResolve?: boolean
         sideSource?: RuntimeTaskAddress | null
+        automaticWorkspaceSelection?: boolean
         preserveAttachments?: boolean
         launchStartedAt?: number
         taskCreateRequest?: RuntimeTaskCreateRequest | null
@@ -951,7 +960,8 @@ export function useWorkbenchRuntimeMessaging({
       const launchStartedAt = options?.launchStartedAt ?? runtimeLaunchNowMs()
       const sourceBlankChatKey = state.currentRuntimeTask ? null : state.standaloneChatKey
       const projectId = intent.projectId
-      const requestedManagedWorkspace = Boolean(intent.execution?.workspace)
+      let workspaceExecution = options?.sideSource ? undefined : intent.execution
+      let requestedManagedWorkspace = Boolean(workspaceExecution?.workspace)
       const hasOverrideSelection = Boolean(
         options && Object.prototype.hasOwnProperty.call(options, 'modelSelection')
       )
@@ -967,16 +977,37 @@ export function useWorkbenchRuntimeMessaging({
         : (modelSelection.getSelectedModel?.() ??
           modelSelection.selectedModel ??
           resolveAutomaticModel(modelSelection.models))
-      const selectedModelOptions = hasOverrideSelection
-        ? (overrideSelection?.options ?? {})
-        : (modelSelection.getSelectedModelOptions?.() ?? modelSelection.selectedModelOptions)
-      const executionModel = options?.taskCreateRequest
+      const taskRequestSelection = options?.taskCreateRequest?.modelSelection
+      const overrideExecutionModel = hasOverrideSelection
+        ? overrideSelection
+          ? selectedModel
+            ? selectedModelExecutionFields(selectedModel, overrideSelection.options ?? {})
+            : {
+                modelId: overrideSelection.modelName,
+                modelType: overrideSelection.modelType,
+                modelOptions: overrideSelection.options ?? {},
+              }
+          : {}
+        : null
+      const executionModel = options?.taskCreateRequest?.modelId
         ? {
             modelId: options.taskCreateRequest.modelId,
             modelType: options.taskCreateRequest.modelType,
             modelOptions: options.taskCreateRequest.modelOptions,
           }
-        : selectedModelExecutionFields(selectedModel, selectedModelOptions)
+        : taskRequestSelection?.modelName
+          ? {
+              modelId: taskRequestSelection.modelName,
+              modelType: taskRequestSelection.modelType,
+              modelOptions: taskRequestSelection.options,
+            }
+          : overrideExecutionModel
+            ? overrideExecutionModel
+            : {
+                modelId: intent.modelId,
+                modelType: intent.modelType,
+                modelOptions: intent.modelOptions,
+              }
       const runtime = options?.runtime ?? inferRuntimeName(selectedModel)
       const friendlyTitle =
         runtime === 'codex'
@@ -1008,6 +1039,11 @@ export function useWorkbenchRuntimeMessaging({
         ? state.runtimeWork?.projects.find(item => runtimeProjectUiId(item.project) === projectId)
             ?.project
         : null
+      const hasDirectManagedWorkspaceTarget = Boolean(
+        requestedManagedWorkspace &&
+        options?.taskCreateRequest?.deviceId?.trim() &&
+        options.taskCreateRequest.workspacePath?.trim()
+      )
       let runtimeTaskTarget: Pick<
         RuntimeTaskCreateRequest,
         | 'projectId'
@@ -1025,6 +1061,15 @@ export function useWorkbenchRuntimeMessaging({
         runtimeTaskTarget = {
           deviceId: options.sideSource.deviceId,
           workspacePath: options.sideSource.workspacePath,
+        }
+      } else if (
+        options?.taskCreateRequest?.deviceId?.trim() &&
+        options.taskCreateRequest.workspacePath?.trim()
+      ) {
+        optimisticDeviceId = options.taskCreateRequest.deviceId.trim()
+        runtimeTaskTarget = {
+          deviceId: optimisticDeviceId,
+          workspacePath: options.taskCreateRequest.workspacePath.trim(),
         }
       } else if (projectId) {
         if (!selectedProjectWorkspace) {
@@ -1060,7 +1105,7 @@ export function useWorkbenchRuntimeMessaging({
         }
       }
 
-      if (requestedManagedWorkspace) {
+      if (requestedManagedWorkspace && !hasDirectManagedWorkspaceTarget) {
         const worktreeProject =
           state.projects.find(project => project.id === projectId) ??
           (state.currentProject?.id === projectId ? state.currentProject : null)
@@ -1068,31 +1113,42 @@ export function useWorkbenchRuntimeMessaging({
         const worktreeDevice = findWorkbenchDevice(state.devices, worktreeDeviceId)
         const runtimeWorkApi = services.runtimeWorkApi
         if (!runtimeWorkApi || !worktreeProject) {
-          reportSendBlocked(
-            i18n.t('workbench.worktree_unavailable_preflight_failed'),
-            { worktreeDeviceId, reason: 'runtime_api_unavailable' },
-            options
-          )
-          return false
-        }
-        const availability = await probeProjectWorktreeAvailability({
-          api: runtimeWorkApi,
-          project: worktreeProject,
-          workspace: selectedProjectWorkspace,
-          device: worktreeDevice,
-          ref: intent.execution?.workspace?.branch ?? projectWorktreeBranch,
-        })
-        if (!availability.available) {
-          reportSendBlocked(
-            i18n.t(`workbench.worktree_unavailable_${availability.reason}`),
-            {
-              worktreeDeviceId,
-              reason: availability.reason,
-              sourcePath: availability.sourcePath,
-            },
-            options
-          )
-          return false
+          if (options?.automaticWorkspaceSelection) {
+            workspaceExecution = undefined
+            requestedManagedWorkspace = false
+          } else {
+            reportSendBlocked(
+              i18n.t('workbench.worktree_unavailable_preflight_failed'),
+              { worktreeDeviceId, reason: 'runtime_api_unavailable' },
+              options
+            )
+            return false
+          }
+        } else {
+          const availability = await probeProjectWorktreeAvailability({
+            api: runtimeWorkApi,
+            project: worktreeProject,
+            workspace: selectedProjectWorkspace,
+            device: worktreeDevice,
+            ref: workspaceExecution?.workspace?.branch ?? projectWorktreeBranch,
+          })
+          if (!availability.available) {
+            if (options?.automaticWorkspaceSelection) {
+              workspaceExecution = undefined
+              requestedManagedWorkspace = false
+            } else {
+              reportSendBlocked(
+                i18n.t(`workbench.worktree_unavailable_${availability.reason}`),
+                {
+                  worktreeDeviceId,
+                  reason: availability.reason,
+                  sourcePath: availability.sourcePath,
+                },
+                options
+              )
+              return false
+            }
+          }
         }
       }
 
@@ -1202,7 +1258,7 @@ export function useWorkbenchRuntimeMessaging({
         additionalSkills: intent.additionalSkills ?? [],
         attachmentIds: preparedAttachments.attachmentIds,
         attachments: preparedAttachments.attachments,
-        execution: intent.execution,
+        execution: workspaceExecution,
         ...(selectedRuntimeProject
           ? {
               ...(selectedRuntimeProject.aiSettings?.instructions?.trim()
@@ -1283,7 +1339,7 @@ export function useWorkbenchRuntimeMessaging({
       })
       lifecycleStore.sendRequested(optimisticAddress, {
         ...(requestedManagedWorkspace
-          ? { workspaceCreationKind: intent.execution?.workspace?.source }
+          ? { workspaceCreationKind: workspaceExecution?.workspace?.source }
           : {}),
       })
       if (options?.initialGoal) {
@@ -1303,7 +1359,7 @@ export function useWorkbenchRuntimeMessaging({
             0
         )
         if (
-          intent.execution?.workspace &&
+          workspaceExecution?.workspace &&
           Number.isFinite(worktreeCreationDelayMs) &&
           worktreeCreationDelayMs > 0
         ) {
@@ -1414,7 +1470,7 @@ export function useWorkbenchRuntimeMessaging({
               deviceId: address.deviceId,
               workspacePath: resolvedWorkspacePath,
               projectId,
-              workspaceKind: intent.execution?.workspace?.source,
+              workspaceKind: workspaceExecution?.workspace?.source,
             }),
             task: buildOptimisticRuntimeTask({
               taskId: address.taskId,
@@ -1423,7 +1479,7 @@ export function useWorkbenchRuntimeMessaging({
               runtime,
               status: response.status ?? 'running',
               queuePosition: response.queuePosition,
-              workspaceKind: intent.execution?.workspace?.source,
+              workspaceKind: workspaceExecution?.workspace?.source,
               modelSelection: createModelSelection,
             }),
           })
@@ -1524,7 +1580,7 @@ export function useWorkbenchRuntimeMessaging({
               title: createRequest.title ?? buildRuntimeTaskTitle(displayMessage, intent.title),
               runtime,
               status: 'failed',
-              workspaceKind: intent.execution?.workspace?.source,
+              workspaceKind: workspaceExecution?.workspace?.source,
               error: message,
             }),
           })
@@ -1533,6 +1589,7 @@ export function useWorkbenchRuntimeMessaging({
           if (runtimeTasks.isCurrentRuntimeTask(optimisticAddress)) {
             runtimeTasks.clearCurrentRuntimeTaskView()
           }
+          options?.onRuntimeTaskOptimisticRemoved?.(optimisticAddress)
         }
         reportError(message, options)
         return false
@@ -1574,7 +1631,8 @@ export function useWorkbenchRuntimeMessaging({
       const rawInput = inputOverride ?? ''
       const trimmedMessage = rawInput.trim()
       const effectiveCodeCommentContexts = options?.codeCommentContexts ?? []
-      const hasAttachments = attachmentSelection.attachments.length > 0
+      const selectedAttachments = options?.attachments ?? attachmentSelection.attachments
+      const hasAttachments = selectedAttachments.length > 0
       const hasCodeComments = effectiveCodeCommentContexts.length > 0
       if (!trimmedMessage && !hasAttachments && !hasCodeComments) {
         reportSendBlocked('请输入内容或添加附件后再发送', undefined, options)
@@ -1603,7 +1661,7 @@ export function useWorkbenchRuntimeMessaging({
           reportSendBlocked(i18n.t('workbench.runtime_task_running_message'), undefined, options)
           return false
         }
-        const currentAttachments = attachmentSelection.attachments
+        const currentAttachments = selectedAttachments
         const attachmentIds = remoteAttachmentIds(currentAttachments)
         const attachments = localRuntimeAttachments(currentAttachments)
         const sent = await sendRuntimePaneMessage(
@@ -1628,7 +1686,7 @@ export function useWorkbenchRuntimeMessaging({
 
       const prepared = buildSendPayload(
         payloadMessage,
-        undefined,
+        selectedAttachments,
         undefined,
         options?.forceNewTask || !isOptionsLocked,
         options?.additionalSkills
@@ -1690,10 +1748,12 @@ export function useWorkbenchRuntimeMessaging({
           initialSupervisor: options?.initialSupervisor,
           onError: options?.onError,
           onRuntimeTaskOptimisticOpen: options?.onRuntimeTaskOptimisticOpen,
+          onRuntimeTaskOptimisticRemoved: options?.onRuntimeTaskOptimisticRemoved,
           clientUserMessageId: options?.clientUserMessageId,
           optimisticUserMessage: options?.optimisticUserMessage,
           additionalContext: options?.additionalContext,
           cloudProjectId: options?.cloudProjectId,
+          origin: options?.origin,
           ...(options?.runtime ? { runtime: options.runtime } : {}),
           ...(options?.runtimeExecutablePath
             ? { runtimeExecutablePath: options.runtimeExecutablePath }
@@ -1705,9 +1765,10 @@ export function useWorkbenchRuntimeMessaging({
           ...(options && Object.prototype.hasOwnProperty.call(options, 'modelSelection')
             ? { modelSelection: options.modelSelection }
             : {}),
+          preserveAttachments: options?.preserveAttachments,
         }
       )
-      if (sent) {
+      if (sent && !options?.preserveAttachments) {
         attachmentSelection.resetAttachments()
       }
       return sent
@@ -1795,7 +1856,13 @@ export function useWorkbenchRuntimeMessaging({
       )
       if (prepared.activeDeviceId) {
         const activeDevice = findWorkbenchDevice(state.devices, prepared.activeDeviceId)
-        if (!isWorkbenchDeviceOnline(activeDevice)) {
+        const hasPreparedExecutionTarget = Boolean(
+          taskRequest?.deviceId?.trim() && taskRequest.workspacePath?.trim()
+        )
+        if (
+          !isWorkbenchDeviceOnline(activeDevice) &&
+          (activeDevice || !hasPreparedExecutionTarget)
+        ) {
           const deviceName =
             getWorkbenchDeviceUnavailableDisplayName(activeDevice) ||
             i18n.t('workbench.current_device')
@@ -1812,16 +1879,41 @@ export function useWorkbenchRuntimeMessaging({
         }
       }
 
-      const executionModel = taskRequest
+      const executionModel = taskRequest?.modelId
         ? {
             modelId: taskRequest.modelId,
             modelType: taskRequest.modelType,
             modelOptions: taskRequest.modelOptions,
           }
-        : options.executionModel
-      const baseIntent = taskRequest
-        ? { ...prepared.intent, execution: taskRequest.execution }
-        : prepared.intent
+        : taskRequest?.modelSelection?.modelName
+          ? {
+              modelId: taskRequest.modelSelection.modelName,
+              modelType: taskRequest.modelSelection.modelType,
+              modelOptions: taskRequest.modelSelection.options,
+            }
+          : options.executionModel
+      const workspaceSourceTask = taskRequest?.workspaceSourceTask ?? options.workspaceSource
+      const workspaceExecution = workspaceSourceTask
+        ? undefined
+        : taskRequest
+          ? taskRequest.execution
+          : Object.prototype.hasOwnProperty.call(options, 'workspaceExecution')
+            ? (options.workspaceExecution ?? undefined)
+            : prepared.intent.execution
+      const taskCreateRequest = workspaceSourceTask
+        ? {
+            ...(taskRequest ?? {
+              schemaVersion: 2 as const,
+              runtime: options.runtime ?? 'codex',
+              message,
+            }),
+            workspaceSourceTask,
+          }
+        : taskRequest
+      const baseIntent = {
+        ...prepared.intent,
+        execution: workspaceExecution,
+      }
       const intent = executionModel
         ? applyExecutionModelOverride(baseIntent, executionModel)
         : options.modelId
@@ -1852,10 +1944,11 @@ export function useWorkbenchRuntimeMessaging({
         additionalContext: taskRequest?.additionalContext ?? options.additionalContext,
         runtimeExecutablePath: taskRequest?.runtimeExecutablePath,
         runtimePermissionMode: taskRequest?.runtimePermissionMode,
-        taskCreateRequest: taskRequest,
+        taskCreateRequest,
         onError: options.onError,
         prepareRuntimeTask: options.prepareRuntimeTask,
         onRuntimeTaskOptimisticOpen: options.onRuntimeTaskOptimisticOpen,
+        automaticWorkspaceSelection: options.automaticWorkspaceSelection,
         openInMainPane: false,
       })
     },
@@ -1874,36 +1967,8 @@ export function useWorkbenchRuntimeMessaging({
       const runtimeFileChanges = runtimeTask
         ? (fileChangesOverride ?? findFileChangesBySubtaskId(messageSource, subtaskId))
         : undefined
-      if (runtimeFileChanges?.diff) return runtimeFileChanges.diff
-      if (runtimeFileChanges) {
-        const response = await executorClient.commands.executeCommand(
-          runtimeFileChanges.device_id,
-          {
-            command_key: 'turn_file_changes_review',
-            path: runtimeFileChanges.workspace_path,
-            args: [runtimeFileChanges.artifact_id],
-            timeout_seconds: 30,
-            max_output_bytes: 5 * 1024 * 1024,
-          }
-        )
-        const stdout = getCommandStdoutObject(response.stdout)
-        if (
-          !response.success ||
-          !stdout ||
-          stdout.success !== true ||
-          typeof stdout.diff !== 'string'
-        ) {
-          throw new Error(
-            String(
-              stdout?.error || response.error || response.stderr || 'File changes review failed'
-            )
-          )
-        }
-        return stdout.diff
-      }
-      if (runtimeTask) {
-        throw new Error('Runtime file changes artifact is unavailable')
-      }
+      if (runtimeTask)
+        return loadRuntimeFileChangesDiff(executorClient.commands, runtimeFileChanges)
 
       const loadDiff = services.taskApi.getTurnFileChangesDiff
       if (!loadDiff) throw new Error('File changes review is unavailable')
@@ -1925,47 +1990,25 @@ export function useWorkbenchRuntimeMessaging({
       const runtimeFileChanges = runtimeTask
         ? (fileChangesOverride ?? findFileChangesBySubtaskId(messageSource, subtaskId))
         : undefined
-      if (runtimeFileChanges && runtimeTask) {
-        const publishFileChanges = (fileChanges: TurnFileChangesSummary) => {
-          applyRuntimeConversationAction(runtimeTask, {
-            type: 'file_changes_updated',
-            subtaskId,
-            fileChanges,
-          })
-          return fileChanges
-        }
-        try {
-          const response = await executorClient.runtime.revertRuntimeFileChanges({
-            address: runtimeTask,
-            fileChanges: runtimeFileChanges,
-          })
-          const fileChanges = normalizeTurnFileChanges(
-            response.fileChanges ?? response.file_changes
-          )
-          if (!fileChanges) {
-            throw new Error('Invalid file changes response')
-          }
-          return publishFileChanges({
-            ...fileChanges,
-            diff: runtimeFileChanges.diff,
-            revertible: runtimeFileChanges.revertible ?? true,
-          })
-        } catch (error) {
-          if (error instanceof ApiError && isRecord(error.detail)) {
-            const fileChanges = normalizeTurnFileChanges(error.detail.file_changes)
-            if (fileChanges) {
-              return publishFileChanges({
-                ...fileChanges,
-                diff: runtimeFileChanges.diff,
-                revertible: runtimeFileChanges.revertible ?? true,
-              })
-            }
-          }
-          throw error
-        }
-      }
       if (runtimeTask) {
-        throw new Error('Runtime file changes artifact is unavailable')
+        const fileChanges = await revertRuntimeFileChanges(
+          {
+            revertRuntimeFileChanges: request =>
+              executorClient.runtime.revertRuntimeFileChanges(request),
+            errorFileChanges: cause =>
+              cause instanceof ApiError && isRecord(cause.detail)
+                ? cause.detail.file_changes
+                : undefined,
+          },
+          runtimeTask,
+          runtimeFileChanges
+        )
+        applyRuntimeConversationAction(runtimeTask, {
+          type: 'file_changes_updated',
+          subtaskId,
+          fileChanges,
+        })
+        return fileChanges
       }
       const revert = services.taskApi.revertTurnFileChanges
       if (!revert) throw new Error('File changes revert is unavailable')
@@ -2082,6 +2125,7 @@ function buildOptimisticRuntimeTask({
     ...(workspaceKind ? { workspaceKind } : {}),
     createdAt: now,
     updatedAt: now,
+    recencyAt: now,
     running: status === 'creating' || status === 'running',
     status,
     optimistic: true,

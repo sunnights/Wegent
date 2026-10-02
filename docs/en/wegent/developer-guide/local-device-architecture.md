@@ -92,13 +92,15 @@ To investigate a request, take the `request_id` from the Wework frontend, DSH, o
 
 ### Executor Startup Environment and Codex Home Initialization
 
-Before creating its asynchronous runtime or starting Agent child processes, a Unix executor runs the current user's interactive login shell to read the complete environment. It prefers the login shell from the system user database and falls back through `$SHELL`, `zsh`, `bash`, and `sh`. Environment capture has a fixed timeout. On failure, the executor keeps its parent environment and still appends standard developer locations such as Homebrew and `/usr/local`. The executor then passes the resulting environment consistently to Codex, Claude Code, plugins, skills, hooks, PTYs, and device commands, so Wework local sidecars, standalone local devices, and Linux cloud or remote devices share the same PATH resolution behavior.
+Before creating its asynchronous runtime or starting Agent child processes, a Unix executor runs the current user's non-interactive login shell to read the login environment without initializing prompts, completions, or plugins used only by interactive terminals. Environment variables needed by Agents should be configured in a startup file read by the login shell. The executor prefers the login shell from the system user database and falls back through `$SHELL`, `zsh`, `bash`, and `sh`. Environment capture has a fixed timeout. On failure, the executor keeps its parent environment and still appends standard developer locations such as Homebrew and `/usr/local`. The executor then passes the resulting environment consistently to Codex, Claude Code, plugins, skills, hooks, PTYs, and device commands, so Wework local sidecars, standalone local devices, and Linux cloud or remote devices share the same PATH resolution behavior.
 
 Windows has no login shell to capture, so the executor instead merges the machine and current-user PATH from the registry at startup. This keeps tools that a fresh pwsh can resolve visible to device commands even when the desktop app was launched before a PATH edit. Git diff and hosting CLI status device commands run git, `gh`, or `glab` natively without requiring `bash` or `python3`, which are not guaranteed on Windows PATH.
 
 Wework uses an isolated Codex Home for local runtime configuration. During first-run initialization, users can copy configuration, plugins, skills, and plugin marketplace data from the native Codex Home. After initialization, Wework writes `apps = true` under `[features]` by default so migrated plugin Apps are immediately available. If a user explicitly disables Apps later in Settings, ordinary subsequent startups preserve that choice.
 
 Wework considers the local runtime usable only after the real Codex app-server completes `initialize`, not merely when the executor stdio transport is connected. After Electron starts the executor, it first applies the current local proxy configuration and then starts and initializes the shared Codex app-server through `runtime.codex.ensure_started`; the renderer proceeds to the interactive workbench only after that call succeeds. The Codex initialization path must not synchronously wait for plugin marketplace refreshes, Git fetches, update checks, or other external network requests. Those background requests must not delay the `initialize` response even when the network is unavailable or a proxy never responds. Startup E2E coverage must verify this boundary with the real Codex binary and a blocking network proxy, while also confirming that no Agent model request is sent during initialization.
+
+Electron must keep the main window hidden while it starts and use the separate startup splash window as the only visible loading surface. `wework/electron/src/shell/index.html` hosts Core DSH startup and failure diagnostics only; it must not imitate the workbench layout, task list, composer, or any other skeleton UI. Electron shows the main window and closes the startup splash only after the Renderer reports the first actionable workbench through `renderer.startupReady`. Startup failures continue to expose retry and recovery actions through the startup splash. This preserves one visible startup path and prevents an unready main window from covering the animation or flashing placeholder content before the real interface.
 
 ### Runtime Task and Goal State
 
@@ -116,6 +118,10 @@ Goals have an independent lifecycle. An `active` goal means that its objective c
 
 If a user creates a Goal while a normal turn is still running, Wework retains that request and starts a new Goal turn with `initialGoal` after the current turn explicitly settles. An active Goal keeps the task visibly running, but it must not block this queued Goal handoff; ordinary queued messages still wait until the task is genuinely idle. The executor waits for Codex automatic continuation only when the Goal was already active before the turn started. If the Goal is created during a normal turn, that execution must settle first so Wework can start the queued Goal turn. This boundary prevents a deadlock where the frontend waits for an idle task while the executor waits for an automatic continuation that Codex will not create.
 
+To recover a genuinely running Goal across a Wework or executor restart, runtime work journals the active Goal execution in the encrypted turn queue. Recovery is based on that execution record, not inferred from `goalStatus=active`: only a Goal that was still executing before the restart is rebound. The executor subscribes to events before calling Codex `thread/resume` and must not create an additional `turn/start`, fabricate a user message, or inject a continuation prompt. Later turns remain driven by the native Codex Goal protocol. Pausing, clearing, or completing the Goal removes its execution record so a later startup cannot restore it incorrectly.
+
+After one physical Goal turn completes, the executor waits for Codex to create the next turn automatically. If that wait times out, it reconciles against provider-authoritative state through `thread/goal/get` and `thread/read`: it rebinds and continues listening when an active turn already exists, attempts native `thread/resume` once when the Goal remains active but the thread is idle, and exposes `needsAttention` to Wework instead of waiting silently when continuation still cannot proceed. Wework uses the Goal execution states `running`, `recovering`, and `needsAttention` to distinguish normal execution, restart recovery, and user-action-required recovery. A user recovery action reuses the retained Goal request instead of sending an ordinary chat message.
+
 The Wework frontend manages every task lifecycle through one user-scoped `RuntimeTaskLifecycleStore`. The Store owns one state machine per task and routes events to it. The state machine is the aggregate root for execution, turn, Goal, and unread state; its reducer is only an internal transition implementation. The React Provider adapts that same Store for subscription and neither stores nor infers execution state. The task list, composer, message thinking feedback, system tray, close guard, and completion reminders all read the same Store snapshot.
 
 Authoritative frontend execution state is memory-only and is never written to a local file or browser storage. The optimistic `starting` state created when a user sends a message is owned by the same state machine and converges when the executor explicitly reports `running=true` or `running=false`. During automatic continuation of an active Goal, the task remains visibly running between turns and after a page reload while either local execution remains active or the provider still reports an `inProgress` turn. A turn without streaming content may remain `idle`, so Wework shows no thinking indicator and creates no unread marker. To preserve unread edge detection across an application restart, Wework persists only task keys for unread results and task keys that were last observed running. The latter is not an execution-state source and cannot override the executor's current snapshot.
@@ -123,6 +129,8 @@ Authoritative frontend execution state is memory-only and is never written to a 
 Before a normal follow-up on a persistent thread calls `turn/start`, it must use `thread/read` to confirm that no active turn exists. Ephemeral threads do not support `thread/read(includeTurns)`, so their sends must instead check the executor's local active execution inside a per-task serialized critical section. A new turn must register itself as locally running before a concurrent sender can leave that section. If the provider rejects an overlapping send, Wework immediately restores the task to running state, refreshes the work list, and preserves the user's input in the queue. Once the provider settles to idle, Wework automatically sends that queued item with the same client message ID to avoid loss or duplication. Completion or interruption clears the active turn and restores the UI to idle. Interrupt-and-send creates a new turn only after the previous turn is confirmed interrupted: persistent threads also confirm that the provider turn stopped, while ephemeral threads rely on interruption of the local execution.
 
 Consecutive sends on an ephemeral thread depend on that thread remaining loaded in the shared Codex app-server. After a successful turn, the executor must not send `thread/unsubscribe` for an ephemeral thread; otherwise a later direct `turn/start` can target a thread that the app-server has already unloaded. Ephemeral threads also do not support the paginated transcript RPCs, so transcript queries must read the executor's local runtime cache instead of calling `thread/turns/list`. Persistent threads continue to unsubscribe after each terminal turn and use the provider transcript as their history source.
+
+A task can receive a provider thread ID before its first turn has materialized. When the runtime handle contains only local user-message presentations without turn IDs and has no completed messages, transcript snapshot, `lastTurnId`, or subtask turn ID, the executor treats it as an unmaterialized conversation: transcript requests return the local presentation, navigation requests return an empty list, and the provider pagination API is not called. A project board preloads transcripts for bound tasks only while its workspace tab is active, and attempts each task address at most once during one mount. A failure is not retried merely because task timestamps or status fields refresh; a later mount may load it again.
 
 Codex guidance is sent to the active turn through the shared app-server. If that turn finishes or changes while guidance is being sent, the executor reports the race as `no_active_turn`; Wework then sends the same content as a normal follow-up message so user input is preserved without a misleading send failure.
 
@@ -133,6 +141,8 @@ OpenAI reasoning and remote-compaction items can contain `encrypted_content` tha
 After an explicit failure, “switch model and retry” starts one new turn. It preserves the original task and portable thread context and sends exactly one request to the newly selected upstream. The executor also writes the turn's `modelSelection` back to the task summary so the model shown after a refresh matches the model that handled the request. Guidance sent while a turn is running remains part of that turn and does not switch models; the new model applies only to a normal new turn or one created by interrupt-and-send.
 
 The local model proxy uses the Codex Responses protocol as its internal canonical representation and converts bidirectionally among OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages upstream protocols. When the protocol changes, tool-call IDs and tool-result references in history must be normalized at the request boundary to stable IDs containing only letters, numbers, underscores, or dashes, while preserving a one-to-one mapping within that history. Raw provider IDs must not be forwarded directly into another protocol. Tool-call IDs returned by streaming responses follow the same normalization rule so later tool results still reference the original call and `item/started` and `item/completed` settle the same Wework tool block.
+
+Upstream Responses APIs pair a `function_call` with the `function_call_output` that follows it, so the encoder must keep a turn's message item outside that turn's call/output group: an assistant turn's text and thinking precede its calls, and a user turn's text follows its results. A message item interleaved between a call and its output is rejected even when the client supplied every result, because such a request reads as one whose output is missing.
 
 Before sending a user message, Wework generates a stable `clientUserMessageId` and renders an optimistic local message. The ID travels unchanged through the runtime create/send request to Codex app-server's `turn/start.clientUserMessageId`. When the Codex transcript returns the user message, the executor preserves the same `clientUserMessageId`, which Wework uses to reconcile it with the optimistic message. The Codex provider item ID remains the provider-event identity, but it cannot replace the client user message ID; otherwise transcript pagination or refresh can interpret one send as two messages.
 
@@ -154,7 +164,7 @@ Compaction event routing preserves the synthetic `${taskId}-context-compact` sub
 
 A Codex turn may interleave reasoning, assistant text, and tool calls. The executor must track streaming offsets and completed snapshots for each assistant text segment by provider item ID. A `delta` and `completed` event for the same item represent an incremental stream and its snapshot and must be deduplicated. Completed text from a different item must still be forwarded as subsequent text even when it occurs in the same turn; it cannot be discarded merely because an earlier item emitted deltas. Before Wework moves current assistant text into a tool or processing block, it clears that text stream's offset state so the next assistant segment after the tool starts at offset 0 and preserves transcript event order.
 
-Assistant text always enters Wework as process text while it streams. A phase carried by `item/started` is provisional: Codex can start an item as `final_answer` and complete that same item as commentary after more tools run. The executor therefore waits for completed items and the successful turn boundary before committing final content, so the UI never has to demote visible final content back into a process block. A completed explicit `final` or `final_answer` item wins; if the turn has no explicit final item, the latest completed assistant text becomes the fallback final result.
+Assistant text enters Wework according to the phase on its streaming start event, but a phase carried by `item/started` is provisional: Codex can start an item as `final_answer` and complete that same item as `commentary` before continuing with tools. An explicit phase on the completion event is authoritative. When it reclassifies the active streamed final as process text, the executor clears that active final and emits a process block with the same provider item ID and `replacesItemId`, so Wework replaces the provisional final in place instead of retaining both copies or ending the turn early. The executor falls back to the tracked streaming phase only when completion has no explicit phase. A completed explicit `final` or `final_answer` item wins; if the turn has no explicit final item, the latest completed assistant text becomes the fallback final result.
 
 Reasoning summaries supplied by Codex enter Wework as `thinking` processing blocks. A streaming summary appears as a single “Thinking · summary” row and reports only the currently active reasoning progress. After the turn completes, fails, or is cancelled, Wework removes the thinking block instead of retaining a summary placeholder or detail in message history. The executor must map both reasoning deltas and `item/completed` notifications that carry only the complete summary; otherwise a long reasoning phase degrades to a generic waiting state with no visible progress. Internal reasoning that the provider does not include in its summary is not displayed.
 
@@ -230,9 +240,22 @@ Device CRDs use `spec.deviceType` to separate lifecycle ownership and frontend c
 | `cloud`  | Wegent cloud device service                  | WebSocket  | Cloud device create, restart, and release flows                 |
 | `remote` | User-managed Docker container or remote host | WebSocket  | Remote Docker command generated from Wework connection settings |
 
-`remote` devices reuse the local executor WebSocket registration, heartbeat, task execution, and command RPC channels, but `RemoteDeviceProvider` lists them separately and returns `remoteConfig`. Backend does not persist the `WEGENT_AUTH_TOKEN` contained in the generated command; the Device CRD stores only non-sensitive metadata such as provider, image, deviceId, deviceName, backendUrl, publicBaseUrl, and createdAt.
+`remote` devices reuse the local executor WebSocket registration, heartbeat, task execution, and command RPC channels, but `RemoteDeviceProvider` lists them separately and returns `remoteConfig`. Backend does not persist the `WEGENT_AUTH_TOKEN` contained in the generated command; the Device CRD stores only non-sensitive metadata such as provider, image, deviceId, deviceName, backendUrl, and createdAt.
 
 After a remote Docker device starts, it sends `device:register` with `device_type=remote`, which updates the matching Device CRD. Online state still uses the Redis device-online key, so task routing, slot accounting, and terminal/code-server session RPC use the same protocol as local devices. The frontend does not expose cloud lifecycle actions for `remote` devices; users stop, restart, or remove the container on the Docker host.
+
+### Project device authorization pool and claiming
+
+By default, any available device owned by the project owner may claim a Run. Once devices are granted to a project through the existing `ResourceMember` `kind + resource` authorization relationship, those grants become the project's device allowlist. No dedicated mapping table is introduced.
+
+Neither automatic-processing rules nor manual assignments require the user to select a device. A human target only changes the assignee. An Agent or collaboration-group target creates a queued Run without a bound device. Claiming then verifies, in order:
+
+1. the device belongs to the Run owner;
+2. the device is allowed by the project device pool;
+3. if the same Issue previously ran on a device, the new Run keeps that device affinity;
+4. the device and Agent still have available capacity.
+
+A successful claim atomically writes the canonical device ID, execution environment, lease, and runtime request through the same conditional update so two devices cannot claim the Run. A project with no explicit device grants remains open to the owner's devices; after the first grant, only allowlisted devices are eligible. Presence affects whether a device can claim now, but does not prevent an administrator from pre-authorizing an offline device.
 
 ---
 
@@ -459,6 +482,42 @@ flowchart TB
     style DR fill:#14B8A6,color:#fff
     style EX fill:#14B8A6,color:#fff
 ```
+
+### Local collaboration group orchestration
+
+Wework manages local projects, agents, and collaboration groups through the
+local Executor and persists them in the Executor's local SQLite database.
+Cloud projects and their members, agents, and collaboration groups remain
+Backend-owned. The Local and Cloud UI domains select the active resource
+boundary; they must not merge both domains into one resource list or expose
+cloud-only actions, such as inviting members, for local resources.
+
+When a local Issue is assigned to a collaboration group, the Executor reads the
+leader, members, and coordination rules from the owning project's
+`collaboration_groups` configuration. A group without a leader does not start
+automated orchestration. A group with explicit stages creates workflow nodes in
+stage order. In manager coordination mode without explicit stages, the Executor
+first creates a manager node and lets the leader plan the remaining work from
+the Issue context.
+
+The manager runtime receives only task-scoped `wework_space` tools for reading
+the current Issue, listing candidates allowed by the current collaboration
+group, and submitting one plan through `submit_workflow_plan`. The plan is
+validated in one transaction:
+
+- the caller belongs to the active collaboration workflow for the current
+  Issue;
+- every `client_key` is unique, and every item has a title and assignee;
+- every assignee is a member of the current collaboration group;
+- every agent is active in the current project;
+- a workflow can accept only one successful plan submission.
+
+After validation, the Executor expands the plan into persisted workflow nodes
+and creates or advances child tasks in dependency order. A rejected plan does
+not leave partially written nodes, keeping the Issue and workflow consistent
+for diagnostics. Local workflows do not call cloud project-space assignment or
+outcome-reporting APIs; cloud collaboration continues to use Backend-owned
+project-space workflows.
 
 ### Task State Transitions
 

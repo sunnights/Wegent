@@ -5,6 +5,45 @@
 use super::*;
 
 impl RuntimeWorkRpcHandler {
+    pub(super) fn get_task(&self, payload: &Value) -> Result<Value, AppIpcError> {
+        let task_id = runtime_task_id(payload)
+            .ok_or_else(|| AppIpcError::new("bad_request", "taskId is required"))?;
+        let link = self
+            .store
+            .get_task_summary(&task_id)
+            .filter(|link| link.status != "archived" && !self.archived_link_is_deleted(link));
+        let Some(mut link) = link else {
+            return Ok(json!({
+                "success": false,
+                "code": "task_not_found",
+                "error": "Task not found on the owning Runtime",
+            }));
+        };
+        apply_local_execution_state(
+            &mut link,
+            self.is_active_local_task(&task_id),
+            self.queued_local_task_position(&task_id),
+        );
+        // Return only the identity/configuration needed by a client to continue.
+        // Execution profiles and transcript caches remain on the owning Runtime.
+        if let Some(handle) = link.runtime_handle.as_object_mut() {
+            handle.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "runtime"
+                        | "wegentTeam"
+                        | "modelSelection"
+                        | "model_selection"
+                        | "queuePosition"
+                )
+            });
+        }
+        Ok(json!({
+            "success": true,
+            "task": crate::runtime_work::response::local_task_json(link),
+        }))
+    }
+
     pub(super) async fn read_codex_recent_turns(&self, thread_id: &str) -> Result<Value, String> {
         load_codex_transcript(
             &self.codex_app_server,
@@ -14,6 +53,7 @@ impl RuntimeWorkRpcHandler {
                 limit: 1,
                 direction: CodexTranscriptDirection::Descending,
                 full_content: false,
+                prefer_rollout_history: false,
             },
         )
         .await
@@ -34,13 +74,14 @@ impl RuntimeWorkRpcHandler {
                 limit,
                 direction,
                 full_content: false,
+                prefer_rollout_history: false,
             },
         )
         .await
         .map(|page| page.thread)
     }
 
-    pub(super) async fn list_tasks(&self) -> Result<Value, AppIpcError> {
+    pub(super) async fn list_tasks(&self, payload: &Value) -> Result<Value, AppIpcError> {
         let started_at = Instant::now();
         log_runtime_work_list_diagnostic("started", started_at, started_at, &[]);
         let stage_started_at = Instant::now();
@@ -57,8 +98,23 @@ impl RuntimeWorkRpcHandler {
                 ),
             ],
         );
+        self.list_tasks_with_project_index(payload, &project_index, started_at)
+            .await
+    }
+
+    pub(super) async fn list_tasks_with_project_index(
+        &self,
+        payload: &Value,
+        project_index: &CodexGlobalProjectIndex,
+        started_at: Instant,
+    ) -> Result<Value, AppIpcError> {
+        let prefer_cached = bool_field(payload, "preferCached").unwrap_or(false);
         let stage_started_at = Instant::now();
-        let collected_links = self.collect_links(false).await;
+        let collected_links = if prefer_cached {
+            self.collect_cached_links(false)
+        } else {
+            self.collect_links(false).await
+        };
         for link in &collected_links {
             self.project_runtime_link_status(link);
         }
@@ -69,7 +125,7 @@ impl RuntimeWorkRpcHandler {
             &[("links", collected_links.len().to_string())],
         );
         let stage_started_at = Instant::now();
-        let links = self.visible_links_for_projects(collected_links, &project_index);
+        let links = self.visible_links_for_projects(collected_links, project_index);
         log_runtime_work_list_diagnostic(
             "project_filter_applied",
             started_at,
@@ -77,7 +133,7 @@ impl RuntimeWorkRpcHandler {
             &[("visible_links", links.len().to_string())],
         );
         let stage_started_at = Instant::now();
-        let workspaces = workspace_response(links, codex_project_workspaces(&project_index));
+        let workspaces = workspace_response(links, codex_project_workspaces(project_index));
         let task_count = workspaces
             .iter()
             .filter_map(|workspace| workspace.get("tasks").and_then(Value::as_array))
@@ -100,10 +156,30 @@ impl RuntimeWorkRpcHandler {
                 ("tasks", task_count.to_string()),
             ],
         );
+        if prefer_cached {
+            self.reconcile_codex_threads_after_cached_list();
+        }
         Ok(json!({
             "success": true,
             "workspaces": workspaces,
         }))
+    }
+
+    fn reconcile_codex_threads_after_cached_list(&self) {
+        let handler = self.clone();
+        tokio::spawn(async move {
+            let started_at = Instant::now();
+            handler.collect_links(false).await;
+            log_executor_event(
+                "runtime work cached list reconciliation finished",
+                &[("elapsed_ms", elapsed_ms(started_at))],
+            );
+            emit_runtime_work_changed(
+                &handler.event_tx,
+                &handler.device_id,
+                "runtime-work-bootstrap",
+            );
+        });
     }
 
     pub(super) async fn list_archived_conversations(
@@ -202,9 +278,21 @@ impl RuntimeWorkRpcHandler {
     }
 
     pub(super) async fn transcript(&self, payload: Value) -> Result<Value, AppIpcError> {
+        let task_id = runtime_task_id(&payload);
+        let mut response = self.read_transcript(payload).await?;
+        if let Some(link) = task_id.as_deref().and_then(|id| self.local_task_link(id)) {
+            if let Some(origin) = link.runtime_handle.get("origin") {
+                response["origin"] = origin.clone();
+            }
+        }
+        Ok(response)
+    }
+
+    async fn read_transcript(&self, payload: Value) -> Result<Value, AppIpcError> {
         let started_at = Instant::now();
         let local_task_id = runtime_task_id(&payload)
             .ok_or_else(|| AppIpcError::new("bad_request", "taskId is required"))?;
+        delay_desktop_e2e_transcript_response().await;
         let limit = transcript_limit(&payload);
         let before_cursor = string_field(&payload, "beforeCursor")
             .or_else(|| string_field(&payload, "before_cursor"));
@@ -219,17 +307,108 @@ impl RuntimeWorkRpcHandler {
         let include_full_content = bool_field(&payload, "includeFullContent")
             .or_else(|| bool_field(&payload, "include_full_content"))
             .unwrap_or(false);
+        let conversation_context_only = bool_field(&payload, "conversationContextOnly")
+            .or_else(|| bool_field(&payload, "conversation_context_only"))
+            .unwrap_or(false);
+        let navigation_only = bool_field(&payload, "navigationOnly")
+            .or_else(|| bool_field(&payload, "navigation_only"))
+            .unwrap_or(false);
+        if navigation_only && include_full_content {
+            return Err(AppIpcError::new(
+                "bad_request",
+                "navigationOnly cannot be combined with includeFullContent",
+            ));
+        }
         let refresh = bool_field(&payload, "refresh")
             .or_else(|| bool_field(&payload, "forceRefresh"))
             .unwrap_or(false);
         let local_link = self.local_task_link(&local_task_id);
-        let session_id = local_link
-            .as_ref()
-            .and_then(runtime_session_id_from_link)
-            .or_else(|| runtime_session_id_from_payload(&payload));
+        let linked_session_id = local_link.as_ref().and_then(runtime_session_id_from_link);
+        let requested_session_id = runtime_session_id_from_payload(&payload);
+        let direct_thread_override = requested_session_id
+            .as_deref()
+            .zip(linked_session_id.as_deref())
+            .is_some_and(|(requested, linked)| requested != linked);
+        let session_id = requested_session_id.or(linked_session_id);
         let running_hint = local_link.as_ref().is_some_and(|link| link.running);
         let local_execution_running = self.is_active_local_task(&local_task_id);
-        if local_execution_running && !refresh {
+        if navigation_only {
+            if !direct_thread_override
+                && local_link
+                    .as_ref()
+                    .is_some_and(provider_transcript_is_unmaterialized)
+            {
+                return Ok(transcript_navigation_response(
+                    local_task_id,
+                    local_link
+                        .as_ref()
+                        .map(|link| link.workspace_path.clone())
+                        .unwrap_or_default(),
+                    Vec::new(),
+                ));
+            }
+            let Some(thread_id) = session_id else {
+                return Ok(transcript_navigation_response(
+                    local_task_id,
+                    workspace_path(&payload).unwrap_or_default(),
+                    Vec::new(),
+                ));
+            };
+            if !refresh {
+                if let Some(navigation) = self.cached_codex_transcript_navigation(&thread_id) {
+                    let workspace_path = local_link
+                        .as_ref()
+                        .map(|link| link.workspace_path.clone())
+                        .filter(|path| !path.trim().is_empty())
+                        .or_else(|| workspace_path(&payload))
+                        .unwrap_or_default();
+                    return Ok(transcript_navigation_response(
+                        local_task_id,
+                        workspace_path,
+                        transcript_navigation_from_codex_turns(navigation),
+                    ));
+                }
+            }
+            let metadata_response = self
+                .codex_app_server
+                .request(
+                    "thread/read",
+                    json!({"threadId": thread_id, "includeTurns": false}),
+                )
+                .await
+                .map_err(|error| AppIpcError::new("codex_error", error))?;
+            let thread = metadata_response
+                .get("thread")
+                .cloned()
+                .filter(Value::is_object)
+                .ok_or_else(|| {
+                    AppIpcError::new(
+                        "codex_error",
+                        "thread/read returned a response without thread",
+                    )
+                })?;
+            let workspace_path = local_link
+                .as_ref()
+                .map(|link| link.workspace_path.clone())
+                .filter(|path| !path.trim().is_empty())
+                .or_else(|| string_field(&thread, "cwd"))
+                .or_else(|| workspace_path(&payload))
+                .unwrap_or_default();
+            let prefer_rollout_history = local_link.as_ref().is_some_and(|link| {
+                link.runtime_handle
+                    .get("cloudTranscript")
+                    .is_some_and(Value::is_object)
+            });
+            let navigation = self
+                .codex_transcript_navigation(&thread, &thread_id, prefer_rollout_history, refresh)
+                .await?;
+            return Ok(transcript_navigation_response(
+                local_task_id,
+                workspace_path,
+                transcript_navigation_from_codex_turns(navigation),
+            ));
+        }
+        if local_execution_running && !refresh && !direct_thread_override {
             if let Some(link) = local_link
                 .as_ref()
                 .filter(|link| runtime_has_provider_transcript_reader(&link.runtime))
@@ -257,6 +436,9 @@ impl RuntimeWorkRpcHandler {
                         false,
                         false,
                     );
+                    if conversation_context_only {
+                        project_conversation_context_messages(&mut messages);
+                    }
                     log_runtime_transcript_finished(RuntimeTranscriptLog {
                         started_at,
                         local_task_id: &local_task_id,
@@ -286,8 +468,21 @@ impl RuntimeWorkRpcHandler {
             link.ephemeral
                 || !runtime_has_provider_transcript_reader(&link.runtime)
                 || session_id.is_none()
+                || (!direct_thread_override && provider_transcript_is_unmaterialized(link))
         }) {
-            let messages = cached_runtime_transcript_messages(link);
+            let mut messages = cached_runtime_transcript_messages(link);
+            let page_messages = messages.clone();
+            attach_user_message_presentations_for_page(
+                &mut messages,
+                user_message_presentations(link),
+                &page_messages,
+                &[],
+                false,
+                false,
+            );
+            if conversation_context_only {
+                project_conversation_context_messages(&mut messages);
+            }
             log_runtime_transcript_finished(RuntimeTranscriptLog {
                 started_at,
                 local_task_id: &local_task_id,
@@ -329,7 +524,7 @@ impl RuntimeWorkRpcHandler {
                 running: local_execution_running,
             });
             let pagination = transcript_pagination(&runtime, limit, before_cursor, after_cursor);
-            return Ok(transcript_response(TranscriptResponseInput {
+            let mut response = transcript_response(TranscriptResponseInput {
                 local_task_id,
                 workspace_path,
                 runtime,
@@ -338,11 +533,23 @@ impl RuntimeWorkRpcHandler {
                 running: local_execution_running,
                 pagination,
                 full_content: include_full_content,
+                conversation_context_only,
                 turn_item_source: TranscriptTurnItemSource::CachedMessages,
-            }));
+                turn_navigation: Vec::new(),
+            });
+            // Creation may not have registered the task yet. Absence of a local
+            // execution is unknown state, not evidence that the send has settled.
+            if !local_execution_running
+                && !local_link
+                    .as_ref()
+                    .is_some_and(|link| link.completed_at.is_some())
+            {
+                response.as_object_mut().unwrap().remove("running");
+            }
+            return Ok(response);
         };
 
-        if refresh && !local_execution_running {
+        if refresh && !local_execution_running && !direct_thread_override {
             if let Some(link) = local_link.as_ref().filter(|link| !link.ephemeral) {
                 thread_id = self
                     .resume_codex_thread_for_action(link, &thread_id)
@@ -358,11 +565,7 @@ impl RuntimeWorkRpcHandler {
             }
         }
 
-        let CodexTranscriptPage {
-            mut thread,
-            before_cursor: page_before_cursor,
-            after_cursor: page_after_cursor,
-        } = load_codex_transcript(
+        let transcript_page = load_codex_transcript(
             &self.codex_app_server,
             CodexTranscriptRequest {
                 thread_id: &thread_id,
@@ -377,10 +580,86 @@ impl RuntimeWorkRpcHandler {
                     CodexTranscriptDirection::Descending
                 },
                 full_content: include_full_content,
+                prefer_rollout_history: local_link.as_ref().is_some_and(|link| {
+                    link.runtime_handle
+                        .get("cloudTranscript")
+                        .is_some_and(Value::is_object)
+                }),
             },
         )
-        .await
-        .map_err(|error| AppIpcError::new("codex_error", error))?;
+        .await;
+        let CodexTranscriptPage {
+            mut thread,
+            before_cursor: page_before_cursor,
+            after_cursor: page_after_cursor,
+            prepend_item_turn_ids,
+        } = match transcript_page {
+            Ok(page) => page,
+            Err(error)
+                if before_cursor.is_none()
+                    && after_cursor.is_none()
+                    && !direct_thread_override
+                    && local_link.as_ref().is_some_and(|link| {
+                        !transcript_snapshot_messages(link).is_empty()
+                            || !completed_transcript_messages(link).is_empty()
+                    }) =>
+            {
+                let link = local_link
+                    .as_ref()
+                    .expect("cached transcript fallback requires a local task");
+                let mut messages = transcript_snapshot_messages(link);
+                append_unique_transcript_messages(
+                    &mut messages,
+                    cached_runtime_transcript_messages(link),
+                );
+                append_unique_transcript_messages(
+                    &mut messages,
+                    completed_transcript_messages(link),
+                );
+                attach_user_message_presentations_for_page(
+                    &mut messages,
+                    user_message_presentations(link),
+                    &[],
+                    &[],
+                    false,
+                    false,
+                );
+                if conversation_context_only {
+                    project_conversation_context_messages(&mut messages);
+                }
+                log_executor_event(
+                    "runtime work provider transcript unavailable; using persisted snapshot",
+                    &[
+                        ("local_task_id", local_task_id.clone()),
+                        ("thread_id", thread_id.clone()),
+                        ("error", error),
+                    ],
+                );
+                log_runtime_transcript_finished(RuntimeTranscriptLog {
+                    started_at,
+                    local_task_id: &local_task_id,
+                    thread_id: &thread_id,
+                    source: "persisted_snapshot",
+                    refresh,
+                    running_hint,
+                    limit,
+                    before_cursor: None,
+                    after_cursor: None,
+                    message_count: messages.len(),
+                    running: local_execution_running,
+                });
+                return Ok(cached_transcript_response(
+                    link,
+                    messages,
+                    None,
+                    local_execution_running,
+                    limit,
+                    None,
+                    None,
+                ));
+            }
+            Err(error) => return Err(AppIpcError::new("codex_error", error)),
+        };
         if let Some(workspace_path) = local_link
             .as_ref()
             .map(|link| link.workspace_path.as_str())
@@ -397,15 +676,20 @@ impl RuntimeWorkRpcHandler {
             .flatten()
             .filter_map(|turn| string_field(turn, "id"))
             .collect::<Vec<_>>();
-        let presentation_page_messages = local_link.as_ref().map(|_| {
-            if include_full_content {
-                full_transcript_messages(&thread, &self.device_id)
-            } else {
-                transcript_messages(&thread, &self.device_id)
-            }
-        });
-        self.merge_active_codex_transcript(&local_task_id, &mut thread);
-        self.repair_legacy_task_activity_time(&local_task_id, &thread);
+        let presentation_page_messages = local_link
+            .as_ref()
+            .filter(|_| !direct_thread_override)
+            .map(|_| {
+                if include_full_content {
+                    full_transcript_messages(&thread, &self.device_id)
+                } else {
+                    transcript_messages(&thread, &self.device_id)
+                }
+            });
+        if !direct_thread_override {
+            self.merge_active_codex_transcript(&local_task_id, &mut thread);
+            self.repair_legacy_task_activity_time(&local_task_id, &thread);
+        }
         let workspace_path = local_link
             .as_ref()
             .map(|link| link.workspace_path.clone())
@@ -422,7 +706,13 @@ impl RuntimeWorkRpcHandler {
             transcript_messages(&thread, &self.device_id)
         };
         let mut messages = transcript_messages;
-        if let Some(link) = local_link.as_ref() {
+        if let Some(link) = local_link.as_ref().filter(|_| !direct_thread_override) {
+            merge_latest_completed_transcript_messages(
+                &mut messages,
+                link,
+                before_cursor.as_deref(),
+                after_cursor.as_deref(),
+            );
             attach_user_message_presentations_for_page(
                 &mut messages,
                 user_message_presentations(link),
@@ -454,6 +744,13 @@ impl RuntimeWorkRpcHandler {
         }
         let running = local_execution_running || codex_thread_has_in_progress_turn(&thread);
         let message_count = messages.len();
+        let turn_navigation = if include_full_content
+            || (before_cursor.is_none() && after_cursor.is_none() && page_before_cursor.is_none())
+        {
+            transcript_turn_navigation(&messages)
+        } else {
+            Vec::new()
+        };
         log_runtime_transcript_finished(RuntimeTranscriptLog {
             started_at,
             local_task_id: &local_task_id,
@@ -468,7 +765,7 @@ impl RuntimeWorkRpcHandler {
             running,
         });
 
-        Ok(transcript_response(TranscriptResponseInput {
+        let mut response = transcript_response(TranscriptResponseInput {
             local_task_id,
             workspace_path,
             runtime: "codex".to_owned(),
@@ -488,7 +785,98 @@ impl RuntimeWorkRpcHandler {
                 },
             },
             full_content: include_full_content,
+            conversation_context_only,
             turn_item_source: TranscriptTurnItemSource::CodexItems,
-        }))
+            turn_navigation,
+        });
+        mark_prepend_item_turns(&mut response, &prepend_item_turn_ids);
+        Ok(response)
+    }
+
+    async fn codex_transcript_navigation(
+        &self,
+        thread: &Value,
+        thread_id: &str,
+        prefer_rollout_history: bool,
+        refresh: bool,
+    ) -> Result<CodexTranscriptNavigation, AppIpcError> {
+        if !refresh {
+            if let Some(navigation) = self.cached_codex_transcript_navigation(thread_id) {
+                return Ok(navigation);
+            }
+        }
+
+        let navigation = load_codex_transcript_navigation(
+            &self.codex_app_server,
+            thread,
+            thread_id,
+            prefer_rollout_history,
+        )
+        .await
+        .map_err(|error| AppIpcError::new("codex_error", error))?;
+        let mut cache = self
+            .codex_transcript_navigation_cache
+            .lock()
+            .expect("Codex transcript navigation cache lock should not be poisoned");
+        cache.retain(|_, entry| entry.cached_at.elapsed() < CODEX_TRANSCRIPT_NAVIGATION_CACHE_TTL);
+        if cache.len() >= CODEX_TRANSCRIPT_NAVIGATION_CACHE_MAX_ENTRIES {
+            if let Some(oldest_key) = cache
+                .iter()
+                .max_by_key(|(_, entry)| entry.cached_at.elapsed())
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest_key);
+            }
+        }
+        cache.insert(
+            thread_id.to_owned(),
+            CachedCodexTranscriptNavigation {
+                cached_at: Instant::now(),
+                navigation: navigation.clone(),
+            },
+        );
+        Ok(navigation)
+    }
+
+    fn cached_codex_transcript_navigation(
+        &self,
+        thread_id: &str,
+    ) -> Option<CodexTranscriptNavigation> {
+        self.codex_transcript_navigation_cache
+            .lock()
+            .expect("Codex transcript navigation cache lock should not be poisoned")
+            .get(thread_id)
+            .filter(|entry| entry.cached_at.elapsed() < CODEX_TRANSCRIPT_NAVIGATION_CACHE_TTL)
+            .map(|entry| entry.navigation.clone())
+    }
+}
+
+async fn delay_desktop_e2e_transcript_response() {
+    let Some(delay_ms) = std::env::var("WEWORK_E2E_RUNTIME_TRANSCRIPT_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    else {
+        return;
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(delay_ms.min(10_000))).await;
+}
+
+fn mark_prepend_item_turns(response: &mut Value, turn_ids: &HashSet<String>) {
+    if turn_ids.is_empty() {
+        return;
+    }
+    for turn in response
+        .get_mut("turns")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let Some(turn_id) = string_field(turn, "id") else {
+            continue;
+        };
+        if turn_ids.contains(&turn_id) {
+            turn["itemMerge"] = Value::String("prepend".to_owned());
+        }
     }
 }

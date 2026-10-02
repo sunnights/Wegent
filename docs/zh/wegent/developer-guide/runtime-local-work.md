@@ -263,6 +263,16 @@ Backend 根据请求中的项目映射或独立设备工作区解析目标设备
 
 项目模式创建任务时，Wework 的执行工作区只有两种来源：`current_workspace` 使用项目主目录，`git_worktree` 通过目标设备的 `runtime.worktrees.prepare` 创建独立工作树。路径由该设备的 Worktree 设置、运行时任务 id 和项目目录名稳定拼出，不能由 UI 拼接任意路径。工作树创建请求可以携带显式 `branch`；如果没有显式分支，默认分支必须读取项目主目录的当前 Git 分支，而不是 Git 默认分支或 `HEAD` 字样。分支列表只负责展示可选分支，当前分支应排在第一位，其余分支保持 Git 返回顺序。
 
+临时侧边对话是父 LocalTask 的原地分支，不是新的工作区规划。Wework 通过
+`sideSource` 传递父任务的 `deviceId`、`workspacePath` 和 Codex `threadId`；
+创建请求必须清除项目当前选择的 `git_worktree` 策略。Executor 也必须把
+`sideSource` 视为权威目录绑定：即使请求同时错误携带
+`workspace_source=git_worktree`，仍直接使用父任务的 `workspacePath` 调用
+`thread/fork`，不能再创建一个工作树。这样主线程位于项目主目录或已有工作树时，
+侧边对话都会在同一目录中执行。`sideSource` 缺少非空 `threadId` 或
+`workspacePath`，或者顶层请求目录与父目录冲突时，Executor 必须拒绝创建，
+不能回退到请求目录、项目目录或普通对话目录。
+
 Wework 在调用 create 前先生成客户端侧 `localTaskId`，并在请求体中作为 `localTaskId` 传给 Backend。Backend 只把这个值转发给目标设备，不把它写入中心数据库。前端会立即用 `deviceId + localTaskId` 打开运行时 URL、展示用户消息和等待态；如果设备返回了不同的 `localTaskId`，前端再切换到设备确认的地址。这样新建任务不需要等待 Backend RPC 完成或下一次列表刷新，队列发送也会等当前等待态进入真实 assistant turn 后再继续。
 
 运行时创建的持久化位置由具体 runtime 决定：
@@ -331,6 +341,26 @@ Wework 的运行时任务 URL 使用：
 URL 不包含 `workspacePath`。刷新页面或复制链接时，前端先用 URL 里的 `deviceId + localTaskId` 打开任务，再从最新的 runtime work 列表恢复该任务的工作区上下文。
 
 新对话和未选择项目的入口使用根路径或普通会话路径，不使用 `projectId=0` 这类占位参数。项目选择状态由 runtime workspace 引用和当前会话上下文恢复。
+
+## 新任务发送状态与诊断
+
+Electron 启动完成通知必须幂等：首次完成启动后，页面切换或重新挂载发来的通知不应再次显示、聚焦主窗口，避免抢走弹出窗口的焦点。并发通知共享同一次启动完成操作；失败后允许重新完成启动。
+
+悬浮聊天窗口使用单一当前会话驱动消息、标题和原生窗口尺寸，不恢复主工作台的分屏布局。窗口分为输入、菜单和会话三种模式；打开菜单时保持输入框底部位置，发送后切换到会话尺寸。工具栏在紧凑输入模式下始终可用。
+
+悬浮窗口在原生键盘事件层处理无修饰键的 `Esc`，隐藏窗口并保留会话；输入法组合输入期间不拦截。快捷键唤起悬浮窗口不应恢复主窗口；仅主动点击 Dock、托盘或“在主窗口打开”时进入主窗口。普通应用激活事件不触发主窗口恢复。
+
+刷新后页面未恢复时，检查 Electron 的 `[renderer-load]` 事件，按 `webContentsId` 关联加载开始、DOM 就绪、加载结束、失败和退出拦截。日志不包含页面 URL，避免暴露查询参数。
+
+发送消息后，前端会先展示用户消息并读取历史，此时 executor 可能仍在创建 worktree，尚未登记 LocalTask。无任务索引、无 provider 会话且没有已知执行时，空 transcript 必须省略 `running`，表示状态未知；不能用 `running=false` 提前结束前端的发送状态。已知运行和完成状态仍使用明确的布尔值。
+
+显式发送操作直接更新共享 `RuntimeTaskLifecycleStore`。切换标签页或隐藏发起发送的界面不应阻止 `sendRequested`、`sendAccepted` 或发送失败的状态更新；后台列表和历史同步继续受界面所有权限制。
+
+保留挂载的隐藏工作台不得订阅创建项目、绑定工作目录和打开云端设备设置的全局交互事件；这些事件仅由 `routeActive` 的工作台处理，避免切换标签页后重复打开 Portal 对话框。已知任务在创建 provider 会话前失败时，transcript 仍须返回 `running=false`，让客户端结束等待。
+
+恢复本地任务的项目空间上下文时，复用绑定记录中的项目 ID 读取任务，不要再次遍历项目列表。`project-space-context-resolved/failed` 诊断记录上下文查询耗时及结果是否被当前界面采用，用于区分查询超时和过期响应。
+
+排查发送后的空白时，用 `deviceId + taskId` 关联 Electron 日志目录中的 `runtime-launch.log` 与 executor 日志。前者记录历史响应接收、状态机转换、等待提示状态和 `web_contents_id`；后者的 `runtime worktree stage` 记录锁等待、预检查、Git worktree 创建与持久化耗时。后端返回 `running=true` 不等于前端已经渲染等待提示，必须核对两侧时间。这些日志不需要记录消息正文。Electron 日志采集器和 executor 的修改需要重启对应进程，前端热更新不能替代重启。
 
 ## 兼容性
 

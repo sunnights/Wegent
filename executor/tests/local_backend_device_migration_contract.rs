@@ -1063,6 +1063,8 @@ struct RecordedCall {
 struct RecordingTransport {
     calls: Arc<Mutex<Vec<RecordedCall>>>,
     emits: Arc<Mutex<Vec<RecordedCall>>>,
+    connects: Arc<Mutex<usize>>,
+    disconnects: Arc<Mutex<usize>>,
     responses: Arc<Mutex<VecDeque<Value>>>,
     handlers: Arc<Mutex<Vec<(String, EventHandler)>>>,
     terminal_responses: Arc<Mutex<VecDeque<Result<Value, String>>>>,
@@ -1101,11 +1103,17 @@ impl LocalBackendTransport for RecordingTransport {
         &'a self,
         _config: &'a LocalBackendConfig,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            *self.connects.lock().unwrap() += 1;
+            Ok(())
+        })
     }
 
     fn disconnect<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            *self.disconnects.lock().unwrap() += 1;
+            Ok(())
+        })
     }
 
     fn call<'a>(
@@ -1460,6 +1468,7 @@ fn local_backend_config() -> LocalBackendConfig {
         runtime_transfer_host: "192.0.2.10".to_owned(),
         heartbeat_interval: Duration::from_secs(30),
         heartbeat_timeout: Duration::from_secs(10),
+        runtime_work_poll_interval: Duration::from_secs(2),
         registration_timeout: Duration::from_secs(10),
         reconnect_delay: Duration::from_secs(1),
         reconnect_delay_max: Duration::from_secs(30),

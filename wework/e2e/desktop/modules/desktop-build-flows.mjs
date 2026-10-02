@@ -84,10 +84,13 @@ import {
   selectE2EModel,
   sendPromptUntilScenarioRequest,
   toolDetailsMcpServerPath,
+  waitForLogPattern,
   weworkDir,
   withTimeout,
   writeFile,
 } from './shared.mjs'
+
+const BUILTIN_CODEX_PROVIDER_IDS = new Set(['openai', 'amazon-bedrock', 'ollama', 'lmstudio'])
 
 import { waitForTaskRowByText } from './task-state-flows.mjs'
 import { remoteDeviceE2EExtension } from '../remote-device-extension.mjs'
@@ -155,6 +158,7 @@ async function verifyCloudTerminalCompatibility(control, cloudEnvironment) {
       requestedVersion,
       expectedVersion: requestedVersion ?? 1,
       name: `wire-request-${requestedVersion ?? 'absent'}`,
+      forceRevocation: requestedVersion === 2,
     })
   }
   try {
@@ -340,14 +344,19 @@ async function writeCodexConfig(
   scenarioConfigToml = '',
   upstreamApiFormat = 'openai-responses',
   providerConfigToml = '',
-  providerAuthToml = 'env_key = "WEWORK_E2E_MODEL_API_KEY"'
+  providerAuthToml = 'env_key = "WEWORK_E2E_MODEL_API_KEY"',
+  modelProviderId = MODEL_PROVIDER_ID,
+  modelId = DEFAULT_MODEL_ID
 ) {
   await mkdir(codexHome, { recursive: true })
   const configPath = join(codexHome, 'config.toml')
   const temporaryConfigPath = join(codexHome, `config.toml.${randomUUID()}.tmp`)
+  const customProviderConfig = BUILTIN_CODEX_PROVIDER_IDS.has(modelProviderId)
+    ? ''
+    : `\n[model_providers.${modelProviderId}]\nname = "Wework Desktop E2E"\nbase_url = "${modelServerUrl}/v1"\n${providerAuthToml}\nwire_api = "responses"\nupstream_api_format = "${upstreamApiFormat}"\n${providerConfigToml}`
   await writeFile(
     temporaryConfigPath,
-    `model_provider = "${MODEL_PROVIDER_ID}"\nmodel = "${DEFAULT_MODEL_ID}"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n${scenarioConfigToml}\n[model_providers.${MODEL_PROVIDER_ID}]\nname = "Wework Desktop E2E"\nbase_url = "${modelServerUrl}/v1"\n${providerAuthToml}\nwire_api = "responses"\nupstream_api_format = "${upstreamApiFormat}"\n${providerConfigToml}`,
+    `model_provider = "${modelProviderId}"\nmodel = "${modelId}"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n${scenarioConfigToml}${customProviderConfig}`,
     'utf8'
   )
   await rename(temporaryConfigPath, configPath)
@@ -435,9 +444,16 @@ async function resolveDesktopCodexBinary() {
   }
 
   const target = hostCodexTarget()
-  await runChecked('pnpm', ['run', 'prepare:codex', '--target', target], {
-    cwd: weworkDir,
-  })
+  // The desktop wire client must stay runnable without workspace tooling, so prepare the binary with
+  // the interpreter that already runs this check instead of a `pnpm` launcher, which Windows cannot
+  // spawn without a command interpreter.
+  await runChecked(
+    process.execPath,
+    [join(weworkDir, 'scripts', 'prepare-codex-binary.mjs'), '--target', target],
+    {
+      cwd: weworkDir,
+    }
+  )
   const lock = JSON.parse(await readFile(join(weworkDir, 'codex-binaries.lock.json'), 'utf8'))
   const entry = lock.targets?.[target]
   const binaryRelativePath = entry?.binaryPath
@@ -698,6 +714,16 @@ export async function verifyRemoteDockerCommandFlow(
     authToken: generatedAuthToken,
     interactiveSessions,
   })
+  const connectedDevice = await cloudEnvironment.device(generatedDeviceId)
+  assert.equal(
+    connectedDevice?.status,
+    'online',
+    'The generated remote Executor did not register as online'
+  )
+  assert.ok(
+    connectedDevice?.runtime_instance_id,
+    'The generated remote Executor did not expose a Runtime identity'
+  )
   await waitForSnapshot(
     control,
     snapshot =>
@@ -705,6 +731,48 @@ export async function verifyRemoteDockerCommandFlow(
       snapshot.testIds.includes(`connection-device-${generatedDeviceId}`),
     'The generated remote device did not close the dialog and refresh the device list'
   )
+  await control.command(
+    'waitFor',
+    `[data-testid="connection-device-${generatedDeviceId}"] [data-testid="connection-device-status"]`,
+    {
+      text: '在线',
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    }
+  )
+  if (interactiveSessions?.codeServer !== false) {
+    const ideSelector = `[data-testid="connection-code-server-button-${generatedDeviceId}"]`
+    const backendLogOffset = (await readFile(cloudEnvironment.backendLogPath, 'utf8')).length
+    await control.command('clickWhenEnabled', ideSelector)
+    await waitForLogPattern(
+      cloudEnvironment.backendLogPath,
+      new RegExp(`/api/devices/${generatedDeviceId}/code-server`),
+      {
+        fromOffset: backendLogOffset,
+        timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+      }
+    )
+    assert.equal(
+      Number(
+        await control.command(
+          'getElementCount',
+          `[data-testid="connection-ide-confirm-${generatedDeviceId}"]`
+        )
+      ),
+      0,
+      'The device IDE action still required a second confirmation'
+    )
+    assert.equal(
+      Number(
+        await control.command(
+          'getElementCount',
+          `[data-testid="connection-session-error-${generatedDeviceId}"]`
+        )
+      ),
+      0,
+      'The device IDE action failed while opening the system browser'
+    )
+  }
+  await captureVerificationScreenshot(control, 'cloud-00-generated-remote-device-online.png')
   await control.command('navigate', 'body', { value: '/' })
   return { deviceId: generatedDeviceId, ...generatedDevice }
 }
@@ -804,6 +872,48 @@ export async function verifyDisabledRemoteSessionCapabilities(
     'The project terminal card remained enabled after the Executor disabled terminal sessions'
   )
   await captureVerificationScreenshot(control, 'cloud-00-disabled-session-project.png')
+
+  await selectE2EModel(control, DEFAULT_MODEL_ID, DEFAULT_MODEL_LABEL)
+  control.setScenario('cloud_initial')
+  await sendPrompt(control, ACTIVE_COMPOSER_SELECTOR, CLOUD_TASK_PROMPT)
+  await withTimeout(
+    control.awaitScenarioRequestCount('cloud_initial', 2),
+    WORKBENCH_READY_TIMEOUT_MS,
+    'The generated remote Executor did not complete its model tool loop'
+  )
+  const runningTaskSnapshot = await waitForWorkbenchDebugState(
+    control,
+    snapshot =>
+      snapshot.workbench?.currentRuntimeTask?.deviceId === deviceId &&
+      Boolean(snapshot.workbench?.currentRuntimeTask?.taskId),
+    'The generated remote Executor was not selected for the verification task',
+    WORKBENCH_READY_TIMEOUT_MS
+  )
+  const runtimeTaskId = runningTaskSnapshot.workbench.currentRuntimeTask.taskId
+  const runningTaskTestId = `runtime-local-task-running-${runtimeTaskId}`
+  assert.equal(
+    runningTaskSnapshot.workbench.activeWorkspace?.workspacePath,
+    workspacePath,
+    'The generated remote Executor project used the wrong workspace'
+  )
+  assert.equal(
+    (await readFile(join(workspacePath, CLOUD_ARTIFACT_NAME), 'utf8')).trim(),
+    CLOUD_ARTIFACT_CONTENT,
+    'The generated remote Executor did not create the verification artifact'
+  )
+  await control.command('waitFor', '[data-testid="message-assistant"]', {
+    text: CLOUD_COMPLETION_TEXT,
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  })
+  await captureVerificationScreenshot(control, 'cloud-00-generated-remote-task-running.png')
+  control.releaseCloudInitialResponse()
+  await waitForSnapshot(
+    control,
+    snapshot => !snapshot.testIds.includes(runningTaskTestId),
+    'The generated remote Executor task did not settle after completion',
+    WORKBENCH_READY_TIMEOUT_MS
+  )
+  await captureVerificationScreenshot(control, 'cloud-00-generated-remote-task-completed.png')
 }
 
 export async function verifyWeworkAppDeviceRegistrationFlow(control, cloudEnvironment) {
@@ -1128,10 +1238,10 @@ async function verifyCloudProjectFlow(
     false,
     'The bottom workspace add menu exposed IDE'
   )
-  assert.equal(
-    addMenuSnapshot.testIds.includes('workspace-add-desktop-option'),
-    false,
-    'The external build exposed the internal desktop extension'
+  assert.deepEqual(
+    addMenuSnapshot.testIds.filter(id => id.startsWith('workspace-add-') && id.endsWith('-option')),
+    ['workspace-add-terminal-option'],
+    'The external build exposed an unexpected workspace action'
   )
   await control.command('press', 'body', { key: 'Escape' })
   await captureVerificationScreenshot(control, 'cloud-05b-historical-terminal-restored.png')
@@ -1289,6 +1399,16 @@ async function verifyRetryFailureRestoration(control, composerSelector) {
     {
       timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
     }
+  )
+  const failedDurationSelector = `${ACTIVE_WORKBENCH_SELECTOR} [data-testid="message-assistant"]:has([data-testid="assistant-error-card"]) [data-testid="processing-duration-label"]`
+  await control.command('waitFor', failedDurationSelector, { timeoutMs: DEFAULT_STEP_TIMEOUT_MS })
+  const failedDuration = await control.command('getText', failedDurationSelector)
+  assert.match(failedDuration, /用时/, 'The failed turn retained its running duration label')
+  await new Promise(resolve => setTimeout(resolve, 2100))
+  assert.equal(
+    await control.command('getText', failedDurationSelector),
+    failedDuration,
+    'The failed turn duration kept advancing after the error'
   )
   const retryDebugSnapshot = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
   const retryTaskId = retryDebugSnapshot.workbench?.currentRuntimeTask?.taskId

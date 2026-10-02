@@ -46,6 +46,7 @@ from app.schemas.wizard import (
     TestPromptRequest,
     TestPromptResponse,
 )
+from app.services.adapters.bot_kinds import bot_kinds_service
 from app.services.chat.config import extract_and_process_model_config
 from app.services.simple_chat import simple_chat_service
 
@@ -696,6 +697,14 @@ async def recommend_shell_and_model(
                     confidence=0.85,
                 )
                 break
+            elif shell_type == "Codex" and protocol == "openai":
+                model_recommendation = ModelRecommendation(
+                    model_name=model.name,
+                    model_id=model_spec.get("modelConfig", {}).get("modelId"),
+                    reason="Recommended for Codex execution",
+                    confidence=0.9,
+                )
+                break
 
         # If no specific match, use the first available
         if not model_recommendation and available_models:
@@ -719,6 +728,10 @@ async def recommend_shell_and_model(
         "ClaudeCode": (
             "For coding and technical work",
             "Best when you need to work with code",
+        ),
+        "Codex": (
+            "For coding and agentic development",
+            "Best when you want Codex to work in a repository",
         ),
         "Agno": (
             "For complex multi-step tasks",
@@ -1010,6 +1023,10 @@ async def create_all_resources(
                 "skills": request.skills or [],
             },
         }
+        if request.inherit_base_capabilities:
+            ghost_json["spec"]["baseGhostRef"] = (
+                bot_kinds_service.resolve_default_base_ghost_ref(db)
+            )
 
         ghost = Kind(
             user_id=current_user.id,
@@ -1068,6 +1085,11 @@ async def create_all_resources(
                 "name": shell.name,
                 "namespace": shell.namespace,
             },
+            "capability_mode": (
+                "manual"
+                if request.inherit_base_capabilities or request.skills
+                else "follow_device"
+            ),
         }
 
         # Add model reference if specified

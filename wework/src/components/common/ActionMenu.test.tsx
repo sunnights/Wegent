@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { Database, Trash2 } from 'lucide-react'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { ActionMenu } from './ActionMenu'
 
 function mockMenuBounds() {
@@ -21,6 +22,126 @@ describe('ActionMenu', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     mockMenuBounds()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  test('mouse opening does not focus an action or return focus to the icon after Escape', async () => {
+    const onSelect = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <ActionMenu
+        ariaLabel="Project actions"
+        testId="project-actions"
+        items={[{ label: 'Archive all', testId: 'archive', onSelect }]}
+      />
+    )
+    const trigger = screen.getByTestId('project-actions')
+    await user.click(trigger)
+    await waitFor(() => expect(screen.getByRole('menu')).toHaveFocus())
+    expect(screen.getByTestId('archive')).not.toHaveFocus()
+    fireEvent.keyDown(document, { key: 'Escape', isComposing: true })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(trigger).not.toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  test.each(['{Enter}', ' ', '{ArrowDown}', '{ArrowUp}'])(
+    'keyboard opening with %s focuses enabled checkbox items and restores the trigger',
+    async key => {
+      const user = userEvent.setup()
+      render(
+        <ActionMenu
+          ariaLabel="Project actions"
+          testId="project-actions"
+          items={[
+            { label: 'Archive all', testId: 'archive', disabled: true, onSelect: vi.fn() },
+            { label: 'Show offline', testId: 'offline', checked: true, onSelect: vi.fn() },
+            { label: 'Settings', testId: 'settings', onSelect: vi.fn() },
+          ]}
+        />
+      )
+      const trigger = screen.getByTestId('project-actions')
+      trigger.focus()
+      await user.keyboard(key)
+      await waitFor(() =>
+        expect(screen.getByTestId(key === '{ArrowUp}' ? 'settings' : 'offline')).toHaveFocus()
+      )
+      await user.keyboard('{Escape}')
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      await waitFor(() => expect(trigger).toHaveFocus())
+    }
+  )
+
+  test('supports arrow navigation and selection after opening with the mouse', async () => {
+    const onSelect = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <ActionMenu
+        ariaLabel="Project actions"
+        testId="project-actions"
+        items={[
+          { label: 'Archive all', testId: 'archive', disabled: true, onSelect: vi.fn() },
+          { label: 'Show offline', testId: 'offline', checked: true, onSelect },
+        ]}
+      />
+    )
+    await user.click(screen.getByTestId('project-actions'))
+    await waitFor(() => expect(screen.getByRole('menu')).toHaveFocus())
+    await user.keyboard('{ArrowDown}')
+    expect(screen.getByTestId('offline')).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(onSelect).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  test('shows the shared tooltip for an icon-only trigger', () => {
+    vi.useFakeTimers()
+    render(
+      <ActionMenu
+        ariaLabel="More actions"
+        testId="more-actions"
+        items={[
+          {
+            label: 'Delete',
+            testId: 'delete',
+            onSelect: vi.fn(),
+          },
+        ]}
+      />
+    )
+
+    const trigger = screen.getByTestId('more-actions')
+    expect(trigger).not.toHaveAttribute('title')
+
+    fireEvent.pointerEnter(trigger.parentElement as HTMLElement)
+    act(() => vi.advanceTimersByTime(700))
+
+    expect(screen.getByTestId('more-actions-tooltip')).toHaveTextContent('More actions')
+  })
+
+  test('does not add a layout wrapper when the trigger tooltip is disabled', () => {
+    render(
+      <ActionMenu
+        ariaLabel="Context actions"
+        testId="context-actions"
+        triggerClassName="hidden"
+        showTriggerTooltip={false}
+        items={[]}
+      />
+    )
+
+    const trigger = screen.getByTestId('context-actions')
+    expect(trigger).toHaveClass('hidden')
+    expect(trigger.parentElement?.children).toHaveLength(1)
+    expect(trigger.parentElement?.firstElementChild).toBe(trigger)
+    expect(screen.queryByTestId('context-actions-tooltip')).not.toBeInTheDocument()
   })
 
   test('opens a first-level submenu and selects its action', async () => {
@@ -127,6 +248,54 @@ describe('ActionMenu', () => {
 
     fireEvent.pointerEnter(screen.getByTestId('clear-data'))
     await screen.findByTestId('clear-data-submenu')
+  })
+
+  test('keeps a zero-delay submenu selectable across the pointer gap', async () => {
+    const openInVsCode = vi.fn()
+    render(
+      <ActionMenu
+        ariaLabel="More actions"
+        testId="more-actions"
+        submenuCloseDelayMs={0}
+        items={[
+          {
+            label: 'Open with',
+            testId: 'open-with',
+            children: [{ label: 'VS Code', testId: 'vscode', onSelect: openInVsCode }],
+          },
+        ]}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('more-actions'))
+    fireEvent.pointerEnter(screen.getByTestId('open-with'))
+    await screen.findByTestId('open-with-submenu')
+    fireEvent.pointerLeave(screen.getByTestId('open-with'))
+    fireEvent.pointerEnter(screen.getByTestId('open-with-submenu'))
+    fireEvent.click(screen.getByTestId('vscode'))
+
+    expect(openInVsCode).toHaveBeenCalledOnce()
+    expect(screen.queryByTestId('open-with-submenu')).not.toBeInTheDocument()
+  })
+
+  test('closes when an outside target stops pointer event propagation', async () => {
+    render(
+      <>
+        <ActionMenu
+          ariaLabel="More actions"
+          testId="more-actions"
+          items={[{ label: 'Settings', testId: 'settings-item', onSelect: vi.fn() }]}
+        />
+        <div data-testid="editor-surface" onPointerDown={event => event.stopPropagation()} />
+      </>
+    )
+
+    fireEvent.click(screen.getByTestId('more-actions'))
+    expect(screen.getByTestId('more-actions-menu')).toBeInTheDocument()
+
+    fireEvent.pointerDown(screen.getByTestId('editor-surface'))
+
+    expect(screen.queryByTestId('more-actions-menu')).not.toBeInTheDocument()
   })
 
   test('toggles submenu open and closed when clicking a parent item', async () => {

@@ -29,7 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import QueryParams
 
 from app.api.api import api_router
+from app.api.endpoints.health import probe_router
 from app.api.endpoints.oauth_provider import metadata_router as oauth_metadata_router
+from app.core.cache import cache_manager
 from app.core.config import settings
 from app.core.exceptions import (
     CustomHTTPException,
@@ -39,9 +41,11 @@ from app.core.exceptions import (
     validation_exception_handler,
 )
 from app.core.logging import setup_logging
+from app.core.sdk_startup import preload_openai_sdk
 from app.core.shutdown import shutdown_manager
 from app.core.yaml_init import run_yaml_initialization
 from app.db.base import Base
+from app.db.pool_observability import log_registered_pool_configurations
 from app.db.session import SessionLocal, engine
 from app.models import *  # noqa: F401,F403
 from app.services.auth.internal_service_token import (
@@ -76,6 +80,7 @@ SENSITIVE_HTTP_BODY_PATHS = {
 
 # Initialize logging at module level for use in lifespan
 setup_logging()
+log_registered_pool_configurations()
 _logger = logging.getLogger(__name__)
 
 
@@ -171,6 +176,17 @@ def _load_system_initialization_state(logger: logging.Logger) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Keep the cache available through startup, channel draining and shutdown.
+    await cache_manager.start()
+    try:
+        async with _application_lifespan(app):
+            yield
+    finally:
+        await cache_manager.aclose()
+
+
+@asynccontextmanager
+async def _application_lifespan(app: FastAPI):
     """
     Lifespan context manager for FastAPI application.
     Handles startup and shutdown events.
@@ -183,6 +199,8 @@ async def lifespan(app: FastAPI):
 
     # ==================== STARTUP ====================
     require_internal_service_token_configured()
+    # Load SDK resources before IM/background consumers can dispatch requests.
+    await asyncio.to_thread(preload_openai_sdk)
     from app.services.builtin_plugin_service import builtin_plugin_service
 
     # Every Backend process validates any plugins marked as required.
@@ -380,8 +398,6 @@ async def lifespan(app: FastAPI):
 
     sio = get_sio()
     try:
-        import asyncio
-
         bind_socketio_loop(asyncio.get_running_loop())
     except RuntimeError:
         pass
@@ -418,11 +434,6 @@ async def lifespan(app: FastAPI):
     )
 
     register_project_automation_task_completion_handler(event_bus)
-    from app.services.board_team_completion import (
-        register_board_team_completion_handler,
-    )
-
-    register_board_team_completion_handler(event_bus)
     logger.info("✓ Project automation task completion handler registered")
 
     # Register code wiki run completion handler. A version's outcome is normally
@@ -602,7 +613,7 @@ async def lifespan(app: FastAPI):
         await stop_device_monitor_async()
         logger.info("✓ Device heartbeat monitor stopped")
 
-        # Step 7: Shutdown OpenTelemetry
+        # Step 8: Shutdown OpenTelemetry
         from shared.telemetry.config import get_otel_config
         from shared.telemetry.core import is_telemetry_enabled, shutdown_telemetry
 
@@ -634,6 +645,11 @@ def create_app():
         redoc_url=redoc_url,
         lifespan=lifespan,
     )
+
+    # Keep frequent probes ahead of business routes. With an empty API prefix,
+    # the existing database-aware /health route must retain precedence.
+    if settings.API_PREFIX:
+        app.include_router(probe_router)
 
     logger = _logger
 
@@ -675,6 +691,16 @@ def create_app():
             logger.warning(f"Failed to initialize OpenTelemetry: {e}")
     else:
         logger.debug("OpenTelemetry is disabled")
+
+    @app.middleware("http")
+    async def attach_database_request_path(request: Request, call_next):
+        from app.db.pool_observability import reset_request_path, set_request_path
+
+        token = set_request_path(request.url.path)
+        try:
+            return await call_next(request)
+        finally:
+            reset_request_path(token)
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -848,6 +874,11 @@ def create_app():
         else:
             logger.info(response_log_message)
 
+        if response.status_code == 429:
+            from shared.telemetry.metrics import record_http_429_response
+
+            record_http_429_response()
+
         # Add request ID to response headers for client-side tracking
         response.headers["X-Request-ID"] = request_id
 
@@ -883,6 +914,8 @@ def create_app():
     # Include API routes
     app.include_router(oauth_metadata_router)
     app.include_router(api_router, prefix=settings.API_PREFIX)
+    if not settings.API_PREFIX:
+        app.include_router(probe_router)
 
     # Mount MCP Server endpoints
     # These provide system-level tools (silent_exit) and knowledge base tools
@@ -910,7 +943,7 @@ def create_socketio_asgi_app():
     Create combined ASGI app with Socket.IO mounted.
 
     Returns a combined app that routes Socket.IO traffic to Socket.IO server
-    and everything else to FastAPI.
+    and everything else through registered distribution wrappers to FastAPI.
     """
     from app.api.ws import register_chat_namespace
     from app.api.ws.device_namespace import register_device_namespace
@@ -939,38 +972,18 @@ def create_socketio_asgi_app():
 
     socketio_app = create_socketio_app(sio)
 
+    # Distribution-specific WebSocket handlers wrap FastAPI before Socket.IO.
+    from app.core.asgi_extensions import wrap_asgi_app
+
+    wrapped_app = wrap_asgi_app(_fastapi_app)
+
     # Create combined ASGI app
     return socketio.ASGIApp(
         sio,
-        other_asgi_app=_fastapi_app,
+        other_asgi_app=wrapped_app,
         socketio_path="/socket.io",
     )
 
 
 # Combined ASGI app (Socket.IO + FastAPI)
 app = create_socketio_asgi_app()
-
-
-# Root path (registered on FastAPI app)
-@_fastapi_app.get("/")
-async def root():
-    """
-    Root path, returns API information
-    """
-    return {
-        "name": settings.PROJECT_NAME,
-        "version": settings.VERSION,
-        "api_prefix": settings.API_PREFIX,
-        "docs_url": f"{settings.API_PREFIX}/docs",
-        "socketio_path": "/socket.io",
-    }
-
-
-# Health check endpoint (registered on FastAPI app)
-@_fastapi_app.get("/health")
-async def health():
-    """
-    Health check endpoint for container orchestration and load balancers.
-    Returns a simple status indicating the service is running.
-    """
-    return {"status": "healthy"}

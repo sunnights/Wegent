@@ -1,12 +1,22 @@
+import {
+  PLUGIN_EVENT_PROPERTY_KEYS,
+  PLUGIN_EVENT_VALUE_CONSTRAINTS,
+  type PluginGeneratedEventMap,
+} from './generated/pluginEvents'
 import { KNOWN_AI_PROVIDERS, type KnownAiProvider } from './modelCatalog'
+import {
+  SMART_APP_EVENT_PROPERTY_KEYS,
+  SMART_APP_EVENT_VALUE_CONSTRAINTS,
+  type SmartAppGeneratedEventMap,
+} from './generated/smartAppEvents'
 
-export type ExecutionTarget = 'local' | 'cloud' | 'unknown'
+export const EXECUTION_TARGETS = ['local', 'cloud', 'remote', 'unknown'] as const
+export type ExecutionTarget = (typeof EXECUTION_TARGETS)[number]
 export type TelemetryResult = 'success' | 'cancelled' | 'failure'
 export type TelemetryFailureReason = 'network_error' | 'model_error' | 'runtime_error' | 'unknown'
 export type TelemetryDataSource = 'local' | 'cloud' | 'unknown'
-export type SmartAppTelemetryDomain = 'smart_app'
 
-export interface AnalyticsEventMap {
+export interface AnalyticsEventMap extends SmartAppGeneratedEventMap, PluginGeneratedEventMap {
   $ai_trace: {
     $ai_trace_id: string
     $ai_trace_phase: 'start' | 'end'
@@ -69,20 +79,6 @@ export interface AnalyticsEventMap {
     reordered: boolean
     source: TelemetryDataSource
   }
-  plugin_center_opened: {
-    surface: 'catalog' | 'management'
-  }
-  plugin_installed: {
-    source: TelemetryDataSource
-  }
-  plugin_enabled_changed: {
-    enabled: boolean
-    scope: 'plugin' | 'component'
-    source: TelemetryDataSource
-  }
-  plugin_uninstalled: {
-    source: TelemetryDataSource
-  }
   feature_opened: {
     feature:
       | 'workbench'
@@ -97,15 +93,7 @@ export interface AnalyticsEventMap {
       | 'settings'
       | 'login'
       | 'popout'
-      | 'smart_apps_marketplace'
-      | 'smart_apps_owned'
-      | 'smart_app'
       | 'unknown'
-    domain?: SmartAppTelemetryDomain
-  }
-  smart_app_installed: {
-    domain: SmartAppTelemetryDomain
-    install_source: 'marketplace' | 'zip_import'
   }
   project_created: {
     kind: 'standard' | 'git'
@@ -144,7 +132,6 @@ export interface AnalyticsEventMap {
     mode: 'normal' | 'plan' | 'goal'
   }
   operation_failed: {
-    domain?: SmartAppTelemetryDomain
     operation:
       | 'board_item_move'
       | 'plugin_install'
@@ -178,10 +165,6 @@ export interface AnalyticsEventMap {
       | 'attachment_action'
       | 'workspace_file_action'
       | 'conversation_archive'
-      | 'smart_app_marketplace_download'
-      | 'smart_app_marketplace_install'
-      | 'smart_app_marketplace_update'
-      | 'smart_app_zip_import'
   }
   feature_action_completed: {
     action:
@@ -236,7 +219,6 @@ export interface AnalyticsEventMap {
       | 'attachment'
       | 'workspace_file'
       | 'conversation'
-      | 'smart_app'
   }
   workspace_panel_added: {
     panel: 'review' | 'terminal' | 'browser' | 'chat' | 'files' | 'desktop' | 'other'
@@ -313,12 +295,7 @@ export const ANALYTICS_EVENT_PROPERTY_KEYS: {
   board_view_opened: ['source', 'view'],
   board_item_created: ['has_parent', 'source'],
   board_item_moved: ['group_by', 'reordered', 'source'],
-  plugin_center_opened: ['surface'],
-  plugin_installed: ['source'],
-  plugin_enabled_changed: ['enabled', 'scope', 'source'],
-  plugin_uninstalled: ['source'],
-  feature_opened: ['feature', 'domain'],
-  smart_app_installed: ['domain', 'install_source'],
+  feature_opened: ['feature'],
   project_created: ['kind'],
   project_removed: ['source'],
   automation_action_completed: ['action'],
@@ -331,7 +308,7 @@ export const ANALYTICS_EVENT_PROPERTY_KEYS: {
   app_update_install_started: [],
   authentication_completed: ['method', 'result'],
   quick_phrase_used: ['mode'],
-  operation_failed: ['domain', 'operation'],
+  operation_failed: ['operation'],
   feature_action_completed: ['action', 'domain'],
   workspace_panel_added: ['panel'],
   ai_output_action_completed: ['action', 'source'],
@@ -340,6 +317,8 @@ export const ANALYTICS_EVENT_PROPERTY_KEYS: {
   task_retried: ['execution_target', 'since_last_ms', 'previous_result'],
   setting_changed: ['setting', 'value'],
   workspace_panel_removed: ['panel'],
+  ...SMART_APP_EVENT_PROPERTY_KEYS,
+  ...PLUGIN_EVENT_PROPERTY_KEYS,
 }
 
 type PropertyValueConstraint<Property> =
@@ -366,7 +345,7 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
   $ai_trace: {
     $ai_trace_id: { maxLength: 128, pattern: TELEMETRY_TRACE_ID_PATTERN },
     $ai_trace_phase: ['start', 'end'],
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
     result: ['success', 'cancelled', 'failure'],
     failure_reason: ['network_error', 'model_error', 'runtime_error', 'unknown'],
   },
@@ -380,14 +359,14 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
   },
   app_started: { surface: ['main', 'popout', 'workspace'] },
   project_opened: { source: ['local', 'cloud', 'unknown'] },
-  conversation_created: { execution_target: ['local', 'cloud', 'unknown'] },
-  task_started: { execution_target: ['local', 'cloud', 'unknown'] },
+  conversation_created: { execution_target: EXECUTION_TARGETS },
+  task_started: { execution_target: EXECUTION_TARGETS },
   first_response_completed: {
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
     result: ['success', 'cancelled', 'failure'],
   },
   task_completed: {
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
     failure_reason: ['network_error', 'model_error', 'runtime_error', 'unknown'],
     result: ['success', 'cancelled', 'failure'],
   },
@@ -405,16 +384,7 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
     reordered: [true, false],
     source: ['local', 'cloud', 'unknown'],
   },
-  plugin_center_opened: { surface: ['catalog', 'management'] },
-  plugin_installed: { source: ['local', 'cloud', 'unknown'] },
-  plugin_enabled_changed: {
-    enabled: [true, false],
-    scope: ['plugin', 'component'],
-    source: ['local', 'cloud', 'unknown'],
-  },
-  plugin_uninstalled: { source: ['local', 'cloud', 'unknown'] },
   feature_opened: {
-    domain: ['smart_app'],
     feature: [
       'workbench',
       'project_space',
@@ -428,15 +398,8 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
       'settings',
       'login',
       'popout',
-      'smart_apps_marketplace',
-      'smart_apps_owned',
-      'smart_app',
       'unknown',
     ],
-  },
-  smart_app_installed: {
-    domain: ['smart_app'],
-    install_source: ['marketplace', 'zip_import'],
   },
   project_created: { kind: ['standard', 'git'] },
   project_removed: { source: ['local', 'cloud', 'unknown'] },
@@ -458,7 +421,6 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
   },
   quick_phrase_used: { mode: ['normal', 'plan', 'goal'] },
   operation_failed: {
-    domain: ['smart_app'],
     operation: [
       'board_item_move',
       'plugin_install',
@@ -492,10 +454,6 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
       'attachment_action',
       'workspace_file_action',
       'conversation_archive',
-      'smart_app_marketplace_download',
-      'smart_app_marketplace_install',
-      'smart_app_marketplace_update',
-      'smart_app_zip_import',
     ],
   },
   feature_action_completed: {
@@ -552,7 +510,6 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
       'attachment',
       'workspace_file',
       'conversation',
-      'smart_app',
     ],
   },
   workspace_panel_added: {
@@ -563,13 +520,13 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
     source: ['chat', 'workbench', 'board'],
   },
   generation_regenerated: {
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
   },
   task_interrupted: {
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
   },
   task_retried: {
-    execution_target: ['local', 'cloud', 'unknown'],
+    execution_target: EXECUTION_TARGETS,
     previous_result: ['success', 'cancelled', 'failure'],
   },
   setting_changed: {
@@ -587,7 +544,16 @@ export const ANALYTICS_EVENT_VALUE_CONSTRAINTS: {
   workspace_panel_removed: {
     panel: ['review', 'terminal', 'browser', 'chat', 'files', 'desktop', 'other'],
   },
+  ...SMART_APP_EVENT_VALUE_CONSTRAINTS,
+  ...PLUGIN_EVENT_VALUE_CONSTRAINTS,
 }
+
+export type AnalyticsEvent = {
+  [Name in AnalyticsEventName]: {
+    readonly name: Name
+    readonly properties: AnalyticsEventMap[Name]
+  }
+}[AnalyticsEventName]
 
 export interface CommonTelemetryProperties {
   $geoip_disable: boolean

@@ -265,6 +265,20 @@ In packaged Wework App `local-first` mode, task creation does not go through the
 
 For Project-backed task creation, Wework has only two execution workspace sources: `current_workspace` uses the Project root, while `git_worktree` calls `runtime.worktrees.prepare` on the target device. The path is derived from that device's Worktree settings, runtime task id, and Project directory name; the UI must not compose arbitrary target paths. A worktree create request may carry an explicit `branch`. When no branch is provided, the default branch must be the current Git branch of the Project root, not the Git default branch and not a `HEAD` label. The branch list is only a selectable display surface: the current branch should be first, and the remaining branches should preserve Git's returned order.
 
+A temporary side conversation is an in-place fork of its parent LocalTask, not a
+new workspace-planning request. Wework passes the parent task's `deviceId`,
+`workspacePath`, and Codex `threadId` through `sideSource`, and the create
+request must clear the Project's currently selected `git_worktree` strategy.
+The Executor also treats `sideSource` as the authoritative directory binding:
+even if a malformed request includes `workspace_source=git_worktree`, it uses
+the parent `workspacePath` directly for `thread/fork` and must not create
+another worktree. A side conversation therefore executes in the same directory
+whether its parent thread uses the Project root or an existing worktree. If
+`sideSource` lacks a nonblank `threadId` or `workspacePath`, or if the top-level
+requested workspace conflicts with the parent workspace, the Executor rejects
+the create request instead of falling back to the requested workspace, a
+Project workspace, or a standalone conversation directory.
+
 Before calling create, Wework generates a client-side `localTaskId` and sends it to Backend as `localTaskId`. Backend only forwards that value to the target device; it does not write it to the central database. The frontend immediately opens the runtime URL from `deviceId + localTaskId`, renders the user message, and shows the waiting state. If the device returns a different `localTaskId`, the frontend switches to the device-confirmed address. This lets a newly created task appear before the Backend RPC completes or the next list refresh runs, and queued sends wait until the current waiting state becomes a real assistant turn before continuing.
 
 The runtime owns persistence for newly created tasks:
@@ -333,6 +347,26 @@ Wework runtime task URLs use:
 The URL does not contain `workspacePath`. On refresh or shared links, the frontend opens the task from `deviceId + localTaskId` and then restores its workspace context from the latest runtime work list.
 
 New conversation and no-project entry points use the root path or regular conversation path, not placeholder parameters such as `projectId=0`. Project selection state is restored from the runtime workspace reference and the current conversation context.
+
+## New-task send state and diagnostics
+
+After sending, the frontend displays the user message and loads history while the executor may still be preparing a worktree, before registering the LocalTask. When no task link, provider session, or known execution exists, an empty transcript must omit `running` to represent unknown state. Returning `running=false` would prematurely settle the frontend send. Known running and completed states still use explicit booleans.
+
+Explicit sends update the shared `RuntimeTaskLifecycleStore` directly. Switching tabs or hiding the initiating view must not block `sendRequested`, `sendAccepted`, or send-failure updates. Background list and transcript synchronization remain subject to view ownership.
+
+Hidden workbenches kept mounted must not subscribe to global project creation, workspace binding, or cloud device settings events. Only the `routeActive` workbench handles these interactions, preventing duplicate portal dialogs after switching tabs. When a known task fails before creating its provider session, its transcript must still return `running=false` so clients can settle the pending state.
+
+Electron startup readiness must be idempotent: after startup completes, notifications from navigation or remounting must not show and focus the main window again, stealing focus from a popout. Concurrent notifications share one completion operation; a failed operation can be attempted again.
+
+The popout chat window uses one current conversation to drive messages, its title, and native window dimensions, without restoring the main workbench's split layout. Its modes are composer, menu, and conversation. Opening a menu preserves the composer's bottom position; sending switches to conversation dimensions. The toolbar remains available in compact composer mode.
+
+The popout handles unmodified `Esc` at the native keyboard event layer, hiding the window while retaining its conversation; IME composition is excluded. Invoking the popout shortcut must not restore the main window. Explicit Dock, tray, or “Open in main window” actions may open it; ordinary application focus activation does not restore it.
+
+When a page does not recover after reload, inspect Electron's `[renderer-load]` events. Correlate loading, DOM readiness, completion, failure, and prevented unload events by `webContentsId`. These events omit page URLs to avoid exposing query parameters.
+
+When restoring a local task's project-space context, use the project ID in its binding to read the item without scanning the project list again. The `project-space-context-resolved/failed` diagnostics record lookup duration and whether the current view applied the result, distinguishing lookup timeouts from stale responses.
+
+To investigate a blank interval after sending, correlate `deviceId + taskId` between `runtime-launch.log` in the Electron log directory and executor logs. The former records transcript receipt, lifecycle transitions, waiting-indicator state, and `web_contents_id`; executor `runtime worktree stage` entries measure lock waits, preflight, Git worktree creation, and persistence. A backend `running=true` response does not prove that the frontend rendered a waiting indicator: compare both timelines. Message bodies are not required for these diagnostics. Changes to Electron log capture or the executor require restarting the corresponding process; frontend hot reload does not update either process.
 
 ## Compatibility
 

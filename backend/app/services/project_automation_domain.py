@@ -18,11 +18,17 @@ from app.models.kind import Kind
 from app.services.execution.team_readiness import (
     validate_team_execution_readiness,
 )
+from app.services.project_event_sources import supported_event_type
 from app.services.share import team_share_service
 
-ASSIGNMENT_MODES = {"manual", "ai_managed"}
-MANAGER_TYPES = {"custom", "wegent"}
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "skipped"}
+ACTIVE_RUN_STATUSES = {
+    "pending",
+    "queued",
+    "waiting_runtime",
+    "waiting_device",
+    "running",
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,9 @@ class ProjectAutomationEvent:
     source: str
     actor_user_id: int | None
     payload: dict
+    subject_type: str = "task"
+    event_id: str | None = None
+    subscription_id: str | None = None
 
 
 def utcnow() -> datetime:
@@ -80,34 +89,6 @@ def integer(value: object) -> int | None:
 
 def text(value: object) -> str | None:
     return str(value) if isinstance(value, str) and value else None
-
-
-def assignment_mode(value: dict) -> str:
-    action = value.get("action")
-    if action == "execute":
-        return "manual"
-    if action == "ai_assign":
-        return "ai_managed"
-    raise ValueError("Automation assignment mode is missing or invalid")
-
-
-def manager_type(value: dict) -> str | None:
-    configured = manager_config(value).get("type")
-    if configured is None:
-        return None
-    if configured not in MANAGER_TYPES:
-        raise ValueError("Automation manager type is invalid")
-    return str(configured)
-
-
-def manager_config(value: dict) -> dict:
-    manager = value.get("manager")
-    return dict(manager) if isinstance(manager, dict) else {}
-
-
-def role_config(value: dict) -> dict:
-    role = value.get("role")
-    return dict(role) if isinstance(role, dict) else {}
 
 
 def runtime_config(value: dict) -> dict:
@@ -160,50 +141,11 @@ def runnable_wegent_team(db: Session, user_id: int, team_id: int | None) -> Kind
     return team
 
 
-def validate_assignment(
-    db: Session,
-    *,
-    project_id: str,
-    user_id: int,
-    mode: str,
-    manager: str | None,
-    agent_id: str | None,
-    wegent_team_id: int | None,
-    model: str | None,
-    environment: str | None,
-    device_id: str | None,
-    role_source: str = "agent",
-) -> None:
-    if mode == "manual":
-        if role_source == "generic":
-            if agent_id:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Generic automation role cannot bind a robot",
-                )
-            return
-        if not agent_id:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "agent_id is required for manual assignment",
-            )
-        project_agent(db, project_id, agent_id)
-        return
-    if mode != "ai_managed":
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown assignment mode"
-        )
-    if manager == "custom":
-        return
-    if manager == "wegent":
-        runnable_wegent_team(db, user_id, wegent_team_id)
-        return
-    raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown AI manager type")
-
-
 def validate_trigger(
     trigger_type: str, event_type: str | None, cron_expression: str | None
 ) -> None:
+    if trigger_type == "manual" and event_type is None and cron_expression is None:
+        return
     if trigger_type == "schedule":
         if not cron_expression:
             raise HTTPException(
@@ -212,10 +154,7 @@ def validate_trigger(
             )
         next_run(str(cron_expression), "UTC", utcnow())
         return
-    if trigger_type == "event" and event_type in {
-        "task.created",
-        "task.status_changed",
-    }:
+    if trigger_type == "event" and event_type and supported_event_type(event_type):
         return
     if trigger_type == "workflow" and event_type is None and cron_expression is None:
         return

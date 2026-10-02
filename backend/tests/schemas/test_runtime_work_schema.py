@@ -20,6 +20,35 @@ from app.schemas.runtime_work import (
 PROTOCOL_DIR = Path(__file__).resolve().parents[3] / "shared" / "protocol"
 
 
+def test_transcript_preserves_canonical_turns_and_execution_state():
+    from app.schemas.runtime_work import RuntimeTranscriptResponse
+
+    payload = {
+        "taskId": "task-1",
+        "workspacePath": "/repo",
+        "runtime": "codex",
+        "turns": [
+            {
+                "id": "turn-1",
+                "status": "done",
+                "items": [
+                    {"id": "text-1", "type": "assistant_text", "content": "Done"}
+                ],
+            }
+        ],
+        "running": False,
+        "historyUnavailable": False,
+        "origin": {"projectStore": "backend", "projectId": "p"},
+        "turnNavigation": [{"turnId": "turn-1", "messageIndex": 0}],
+    }
+    result = RuntimeTranscriptResponse.model_validate(payload).model_dump(by_alias=True)
+    for key, value in payload.items():
+        assert result[key] == value
+    del payload["turns"]
+    with pytest.raises(ValidationError):
+        RuntimeTranscriptResponse.model_validate(payload)
+
+
 def test_runtime_task_create_v2_matches_cross_runtime_golden_contract() -> None:
     fixtures = json.loads(
         (PROTOCOL_DIR / "runtime_task_create_request_v2.golden.json").read_text()
@@ -215,6 +244,45 @@ def test_runtime_task_create_v2_rejects_materialized_model_config() -> None:
             runtime="codex",
             message="Implement the task",
             modelConfig={"api_key": "must-not-cross-intent-boundary"},
+        )
+
+
+def test_runtime_task_create_accepts_plugin_credential_references() -> None:
+    request = RuntimeTaskCreateRequest(
+        schemaVersion=2,
+        runtime="codex",
+        message="Implement the task",
+        projectPlugins=[
+            {
+                "id": "github@openai",
+                "config": {"repository": "wecode-ai/Wegent"},
+                "credentialRefs": [
+                    {"name": "github", "ref": "plugin-connection/github"}
+                ],
+            }
+        ],
+    )
+
+    assert request.project_plugins[0]["credentialRefs"][0]["name"] == "github"
+
+
+@pytest.mark.parametrize(
+    "secret_config",
+    [
+        {"api_key": "plaintext-key"},
+        {"nested": [{"clientSecret": "plaintext-secret"}]},
+        {"material": "-----BEGIN RSA PRIVATE KEY-----\nplaintext"},
+    ],
+)
+def test_runtime_task_create_rejects_plugin_credentials(
+    secret_config: dict,
+) -> None:
+    with pytest.raises(ValidationError, match="use credential_refs"):
+        RuntimeTaskCreateRequest(
+            schemaVersion=2,
+            runtime="codex",
+            message="Implement the task",
+            projectPlugins=[{"id": "github@openai", "config": secret_config}],
         )
 
 

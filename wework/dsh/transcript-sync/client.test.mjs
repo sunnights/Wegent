@@ -13,7 +13,7 @@ function findElement(node, predicate) {
   return null
 }
 
-test('registers a default-enabled cloud sync setting and applies changes to the runtime', async () => {
+test('loads the default-disabled runtime setting and applies explicit changes', async () => {
   const source = await readFile(new URL('./client.js', import.meta.url), 'utf8')
   let handoff
   const window = {
@@ -44,7 +44,8 @@ test('registers a default-enabled cloud sync setting and applies changes to the 
   const backendRequests = []
   const registrations = []
   let configurationDefinition
-  let configured = {}
+  let configured = { enabled: true }
+  let runtimeEnabled = false
   const ctx = {
     slots: {
       inject(slot, factory) {
@@ -63,7 +64,36 @@ test('registers a default-enabled cloud sync setting and applies changes to the 
           return {
             async request(method, params) {
               backendRequests.push({ method, params })
-              return { enabled: params.enabled }
+              if (method === 'getSettings') return { enabled: runtimeEnabled }
+              if (method === 'getStatus') {
+                return {
+                  configured: true,
+                  enabled: runtimeEnabled,
+                  pendingTurns: 1,
+                  transcripts: 28,
+                  syncing: false,
+                  lastError: runtimeEnabled ? 'Not Found' : null,
+                  lastAttemptAt: '2026-09-09T17:41:48.000Z',
+                  lastSuccessAt: null,
+                }
+              }
+              if (method === 'flush') {
+                return {
+                  configured: true,
+                  enabled: true,
+                  pendingTurns: 0,
+                  transcripts: 29,
+                  syncing: false,
+                  lastError: null,
+                  lastAttemptAt: '2026-09-09T17:45:00.000Z',
+                  lastSuccessAt: '2026-09-09T17:45:01.000Z',
+                }
+              }
+              if (method === 'setEnabled') {
+                runtimeEnabled = params.enabled
+                return { enabled: runtimeEnabled }
+              }
+              throw new Error(`Unexpected backend method: ${method}`)
             },
           }
         },
@@ -96,27 +126,76 @@ test('registers a default-enabled cloud sync setting and applies changes to the 
   }
 
   plugin.apply(ctx)
-  await Promise.resolve()
+  await new Promise(resolve => setImmediate(resolve))
 
-  assert.equal(configurationDefinition.defaults.enabled, true)
-  assert.equal(backendRequests[0].method, 'setEnabled')
-  assert.equal(backendRequests[0].params.enabled, true)
+  assert.equal(configurationDefinition.defaults.enabled, false)
+  assert.equal(backendRequests[0].method, 'getSettings')
+  assert.equal(configured.enabled, false)
   const pageRegistration = registrations.find(entry => typeof entry.component === 'function')
   assert.ok(pageRegistration)
-  assert.equal(registrations.find(entry => entry.descriptor)?.descriptor.page, 'connections')
+  const descriptor = registrations.find(entry => entry.descriptor)?.descriptor
+  assert.equal(descriptor?.page, 'connections')
+  assert.equal(descriptor?.experimental, true)
   const wrapper = pageRegistration.component({})
+  const statusSnapshots = []
+  const unsubscribeStatus = wrapper.props.store.subscribe(snapshot => {
+    statusSnapshots.push(snapshot)
+  })
+  await wrapper.props.store.refreshStatus()
+  unsubscribeStatus()
+  assert.ok(statusSnapshots.some(snapshot => snapshot.statusRefreshing))
+  assert.ok(statusSnapshots.every(snapshot => !snapshot.statusPending))
+
   const page = wrapper.type(wrapper.props)
   const checkbox = findElement(
     page,
     node => node.props?.['data-testid'] === 'transcript-sync-enabled-checkbox'
   )
   assert.ok(checkbox)
-  assert.equal(checkbox.props.checked, true)
+  assert.equal(checkbox.props.checked, false)
+  assert.equal(checkbox.props.disabled, false)
+  const runtimeStatus = findElement(
+    page,
+    node => node.props?.['data-testid'] === 'transcript-sync-runtime-status'
+  )
+  assert.ok(runtimeStatus)
+  assert.equal(
+    findElement(page, node => node.props?.['data-testid'] === 'transcript-sync-runtime-error'),
+    null
+  )
+  assert.equal(
+    findElement(page, node => node.props?.['data-testid'] === 'transcript-sync-retry-button'),
+    null
+  )
 
-  checkbox.props.onChange({ target: { checked: false } })
+  checkbox.props.onChange({ target: { checked: true } })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(configured.enabled, true)
+  assert.equal(backendRequests.at(-2).method, 'setEnabled')
+  assert.equal(backendRequests.at(-2).params.enabled, true)
+  assert.equal(backendRequests.at(-1).method, 'getStatus')
+
+  const enabledPage = wrapper.type(wrapper.props)
+  const retry = findElement(
+    enabledPage,
+    node => node.props?.['data-testid'] === 'transcript-sync-retry-button'
+  )
+  assert.ok(retry)
+  retry.props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(backendRequests.at(-1).method, 'flush')
+
+  const enabledCheckbox = findElement(
+    enabledPage,
+    node => node.props?.['data-testid'] === 'transcript-sync-enabled-checkbox'
+  )
+  assert.equal(enabledCheckbox.props.checked, true)
+  enabledCheckbox.props.onChange({ target: { checked: false } })
   await new Promise(resolve => setImmediate(resolve))
 
   assert.equal(configured.enabled, false)
-  assert.equal(backendRequests.at(-1).method, 'setEnabled')
-  assert.equal(backendRequests.at(-1).params.enabled, false)
+  assert.equal(backendRequests.at(-2).method, 'setEnabled')
+  assert.equal(backendRequests.at(-2).params.enabled, false)
+  assert.equal(backendRequests.at(-1).method, 'getStatus')
 })

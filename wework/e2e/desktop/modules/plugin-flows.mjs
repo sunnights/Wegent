@@ -1,12 +1,14 @@
 import {
   assertMentionRenderedAsToken,
   closeComposerPluginPicker,
+  openComposerPluginPicker,
   waitForInstalledComposerPlugin,
   waitForSnapshot,
 } from './conversation-layout.mjs'
 
 import { sendPrompt } from './conversation-navigation.mjs'
 import { waitForBlankConversation } from './memory-tool-flows.mjs'
+import { telemetryEvents } from './response-protocol.mjs'
 
 import {
   ACTIVE_COMPOSER_SELECTOR,
@@ -85,6 +87,32 @@ async function createDirectRemoteMcpPluginZip(root) {
     }),
     'skills/direct-remote/SKILL.md':
       '---\nname: direct-remote\ndescription: Exercise direct remote MCP parsing.\n---\n',
+  })
+  return archivePath
+}
+
+async function createComposerNetworkIsolationPluginZip(root) {
+  const archivePath = join(root, 'composer-network-isolation-plugin.zip')
+  await createZipFixture(archivePath, {
+    '.codex-plugin/plugin.json': JSON.stringify({
+      name: 'composer-network-isolation-plugin',
+      version: '1.0.0',
+      description: 'Verifies that remote app timeouts do not hide installed plugins',
+      author: { name: 'Wework Desktop E2E' },
+      skills: './skills/',
+      interface: {
+        displayName: 'Composer Network Isolation',
+        shortDescription: 'Remains available while external app requests time out',
+        longDescription:
+          'Verifies that an installed composer plugin remains visible while remote app requests time out.',
+        developerName: 'Wework Desktop E2E',
+        category: 'Developer Tools',
+        capabilities: ['Skills'],
+        defaultPrompt: 'Verify composer plugin network isolation.',
+      },
+    }),
+    'skills/network-isolation/SKILL.md':
+      '---\nname: network-isolation\ndescription: Verify composer plugin network isolation.\n---\n',
   })
   return archivePath
 }
@@ -331,6 +359,159 @@ async function verifyStartupIgnoresBlockedCodexNetwork({
   await control.command('waitFor', '[data-testid="projects-create-button"]', {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
+}
+
+async function waitForBlockedChatGptRequest(blockingNetworkProxy, requestCount) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < DEFAULT_STEP_TIMEOUT_MS) {
+    const request = blockingNetworkProxy.requests
+      .slice(requestCount)
+      .find(candidate => candidate.toLowerCase().includes('chatgpt.com'))
+    if (request) return request
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50))
+  }
+  throw new Error(
+    `Codex app/list did not reach the blocking proxy; requests: ${JSON.stringify(blockingNetworkProxy.requests.slice(requestCount))}`
+  )
+}
+
+function syntheticChatGptAuth() {
+  const claims = Buffer.from(
+    JSON.stringify({
+      email: 'desktop-e2e@example.test',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'desktop-e2e-account',
+        chatgpt_plan_type: 'pro',
+      },
+    })
+  ).toString('base64url')
+  return {
+    auth_mode: 'chatgpt',
+    tokens: {
+      account_id: 'desktop-e2e-account',
+      access_token: 'desktop-e2e-access-token',
+      refresh_token: 'desktop-e2e-refresh-token',
+      id_token: `header.${claims}.signature`,
+    },
+    last_refresh: new Date().toISOString(),
+  }
+}
+
+async function verifyComposerPluginNetworkIsolation({
+  blockingNetworkProxy,
+  codexHome,
+  control,
+  marketplacePath,
+  restartDesktopApp,
+  workspacePath,
+}) {
+  const archivePath = await createComposerNetworkIsolationPluginZip(marketplacePath)
+  const preview = JSON.parse(
+    await control.command('previewPluginImport', 'body', {
+      value: JSON.stringify({ archivePath, marketplacePath }),
+    })
+  )
+  assert.equal(
+    preview.valid,
+    true,
+    `Composer network-isolation plugin was rejected: ${JSON.stringify(preview.issues)}`
+  )
+  await control.command('importPluginPackage', 'body', {
+    value: JSON.stringify({ preview, overwrite: false }),
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  })
+
+  const debug = JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body'))
+  if (!debug.workbench?.currentProject?.id) {
+    await createSingleRootLocalProject(
+      control,
+      workspacePath,
+      'composer-network-isolation',
+      WORKBENCH_READY_TIMEOUT_MS
+    )
+  }
+  await control.command('waitFor', ACTIVE_COMPOSER_SELECTOR, {
+    stableMs: COMPOSER_READY_STABILITY_MS,
+    timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+  })
+
+  blockingNetworkProxy.block()
+  const blockedRequestCount = blockingNetworkProxy.requests.length
+  await writeFile(
+    join(codexHome, 'auth.json'),
+    `${JSON.stringify(syntheticChatGptAuth(), null, 2)}\n`,
+    'utf8'
+  )
+  await control.command('storeLocalProxyUrl', 'body', { value: blockingNetworkProxy.url })
+
+  try {
+    // Restart to clear the renderer's in-memory plugin inventory. The installed
+    // package remains in the isolated real Codex home, while every external
+    // Codex request is held open by the proxy instead of returning an error.
+    await restartDesktopApp()
+    await control.command('waitFor', ACTIVE_COMPOSER_SELECTOR, {
+      stableMs: COMPOSER_READY_STABILITY_MS,
+      timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
+    })
+    await openComposerPluginPicker(control)
+
+    const pluginName = 'composer-network-isolation-plugin'
+    const blockedRequest = await waitForBlockedChatGptRequest(
+      blockingNetworkProxy,
+      blockedRequestCount
+    )
+    assert.match(
+      blockedRequest,
+      /chatgpt\.com/i,
+      'The held external request was not the ChatGPT app directory request'
+    )
+
+    const itemTestId = `composer-plugin-picker-item-plugin:${pluginName}`
+    try {
+      await waitForSnapshot(
+        control,
+        snapshot => snapshot.testIds.includes(itemTestId),
+        'A pending ChatGPT app/list request blocked the installed composer plugin inventory',
+        30_000,
+        '[data-testid="composer-plugin-picker"]'
+      )
+    } catch (error) {
+      const diagnostics = JSON.parse(
+        await control.command('getComposerPluginInventoryDiagnostics', 'body', {
+          timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+        })
+      )
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; diagnostics=${JSON.stringify(diagnostics)}`
+      )
+    }
+    const inventoryDiagnostics = JSON.parse(
+      await control.command('getComposerPluginInventoryDiagnostics', 'body', {
+        timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+      })
+    )
+    assert.ok(
+      inventoryDiagnostics.composerApps.some(app => app.id === `plugin:${pluginName}`),
+      `The rendered plugin was missing from composer memory; diagnostics=${JSON.stringify(inventoryDiagnostics)}`
+    )
+    await captureVerificationScreenshot(
+      control,
+      'plugins-00-composer-network-isolation.png',
+      '[data-testid="composer-plugin-picker"]'
+    )
+  } finally {
+    blockingNetworkProxy.release()
+    await control.command('setLocalProxyUrl', 'body', { value: '' })
+    await rm(join(codexHome, 'auth.json'), { force: true })
+    await control.command('deleteLocalPluginPackage', 'body', {
+      value: JSON.stringify({
+        pluginId: 'composer-network-isolation-plugin@wework-personal',
+        pluginName: 'composer-network-isolation-plugin',
+      }),
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    })
+  }
 }
 
 async function verifyOfficialPluginSource(repositoryRoot) {
@@ -630,6 +811,37 @@ async function verifyPluginLifecycle({ control, fixture }) {
     5,
     'The official plugin flow did not execute the expected skill-read, tool-search, and MCP-call turns'
   )
+  const telemetryRequest = await control.awaitTelemetryEvent(
+    'plugin_invocation_failed',
+    WORKBENCH_READY_TIMEOUT_MS
+  )
+  const invocationEvent = telemetryEvents(telemetryRequest.payload).find(
+    event => event.event === 'plugin_invocation_failed'
+  )
+  assert.deepEqual(
+    {
+      capability_type: invocationEvent?.properties?.capability_type,
+      execution_surface: invocationEvent?.properties?.execution_surface,
+      executor_location: invocationEvent?.properties?.executor_location,
+      failure_stage: invocationEvent?.properties?.failure_stage,
+      plugin_distribution: invocationEvent?.properties?.plugin_distribution,
+    },
+    {
+      capability_type: 'mcp',
+      execution_surface: 'task',
+      executor_location: 'local',
+      failure_stage: 'invoke',
+      plugin_distribution: 'official',
+    },
+    'The plugin invocation telemetry did not preserve the expected public dimensions'
+  )
+  assert.equal(
+    Object.keys(invocationEvent?.properties ?? {}).some(key =>
+      /plugin_key|plugin_name|marketplace|tool_name|task_id/.test(key)
+    ),
+    false,
+    'The public plugin invocation event exposed a private plugin or task identifier'
+  )
   await captureVerificationScreenshot(control, 'plugins-04-skill-and-mcp-complete.png')
 }
 
@@ -699,6 +911,7 @@ async function verifyMarketplacePluginLifecycle({
   await control.command('waitFor', '[data-testid="plugin-import-dialog"]', {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
+  await control.awaitTelemetryEvent('plugin_center_opened')
   const importSnapshot = JSON.parse(await control.command('snapshot', 'body'))
   assert.ok(
     importSnapshot.testIds.includes('plugin-import-select') &&
@@ -738,6 +951,7 @@ async function verifyMarketplacePluginLifecycle({
       })
     )
     const importElapsedMs = Date.now() - importStartedAt
+    await control.awaitTelemetryEvent('plugin_zip_import_succeeded')
     assert.equal(imported.pluginName, 'direct-remote-mcp-plugin')
     assert.ok(
       importElapsedMs <= DEFAULT_STEP_TIMEOUT_MS,
@@ -836,6 +1050,7 @@ async function verifyMarketplacePluginLifecycle({
     text: PLUGIN_CREATOR_COMPLETION_TEXT,
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
   })
+  await verifyCreatorAuthenticationToolkit(codexHome, workspacePath)
 
   await control.command('click', '[data-testid="plugins-button"]')
   await control.command('waitFor', '[data-testid="plugins-workspace"]', {
@@ -1191,6 +1406,61 @@ async function verifyMarketplacePluginLifecycle({
   await closeComposerPluginPicker(control)
 }
 
+async function verifyCreatorAuthenticationToolkit(codexHome, workspacePath) {
+  const skillRoot = join(codexHome, 'skills', 'wework-plugin-creator')
+  const toolkit = join(skillRoot, 'scripts', 'auth-sdk', 'tool.py')
+  const validator = join(skillRoot, 'scripts', 'validate_wework_plugin.py')
+  const fixtureRoot = join(workspacePath, 'creator-auth-fixtures')
+  const environment = { ...process.env, CODEX_HOME: codexHome, WEGENT_CODEX_HOME: codexHome }
+  await mkdir(fixtureRoot, { recursive: true })
+  try {
+    for (const credentialType of ['password', 'bearer', 'oauth2']) {
+      const pluginRoot = join(fixtureRoot, credentialType)
+      commandOutput(
+        'uv',
+        [
+          'run',
+          '--no-project',
+          'python',
+          toolkit,
+          'scaffold',
+          credentialType,
+          '--parent',
+          fixtureRoot,
+          '--credential-type',
+          credentialType,
+        ],
+        { cwd: fixtureRoot, env: environment }
+      )
+      commandOutput(
+        'uv',
+        ['run', '--no-project', '--with', 'pyyaml', 'python', validator, pluginRoot],
+        { cwd: fixtureRoot, env: environment }
+      )
+      commandOutput(
+        'uv',
+        ['run', '--no-project', 'python', toolkit, 'vendor', pluginRoot, '--check'],
+        { cwd: fixtureRoot, env: environment }
+      )
+      const manifestPath = join(pluginRoot, '.codex-plugin', 'plugin.json')
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      assert.equal(manifest.connectors[0].accountAuth.credentialType, credentialType)
+      await rm(join(pluginRoot, 'scripts', 'account-auth.py'))
+      assert.throws(
+        () =>
+          commandOutput(
+            'uv',
+            ['run', '--no-project', '--with', 'pyyaml', 'python', validator, pluginRoot],
+            { cwd: fixtureRoot, env: environment }
+          ),
+        /adapter must reference a packaged relative script/
+      )
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+}
+
 async function verifySkillMentionRendering({ control, fixture }) {
   const officialPluginTaskId = await createOfficialPluginTask({
     control,
@@ -1202,8 +1472,27 @@ async function verifySkillMentionRendering({ control, fixture }) {
   await control.command('click', '[data-testid="new-chat-button"]')
   await waitForBlankConversation(control, ACTIVE_COMPOSER_SELECTOR)
   control.setScenario('skill_mention_display')
+  for (const path of [
+    '~/.agents/skills/test-skill/SKILL.md',
+    'C:/Users/me/skills/instructions.md',
+    './skills/instructions.md',
+  ]) {
+    await control.command('fill', ACTIVE_COMPOSER_SELECTOR, {
+      value: `[$test-skill](${path})`,
+    })
+    await control.command('waitFor', '[data-testid="local-skill-chip-test-skill"]', {
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    })
+    await control.command('fill', ACTIVE_COMPOSER_SELECTOR, {
+      value: `[test-label](${path})`,
+    })
+    await control.command('waitFor', '[data-testid="composer-path-chip-test-label"]', {
+      text: 'test-label',
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    })
+  }
   await control.command('fill', ACTIVE_COMPOSER_SELECTOR, {
-    value: `[$${qualifiedSkillName}](${fixture.skillPath}) ${QUALIFIED_SKILL_MENTION_PROMPT}`,
+    value: `[$${qualifiedSkillName}](${fixture.skillPath}) [test-label](${fixture.skillPath}) ${QUALIFIED_SKILL_MENTION_PROMPT}`,
   })
   await control.command('waitFor', `[data-testid="local-skill-chip-${qualifiedSkillTestId}"]`, {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
@@ -1252,11 +1541,33 @@ async function verifySkillMentionRendering({ control, fixture }) {
     text: QUALIFIED_SKILL_MENTION_COMPLETION_TEXT,
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
   })
+  await control.command(
+    'waitFor',
+    `[data-testid="sent-local-skill-token-${qualifiedSkillTestId}"][aria-disabled="false"]`,
+    {
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    }
+  )
   await assertMentionRenderedAsToken(control, {
     tokenSelector: `[data-testid="sent-local-skill-token-${qualifiedSkillTestId}"]`,
     plainTextMention: `$${qualifiedSkillName}`,
     errorLabel: 'The reloaded qualified skill reference degraded to its plain-text mention',
   })
+  await control.command(
+    'waitFor',
+    '[data-testid="message-user"] [data-testid="assistant-markdown-link"]',
+    {
+      text: 'test-label',
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    }
+  )
+  await control.command(
+    'waitFor',
+    '[data-testid="message-user"] [data-testid="assistant-markdown-link"] svg[data-testid="assistant-markdown-link-icon"]',
+    {
+      timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+    }
+  )
   await captureVerificationScreenshot(control, 'skill-mention-01-reloaded.png')
 }
 
@@ -1293,6 +1604,7 @@ export {
   initializeBlankCodexHome,
   waitForBundledMarketplaceRegistration,
   verifyStartupIgnoresBlockedCodexNetwork,
+  verifyComposerPluginNetworkIsolation,
   verifyOfficialPluginSource,
   openMarketplacePluginActions,
   installOfficialPluginFixture,
@@ -1301,6 +1613,7 @@ export {
   verifyPluginLifecycle,
   waitForMarketplaceInstallStateAfterUninstall,
   verifyMarketplacePluginLifecycle,
+  verifyCreatorAuthenticationToolkit,
   verifySkillMentionRendering,
   uninstallOfficialPlugin,
   verifyCoreDshPluginManagement,

@@ -40,6 +40,7 @@ interface VisionMessage {
 interface ModelRequest {
   model?: string
   messages?: VisionMessage[]
+  input?: unknown
   system?: unknown
   stream?: boolean
   tools?: Array<Record<string, unknown>>
@@ -69,13 +70,18 @@ interface ToolCallRule {
 interface ToolScenarioStep {
   toolCalls?: ToolCallRule[]
   responseContent?: string
+  doneDelayMs?: number
 }
+
+type HeaderMatcher = Record<string, string | null>
 
 interface ToolScenario {
   matchText: string
+  matchHeaders?: HeaderMatcher
   steps: ToolScenarioStep[]
   nextStep: number
   capturedRequests: ModelRequest[]
+  capturedHeaders: Array<Record<string, string | string[] | undefined>>
 }
 
 // Store captured requests for verification
@@ -160,32 +166,7 @@ function extractText(value: unknown): string {
 }
 
 function getRequestText(request: ModelRequest | null): string {
-  if (!request) {
-    return ''
-  }
-
-  const messageText = (request.messages || [])
-    .map(message => {
-      if (typeof message.content === 'string') {
-        return message.content
-      }
-
-      if (Array.isArray(message.content)) {
-        return message.content
-          .map(item => {
-            if (item.type === 'text') {
-              return item.text || ''
-            }
-            return ''
-          })
-          .join(' ')
-      }
-
-      return ''
-    })
-    .join(' ')
-
-  return [extractText(request.system), messageText].join(' ')
+  return extractText(request)
 }
 
 function findStreamRule(request: ModelRequest | null): StreamRule | undefined {
@@ -195,11 +176,74 @@ function findStreamRule(request: ModelRequest | null): StreamRule | undefined {
     .sort((left, right) => right.matchText.length - left.matchText.length)[0]
 }
 
-function findToolScenario(request: ModelRequest | null): ToolScenario | undefined {
+function headerValue(headers: http.IncomingHttpHeaders, name: string): string | undefined {
+  const value = headers[name.toLowerCase()]
+  return Array.isArray(value) ? value.join(',') : value
+}
+
+function headersMatch(headers: http.IncomingHttpHeaders, matcher?: HeaderMatcher): boolean {
+  if (!matcher) return true
+  return Object.entries(matcher).every(([name, expected]) => {
+    const actual = headerValue(headers, name)
+    return expected === null ? actual === undefined : actual === expected
+  })
+}
+
+function headerMatchersEqual(left?: HeaderMatcher, right?: HeaderMatcher): boolean {
+  const normalized = (matcher?: HeaderMatcher) =>
+    Object.entries(matcher ?? {}).sort(([leftName], [rightName]) =>
+      leftName.localeCompare(rightName)
+    )
+  return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right))
+}
+
+function findToolScenario(
+  request: ModelRequest | null,
+  headers: http.IncomingHttpHeaders
+): ToolScenario | undefined {
   const requestText = getRequestText(request)
   return toolScenarios
-    .filter(scenario => requestText.includes(scenario.matchText))
+    .filter(
+      scenario =>
+        requestText.includes(scenario.matchText) && headersMatch(headers, scenario.matchHeaders)
+    )
     .sort((left, right) => right.matchText.length - left.matchText.length)[0]
+}
+
+function scenarioAgentIds(request: ModelRequest | null): string[] {
+  const matches = getRequestText(request).matchAll(
+    /\\?"agent_id\\?"\s*:\s*\\?"([0-9a-f-]{36})\\?"/gi
+  )
+  return [...matches].map(match => match[1])
+}
+
+function resolveScenarioValue(value: unknown, request: ModelRequest | null): unknown {
+  if (Array.isArray(value)) {
+    return value.map(item => resolveScenarioValue(item, request))
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, resolveScenarioValue(item, request)])
+    )
+  }
+  if (value === '$scenario.agent_ids') {
+    return scenarioAgentIds(request)
+  }
+  if (typeof value === 'string') {
+    const match = value.match(/^\$scenario\.agent_id:(\d+)$/)
+    if (match) return scenarioAgentIds(request)[Number(match[1])] ?? value
+  }
+  return value
+}
+
+function resolveScenarioToolCalls(
+  request: ModelRequest | null,
+  toolCalls: ToolCallRule[]
+): ToolCallRule[] {
+  return toolCalls.map(toolCall => ({
+    ...toolCall,
+    arguments: resolveScenarioValue(toolCall.arguments, request) as Record<string, unknown>,
+  }))
 }
 
 function resolveToolName(request: ModelRequest | null, requestedName: string): string {
@@ -215,6 +259,34 @@ function resolveToolName(request: ModelRequest | null, requestedName: string): s
     toolNames.find(name => name === requestedName) ??
     toolNames.find(name => name.endsWith(requestedName)) ??
     requestedName
+  )
+}
+
+function resolveResponsesTool(
+  request: ModelRequest | null,
+  requestedName: string
+): { name: string; namespace?: string } {
+  const tools = Array.isArray(request?.tools) ? request.tools : []
+  const candidates = tools.flatMap(tool => {
+    if (!tool || typeof tool !== 'object') return []
+    const candidate = tool as {
+      function?: { name?: string }
+      name?: string
+      namespace?: string
+      tools?: Array<{ function?: { name?: string }; name?: string }>
+    }
+    const nestedTools = Array.isArray(candidate.tools)
+      ? candidate.tools.flatMap(nestedTool => {
+          const name = nestedTool.function?.name || nestedTool.name
+          return name && candidate.name ? [{ name, namespace: candidate.name }] : []
+        })
+      : []
+    const name = candidate.function?.name || (nestedTools.length === 0 ? candidate.name : undefined)
+    return name ? [{ name, namespace: candidate.namespace }, ...nestedTools] : nestedTools
+  })
+  return (
+    candidates.find(tool => tool.name === requestedName) ??
+    candidates.find(tool => tool.name.endsWith(requestedName)) ?? { name: requestedName }
   )
 }
 
@@ -402,6 +474,124 @@ function writeStreamingResponse(
   }
 
   sendChunk()
+}
+
+function writeResponsesSseEvent(res: http.ServerResponse, data: Record<string, unknown>): void {
+  res.write(`event: ${data.type}\n`)
+  res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function writeResponsesStreamingResponse(
+  res: http.ServerResponse,
+  content: string,
+  model: string,
+  doneDelayMs: number
+): void {
+  const responseId = `resp_${Date.now()}`
+  const messageId = `msg_${Date.now()}`
+  const output = [
+    {
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text: content, annotations: [] }],
+    },
+  ]
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  })
+  writeResponsesSseEvent(res, {
+    type: 'response.created',
+    response: {
+      id: responseId,
+      object: 'response',
+      status: 'in_progress',
+      model,
+      output: [],
+    },
+  })
+  writeResponsesSseEvent(res, {
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: output[0],
+  })
+  setTimeout(() => {
+    writeResponsesSseEvent(res, {
+      type: 'response.completed',
+      response: {
+        id: responseId,
+        object: 'response',
+        status: 'completed',
+        model,
+        output,
+        usage: {
+          input_tokens: 100,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: Math.max(1, content.split(' ').length),
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 100 + Math.max(1, content.split(' ').length),
+        },
+      },
+    })
+    res.end()
+  }, doneDelayMs)
+}
+
+function writeResponsesToolCalls(
+  res: http.ServerResponse,
+  request: ModelRequest | null,
+  toolCalls: ToolCallRule[],
+  model: string
+): void {
+  const responseId = `resp_${Date.now()}`
+  const output = toolCalls.map((toolCall, index) => {
+    const tool = resolveResponsesTool(request, toolCall.toolName)
+    return {
+      type: 'function_call',
+      call_id: `call_${Date.now()}_${index}`,
+      name: tool.name,
+      ...(tool.namespace ? { namespace: tool.namespace } : {}),
+      arguments: JSON.stringify(toolCall.arguments),
+    }
+  })
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  })
+  writeResponsesSseEvent(res, {
+    type: 'response.created',
+    response: { id: responseId, object: 'response', status: 'in_progress', model, output: [] },
+  })
+  output.forEach((item, outputIndex) => {
+    writeResponsesSseEvent(res, {
+      type: 'response.output_item.done',
+      output_index: outputIndex,
+      item,
+    })
+  })
+  writeResponsesSseEvent(res, {
+    type: 'response.completed',
+    response: {
+      id: responseId,
+      object: 'response',
+      status: 'completed',
+      model,
+      output,
+      usage: {
+        input_tokens: 100,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 1,
+        output_tokens_details: { reasoning_tokens: 0 },
+        total_tokens: 101,
+      },
+    },
+  })
+  res.end()
 }
 
 function writeAnthropicSseEvent(res: http.ServerResponse, event: string, data: unknown): void {
@@ -771,19 +961,60 @@ const server = http.createServer((req, res) => {
     }
 
     // Handle different endpoints
-    if (req.url?.includes('/chat/completions')) {
-      const toolScenario = findToolScenario(parsedBody)
+    if (req.url?.includes('/responses')) {
+      const toolScenario = findToolScenario(parsedBody, req.headers)
       if (toolScenario && parsedBody) {
         toolScenario.capturedRequests.push(parsedBody)
+        toolScenario.capturedHeaders.push({ ...req.headers })
+      }
+      const scenarioStep = toolScenario?.steps[toolScenario.nextStep]
+      if (toolScenario && scenarioStep) {
+        toolScenario.nextStep += 1
+        if (scenarioStep.toolCalls?.length) {
+          writeResponsesToolCalls(
+            res,
+            parsedBody,
+            resolveScenarioToolCalls(parsedBody, scenarioStep.toolCalls),
+            parsedBody?.model || 'mock-codex'
+          )
+          return
+        }
+      }
+      const streamRule = findStreamRule(parsedBody)
+      const responseContent =
+        scenarioStep?.responseContent ||
+        streamRule?.responseContent ||
+        buildContextAwareResponseContent(parsedBody)
+      const model = parsedBody?.model || 'mock-codex'
+      console.log(`Mock response content: ${truncateForLog(responseContent)}`)
+      writeResponsesStreamingResponse(
+        res,
+        responseContent,
+        model,
+        scenarioStep?.doneDelayMs ?? streamRule?.doneDelayMs ?? 0
+      )
+    } else if (req.url?.includes('/chat/completions')) {
+      const toolScenario = findToolScenario(parsedBody, req.headers)
+      if (toolScenario && parsedBody) {
+        toolScenario.capturedRequests.push(parsedBody)
+        toolScenario.capturedHeaders.push({ ...req.headers })
       }
       const scenarioStep = toolScenario?.steps[toolScenario.nextStep]
       if (toolScenario && scenarioStep) {
         toolScenario.nextStep += 1
         if (scenarioStep.toolCalls?.length) {
           if (parsedBody?.stream === true) {
-            writeStreamingToolCalls(res, parsedBody, scenarioStep.toolCalls)
+            writeStreamingToolCalls(
+              res,
+              parsedBody,
+              resolveScenarioToolCalls(parsedBody, scenarioStep.toolCalls)
+            )
           } else {
-            writeJsonToolCalls(res, parsedBody, scenarioStep.toolCalls)
+            writeJsonToolCalls(
+              res,
+              parsedBody,
+              resolveScenarioToolCalls(parsedBody, scenarioStep.toolCalls)
+            )
           }
           return
         }
@@ -844,9 +1075,10 @@ const server = http.createServer((req, res) => {
         input_tokens: Math.max(1, Math.ceil(getRequestText(parsedBody).length / 4)),
       })
     } else if (req.url?.includes('/messages')) {
-      const toolScenario = findToolScenario(parsedBody)
+      const toolScenario = findToolScenario(parsedBody, req.headers)
       if (toolScenario && parsedBody) {
         toolScenario.capturedRequests.push(parsedBody)
+        toolScenario.capturedHeaders.push({ ...req.headers })
       }
       const scenarioStep = toolScenario?.steps[toolScenario.nextStep]
       if (toolScenario && scenarioStep) {
@@ -854,9 +1086,19 @@ const server = http.createServer((req, res) => {
         if (scenarioStep.toolCalls?.length) {
           const model = parsedBody?.model || 'mock-claude'
           if (parsedBody?.stream === true) {
-            writeAnthropicStreamingToolCalls(res, parsedBody, model, scenarioStep.toolCalls)
+            writeAnthropicStreamingToolCalls(
+              res,
+              parsedBody,
+              model,
+              resolveScenarioToolCalls(parsedBody, scenarioStep.toolCalls)
+            )
           } else {
-            writeAnthropicJsonToolCalls(res, parsedBody, model, scenarioStep.toolCalls)
+            writeAnthropicJsonToolCalls(
+              res,
+              parsedBody,
+              model,
+              resolveScenarioToolCalls(parsedBody, scenarioStep.toolCalls)
+            )
           }
           return
         }
@@ -948,7 +1190,8 @@ const server = http.createServer((req, res) => {
       }
       writeJson(res, 200, scenario)
     } else if (req.url === '/tool-scenarios' && req.method === 'POST') {
-      const scenario = parseJsonBody<Omit<ToolScenario, 'nextStep' | 'capturedRequests'>>(body)
+      const scenario =
+        parseJsonBody<Omit<ToolScenario, 'nextStep' | 'capturedRequests' | 'capturedHeaders'>>(body)
       if (!scenario?.matchText || !scenario.steps?.length) {
         writeJson(res, 400, { error: 'matchText and non-empty steps are required' })
         return
@@ -957,8 +1200,13 @@ const server = http.createServer((req, res) => {
         ...scenario,
         nextStep: 0,
         capturedRequests: [],
+        capturedHeaders: [],
       }
-      const existingIndex = toolScenarios.findIndex(item => item.matchText === scenario.matchText)
+      const existingIndex = toolScenarios.findIndex(
+        item =>
+          item.matchText === scenario.matchText &&
+          headerMatchersEqual(item.matchHeaders, scenario.matchHeaders)
+      )
       if (existingIndex >= 0) {
         toolScenarios[existingIndex] = configuredScenario
       } else {
@@ -970,9 +1218,10 @@ const server = http.createServer((req, res) => {
       const matchText = url.searchParams.get('matchText')
 
       if (matchText) {
-        const scenarioIndex = toolScenarios.findIndex(item => item.matchText === matchText)
-        if (scenarioIndex >= 0) {
-          toolScenarios.splice(scenarioIndex, 1)
+        for (let index = toolScenarios.length - 1; index >= 0; index -= 1) {
+          if (toolScenarios[index].matchText === matchText) {
+            toolScenarios.splice(index, 1)
+          }
         }
       } else {
         toolScenarios.length = 0
@@ -1008,6 +1257,7 @@ server.listen(PORT, () => {
 ║  Server running on: http://localhost:${PORT}                  ║
 ║                                                            ║
 ║  Endpoints:                                                ║
+║    POST /v1/responses        - Mock OpenAI Responses API   ║
 ║    POST /v1/chat/completions - Mock OpenAI chat API        ║
 ║    POST /v1/messages         - Mock Anthropic Messages API ║
 ║    GET  /captured-requests   - View captured requests      ║

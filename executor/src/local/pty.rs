@@ -55,16 +55,17 @@ impl UnixPtyManager {
             })
             .map_err(|error| error.to_string())?;
         let mut command = CommandBuilder::new(program);
+        command.env_clear();
         for arg in args {
             command.arg(arg);
         }
         if let Some(cwd) = cwd {
             command.cwd(cwd);
         }
-        command.env("TERM", "xterm-256color");
         for (key, value) in env {
             command.env(key, value);
         }
+        command.env("TERM", "xterm-256color");
         let child = pair
             .slave
             .spawn_command(command)

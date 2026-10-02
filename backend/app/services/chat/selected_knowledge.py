@@ -40,7 +40,7 @@ PROVIDER_SKILLS = {
     "wegent": "wegent-knowledge",
     "dingtalk": "dingtalk-docs",
 }
-SUPPORTED_PROVIDER_NATIVE_SHELLS = {"Chat", "ClaudeCode"}
+SUPPORTED_PROVIDER_NATIVE_SHELLS = {"Chat", "Codex", "ClaudeCode"}
 ROUTING_SUMMARY_MAX_LENGTH = 200
 ROUTING_TOPIC_MAX_LENGTH = 48
 MAX_ROUTING_TOPICS = 5
@@ -88,7 +88,6 @@ def apply_selected_knowledge_context(
         request.selected_knowledge_prompt = ""
         request.provider_native_knowledge = False
         return []
-
     request.selected_knowledge_prompt = prompt
     request.provider_native_knowledge = False
 
@@ -154,7 +153,8 @@ def activate_provider_native_knowledge(
             + ", ".join(invalid_mcp_skills)
         )
 
-    if get_request_shell_type(request) == "ClaudeCode":
+    shell_type = get_request_shell_type(request)
+    if shell_type in {"Codex", "ClaudeCode"}:
         bot_config = (
             request.bot[0] if request.bot and isinstance(request.bot[0], dict) else {}
         )
@@ -166,7 +166,7 @@ def activate_provider_native_knowledge(
         missing_mcp_names = sorted(expected_mcp_names - configured_mcp_names)
         if missing_mcp_names:
             _raise_capability_error(
-                "Required provider MCP is unavailable to ClaudeCode: "
+                f"Required provider MCP is unavailable to {shell_type}: "
                 + ", ".join(missing_mcp_names)
             )
 
@@ -569,13 +569,15 @@ def _build_wegent_refs_for_ids(
         derive_retrieval_capabilities,
     )
 
+    kinds = {
+        kind.id: kind for kind in db.query(Kind).filter(Kind.id.in_(selected_ids)).all()
+    }
     capabilities_by_kb_id = {
         kind.id: derive_retrieval_capabilities(
             ((kind.json or {}).get("spec") or {}).get("retrievalConfig")
         )
-        for kind in db.query(Kind).filter(Kind.id.in_(selected_ids)).all()
+        for kind in kinds.values()
     }
-
     task_json: dict[str, Any] = task.json if isinstance(task.json, dict) else {}
     raw_spec = task_json.get("spec")
     spec: dict[str, Any] = raw_spec if isinstance(raw_spec, dict) else {}
@@ -607,7 +609,6 @@ def _build_wegent_refs_for_ids(
             continue
         if not (folder_ids or document_ids):
             continue
-
         resources = _load_wegent_resources(
             db,
             kb_id,

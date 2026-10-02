@@ -242,8 +242,15 @@ class WegentOptions(BaseModel):
     )
 
 
+class WegentExecution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["wegent"]
+
+
 class ResponseCreateInput(BaseModel):
     """Request schema for creating a response."""
+
+    execution: Optional[WegentExecution] = None
 
     model: str = Field(
         ..., description="Format: namespace#team_name or namespace#team_name#model_id"
@@ -264,6 +271,14 @@ class ResponseCreateInput(BaseModel):
     background: bool = Field(
         default=False,
         description="If True, return immediately with 'in_progress' status and run task in background",
+    )
+    omit_mcp_binary_output: bool = Field(
+        default=False,
+        description="If True, replace base64 media payloads (images, audio, video) "
+        "in MCP tool output with a compact placeholder such as "
+        "'<image/jpeg payload omitted: 2048 bytes>' instead of returning the raw "
+        "bytes. Disabled by default, so existing callers keep receiving the raw "
+        "MCP tool output.",
     )
     reasoning: Optional[ReasoningConfig] = Field(
         default=None,

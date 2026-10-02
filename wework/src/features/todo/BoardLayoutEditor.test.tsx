@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { BoardLayoutEditor } from './BoardLayoutEditor'
+import { BoardLayoutEditor } from '@wegent/collaboration/project-manage'
 
 const statuses = [
   { id: 'inbox', name: '收集箱', color: 'gray' as const },
@@ -59,5 +59,24 @@ describe('BoardLayoutEditor', () => {
       ...statuses,
       expect.objectContaining({ name: '新状态', color: 'orange' }),
     ])
+  })
+
+  it('uses a quieter section title without a duplicate divider when embedded', () => {
+    render(
+      <BoardLayoutEditor
+        statuses={statuses}
+        display={display}
+        statusBusy={false}
+        displayBusy={false}
+        canEditStatuses
+        embedded
+        onStatusesChange={vi.fn()}
+        onDisplayChange={vi.fn()}
+      />
+    )
+
+    const section = screen.getByTestId('cloud-project-board-layout-settings')
+    expect(section).not.toHaveClass('border-t', 'py-6')
+    expect(screen.getByRole('heading', { name: '看板布局' })).toHaveClass('text-lg', 'font-medium')
   })
 })

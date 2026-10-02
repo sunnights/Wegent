@@ -22,11 +22,13 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { DESKTOP_CHECKPOINTS, PLUGIN_SEGMENTS } from '../checkpoints.mjs'
+import { reservePort } from '../port-reservation.mjs'
 import { processIsAlive, stopProcess, stopProcessGroup } from '../process-lifecycle.mjs'
 import { resolveDesktopE2EResultRoot } from '../result-retention.mjs'
 import { loadDesktopScenario } from '../scenario-loader.mjs'
 import { waitForSnapshot } from './conversation-layout.mjs'
 import { sendPrompt } from './conversation-navigation.mjs'
+import { shouldAcceptInitialTelemetryConsent } from './telemetry-consent.mjs'
 import { waitForFolderPathReady, waitForFolderPickerInitialized } from './workspace-flows.mjs'
 
 const WORKBENCH_READY_TIMEOUT_MS = 180_000
@@ -40,6 +42,7 @@ const DEFAULT_STEP_TIMEOUT_MS = readPositiveTimeout(
   10_000,
   'WEWORK_E2E_STEP_TIMEOUT_MS'
 )
+const MODEL_REQUEST_TIMEOUT_MS = Math.max(DEFAULT_STEP_TIMEOUT_MS, 30_000)
 const DESKTOP_MODEL_SERVER_PORT = readOptionalPort(
   process.env.WEWORK_E2E_MODEL_SERVER_PORT,
   'WEWORK_E2E_MODEL_SERVER_PORT'
@@ -68,6 +71,20 @@ function readPositiveTimeout(value, fallback, name) {
   return timeoutMs
 }
 
+function readPositiveInteger(value, fallback, name) {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  assert.ok(Number.isInteger(parsed) && parsed > 0, `${name} must be a positive integer`)
+  return parsed
+}
+
+function readNonNegativeNumber(value, fallback, name) {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  assert.ok(Number.isFinite(parsed) && parsed >= 0, `${name} must be a finite non-negative number`)
+  return parsed
+}
+
 function readOptionalPort(value, name) {
   if (value === undefined) return 0
   const port = Number(value)
@@ -84,6 +101,13 @@ const RUNNING_FORK_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_RUNNING_FORK_COMPLETE'
 const FORK_FOLLOW_UP_PROMPT = 'WEWORK_DESKTOP_E2E_FORK_FOLLOW_UP: continue only in the forked task.'
 const FORK_FOLLOW_UP_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_FORK_FOLLOW_UP_COMPLETE'
 const FORK_ENCRYPTED_CONTENT = 'gAAAA-wework-desktop-e2e-fork-context'
+const FORK_PROVIDER_SOURCE_PROMPT =
+  'WEWORK_DESKTOP_E2E_FORK_PROVIDER_SOURCE: create a task through the local model router.'
+const FORK_PROVIDER_SOURCE_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_FORK_PROVIDER_SOURCE_COMPLETE'
+const FORK_PROVIDER_FOLLOW_UP_PROMPT =
+  'WEWORK_DESKTOP_E2E_FORK_PROVIDER_FOLLOW_UP: continue through the inherited local model router.'
+const FORK_PROVIDER_FOLLOW_UP_COMPLETION_TEXT =
+  'WEWORK_DESKTOP_E2E_FORK_PROVIDER_FOLLOW_UP_COMPLETE'
 const REQUEST_USER_INPUT_PROMPT =
   'WEWORK_DESKTOP_E2E_REQUEST_INPUT: ask which implementation direction to use.'
 const REQUEST_USER_INPUT_QUESTION = 'Which implementation direction should be used?'
@@ -121,6 +145,10 @@ const GUIDANCE_SCROLL_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_GUIDANCE_SCROLL_COMP
 const EMBEDDED_BROWSER_SETUP_PROMPT =
   'WEWORK_DESKTOP_E2E_EMBEDDED_BROWSER_SETUP: create a local task before opening the browser.'
 const EMBEDDED_BROWSER_SETUP_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_EMBEDDED_BROWSER_SETUP_COMPLETE'
+const EMBEDDED_BROWSER_BRIDGE_COLLISION_PROMPT =
+  'WEWORK_DESKTOP_E2E_EMBEDDED_BROWSER_BRIDGE_COLLISION: open the browser after another live bridge replaces the shared runtime record.'
+const EMBEDDED_BROWSER_BRIDGE_COLLISION_COMPLETION_TEXT =
+  'WEWORK_DESKTOP_E2E_EMBEDDED_BROWSER_BRIDGE_COLLISION_COMPLETE'
 const QUEUE_DIRECT_INITIAL = 'WEWORK_DESKTOP_E2E_QUEUE_DIRECT_INITIAL'
 const QUEUE_DIRECT_FIRST = 'WEWORK_DESKTOP_E2E_QUEUE_DIRECT_FIRST'
 const QUEUE_DIRECT_SECOND = 'WEWORK_DESKTOP_E2E_QUEUE_DIRECT_SECOND'
@@ -150,6 +178,12 @@ const GOAL_IDLE_PROMPT =
   'WEWORK_DESKTOP_E2E_GOAL_IDLE: create an active goal and keep it active for one continuation.'
 const GOAL_IDLE_INITIAL_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_IDLE_INITIAL_COMPLETE'
 const GOAL_IDLE_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_IDLE_COMPLETE'
+const GOAL_IDLE_FOLLOW_UP_PROMPT =
+  'WEWORK_DESKTOP_E2E_GOAL_IDLE_FOLLOW_UP: keep this ordinary continuation running.'
+const GOAL_IDLE_FOLLOW_UP_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_IDLE_FOLLOW_UP_COMPLETE'
+const GOAL_SNAPSHOT_RECONCILIATION_PROMPT =
+  'WEWORK_DESKTOP_E2E_GOAL_SNAPSHOT_RECONCILIATION: hold this turn while the executor clears the goal.'
+const GOAL_SNAPSHOT_RECONCILIATION_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_SNAPSHOT_RECONCILIATION_COMPLETE'
 const GOAL_BUSY_PLAN_PROMPT =
   'WEWORK_DESKTOP_E2E_GOAL_BUSY_PLAN: keep this planning turn open while Goal is enabled.'
 const GOAL_BUSY_PLAN_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_BUSY_PLAN_COMPLETE'
@@ -159,8 +193,11 @@ const GOAL_BUSY_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_BUSY_COMPLETE'
 const GOAL_RESTART_PROMPT =
   'WEWORK_DESKTOP_E2E_GOAL_RESTART: keep this active goal running until Wework restarts.'
 const GOAL_RESTART_INITIAL_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_RESTART_INITIAL_COMPLETE'
-const GOAL_RESTART_RESUME_PROMPT = 'WEWORK_DESKTOP_E2E_GOAL_RESTART_RESUME'
 const GOAL_RESTART_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_RESTART_COMPLETE'
+const GOAL_RESTART_BLOCKER_PROMPT =
+  'WEWORK_DESKTOP_E2E_GOAL_RESTART_BLOCKER: occupy one executor slot across restart.'
+const GOAL_RESTART_BLOCKER_INITIAL_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_RESTART_BLOCKER_INITIAL_COMPLETE'
+const GOAL_RESTART_BLOCKER_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_GOAL_RESTART_BLOCKER_COMPLETE'
 const SUPERVISOR_PROMPT =
   'WEWORK_DESKTOP_E2E_SUPERVISOR: complete this task so supervision can inspect it.'
 const SUPERVISOR_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_SUPERVISOR_COMPLETE'
@@ -180,6 +217,10 @@ const WINDOW_LIFECYCLE_COMPLETION_RESPONSE = [
 const CHECKPOINT_TASK_PROMPT =
   'WEWORK_DESKTOP_E2E_CHECKPOINT_TASK: create a completed task for downstream checkpoints.'
 const CHECKPOINT_TASK_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_CHECKPOINT_TASK_COMPLETE'
+const LATE_BOUND_PROJECT_SPACE_PROMPT =
+  'WEWORK_DESKTOP_E2E_LATE_BOUND_PROJECT_SPACE: inspect the bound Issue attachments.'
+const LATE_BOUND_PROJECT_SPACE_COMPLETION_TEXT =
+  'WEWORK_DESKTOP_E2E_LATE_BOUND_PROJECT_SPACE_COMPLETE'
 const MESSAGE_EDIT_ORIGINAL_PROMPT =
   'WEWORK_DESKTOP_E2E_MESSAGE_EDIT_ORIGINAL: answer before this message is edited.'
 const MESSAGE_EDIT_ORIGINAL_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_MESSAGE_EDIT_ORIGINAL_COMPLETE'
@@ -221,11 +262,24 @@ const RETRY_CODEX_ERROR_TEXT = "Codex ran out of room in the model's context win
 const RETRY_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_RETRY_COMPLETE'
 const RATE_LIMIT_PROMPT = 'WEWORK_DESKTOP_E2E_RATE_LIMIT: recover from one model 429.'
 const RATE_LIMIT_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_RATE_LIMIT_COMPLETE'
+const MODEL_SERVICE_CONNECTION_PROMPT =
+  'WEWORK_DESKTOP_E2E_MODEL_SERVICE_CONNECTION: show the failed endpoint.'
+const MODEL_SERVICE_CONNECTION_ENDPOINT =
+  'https://model-gateway.example.internal/api/runtime-work/llm-responses-proxy/responses'
+const MODEL_SERVICE_CONNECTION_ERROR = `unexpected status 502 Bad Gateway: {"detail":"Local model proxy request failed: error sending request for url (${MODEL_SERVICE_CONNECTION_ENDPOINT})"}`
 const ANTHROPIC_EMPTY_PROMPT =
   'WEWORK_DESKTOP_E2E_ANTHROPIC_EMPTY: recover when Kimi reports tokens without output.'
 const ANTHROPIC_EMPTY_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_ANTHROPIC_EMPTY_COMPLETE'
 const RECONNECT_PROMPT = 'WEWORK_DESKTOP_E2E_RECONNECT: recover after the stream disconnects.'
 const RECONNECT_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_RECONNECT_COMPLETE'
+const MODEL_PROXY_RESTART_INITIAL_PROMPT =
+  'WEWORK_DESKTOP_E2E_MODEL_PROXY_RESTART_INITIAL: establish a persisted Codex conversation.'
+const MODEL_PROXY_RESTART_INITIAL_COMPLETION_TEXT =
+  'WEWORK_DESKTOP_E2E_MODEL_PROXY_RESTART_INITIAL_COMPLETE'
+const MODEL_PROXY_RESTART_FOLLOW_UP_PROMPT =
+  'WEWORK_DESKTOP_E2E_MODEL_PROXY_RESTART_FOLLOW_UP: continue after the executor restarts.'
+const MODEL_PROXY_RESTART_FOLLOW_UP_COMPLETION_TEXT =
+  'WEWORK_DESKTOP_E2E_MODEL_PROXY_RESTART_FOLLOW_UP_COMPLETE'
 const MEMORY_PROMPT = 'WEWORK_DESKTOP_E2E_MEMORY: run a tool and stream the report.'
 const MEMORY_COMPLETION_TEXT = 'WEWORK_DESKTOP_E2E_MEMORY_COMPLETE'
 const CONCURRENT_MEMORY_TASK_COUNT = 10
@@ -247,6 +301,11 @@ const MEMORY_MAX_SETTLED_GROWTH_KIB = Number(
 )
 const MEMORY_MAX_SETTLED_DOM_NODE_GROWTH = Number(
   process.env.WEWORK_E2E_MEMORY_MAX_SETTLED_DOM_NODE_GROWTH ?? 512
+)
+const MEMORY_MAX_JS_HEAP_BYTES = readNonNegativeNumber(
+  process.env.WEWORK_E2E_MEMORY_MAX_JS_HEAP_BYTES,
+  200 * 1024 * 1024,
+  'WEWORK_E2E_MEMORY_MAX_JS_HEAP_BYTES'
 )
 const MEMORY_MIN_BASELINE_SAMPLES = 5
 const MEMORY_MAX_BASELINE_SAMPLES = 15
@@ -326,8 +385,19 @@ const CLOUD_MODEL_CASES = MODEL_PROTOCOLS.map(protocol => ({
   source: 'cloud',
   protocol,
   optionIds: [`desktop-e2e-cloud-${protocol}`],
-  labels: [protocol === 'chat' ? 'moonshot-kimi-k3' : `desktop-e2e-cloud-${protocol}`],
-  modelId: protocol === 'chat' ? 'moonshot-kimi-k3' : `desktop-e2e-cloud-${protocol}-upstream`,
+  labels: [
+    protocol === 'responses'
+      ? 'gpt-6-astra'
+      : protocol === 'chat'
+        ? 'moonshot-kimi-k3'
+        : `desktop-e2e-cloud-${protocol}`,
+  ],
+  modelId:
+    protocol === 'responses'
+      ? 'gpt-6-astra'
+      : protocol === 'chat'
+        ? 'moonshot-kimi-k3'
+        : `desktop-e2e-cloud-${protocol}-upstream`,
 }))
 const MODEL_PROTOCOL_MATRIX_CASES = [
   ...LOCAL_MODEL_CASES.map(model => ({ ...model, source: 'local' })),
@@ -414,7 +484,10 @@ const TELEMETRY_SAFE_PROPERTY_KEYS = new Set([
   'app_version',
   'arch',
   'distinct_id',
+  'domain',
+  'event_schema_version',
   'feature',
+  'failure_stage',
   'locale',
   'os',
   'release_channel',
@@ -427,6 +500,11 @@ const TELEMETRY_FORBIDDEN_PROPERTY_PATTERN =
   /(authorization|code|content|credential|email|file|message|path|prompt|repository|response|task_id|token|url|user_id|workspace)/i
 const CLOUD_PUBLIC_MODEL_NAME = 'desktop-e2e-public-model'
 const CLOUD_PUBLIC_MODEL_LABEL = 'Desktop E2E Public Model'
+const CLOUD_PUBLIC_MODEL_OPTIONS = {
+  weworkCloudModelNamespace: 'default',
+  weworkCloudModelResourceUserId: '0',
+  weworkCloudModelUpstreamApiFormat: 'openai-responses',
+}
 const CLOUD_DEVICE_ID = 'wework-e2e-cloud-device'
 const REMOTE_DOCKER_DEVICE_ID = 'wework-e2e-remote-docker-device'
 const FRESH_CHAT_PROMPT = 'WEWORK_DESKTOP_E2E_FRESH_CHAT: confirm this is a new conversation.'
@@ -517,7 +595,7 @@ const SELECTED_DESKTOP_SEGMENT = DESKTOP_SEGMENT ?? DESKTOP_FROM_SEGMENT
 const RUNS_PLUGIN_E2E =
   PLUGINS_ONLY || (SELECTED_DESKTOP_SEGMENT && PLUGIN_SEGMENTS.includes(SELECTED_DESKTOP_SEGMENT))
 const VERIFIES_INITIAL_TELEMETRY_CONSENT =
-  !SELECTED_DESKTOP_SEGMENT || SELECTED_DESKTOP_SEGMENT === 'telemetry-consent'
+  shouldAcceptInitialTelemetryConsent(SELECTED_DESKTOP_SEGMENT)
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const weworkDir = resolve(scriptDir, '..', '..', '..')
@@ -957,18 +1035,6 @@ async function runChecked(command, args, options = {}) {
   })
 }
 
-async function reservePort() {
-  const server = createServer()
-  await new Promise((resolvePromise, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolvePromise)
-  })
-  const address = server.address()
-  assert.ok(address && typeof address !== 'string', 'Unable to reserve an E2E port')
-  await new Promise(resolvePromise => server.close(resolvePromise))
-  return address.port
-}
-
 class BlockingNetworkProxy {
   constructor() {
     this.requests = []
@@ -1177,12 +1243,18 @@ async function triggerModelReloadUntilCloudFailure(control) {
   )
 }
 
-async function sendPromptUntilScenarioRequest(control, selector, prompt, scenario) {
-  const scenarioRequest = control.awaitScenarioRequest(scenario)
+async function sendPromptUntilScenarioRequest(
+  control,
+  selector,
+  prompt,
+  scenario,
+  timeoutMs = MODEL_REQUEST_TIMEOUT_MS
+) {
+  const scenarioRequest = control.awaitNextScenarioRequest(scenario, timeoutMs)
   await sendPrompt(control, selector, prompt)
   return withTimeout(
     scenarioRequest,
-    DEFAULT_STEP_TIMEOUT_MS,
+    timeoutMs,
     `The model service did not receive the ${scenario} request`
   )
 }
@@ -1359,10 +1431,10 @@ async function selectE2EModel(
   control,
   modelIds = DEFAULT_MODEL_ID,
   modelLabels = DEFAULT_MODEL_LABEL,
-  composerSelector = ''
+  composerSelector = '',
+  expectedProviderId = expectedModelProviderId(modelIds)
 ) {
   const labels = Array.isArray(modelLabels) ? modelLabels : [modelLabels]
-  const expectedProviderId = expectedModelProviderId(modelIds)
   const modelSelectorButton = `${composerSelector} [data-testid="model-selector-button"]`.trim()
   await control.command('waitFor', modelSelectorButton, {
     timeoutMs: WORKBENCH_READY_TIMEOUT_MS,
@@ -1422,12 +1494,15 @@ async function selectE2EModel(
       'The model selector did not retain the expected provider'
     )
   }
-  await control.command('press', 'body', { key: 'Escape' })
-  await waitForSnapshot(
-    control,
-    snapshot => !snapshot.testIds.includes('model-selector-menu'),
-    'The model selector menu did not close after selecting the E2E model'
-  )
+  const menuSnapshot = JSON.parse(await control.command('snapshot', 'body'))
+  if (menuSnapshot.testIds.includes('model-selector-menu')) {
+    await control.command('press', 'body', { key: 'Escape' })
+    await waitForSnapshot(
+      control,
+      snapshot => !snapshot.testIds.includes('model-selector-menu'),
+      'The model selector menu did not close after selecting the E2E model'
+    )
+  }
 }
 
 async function waitForE2EModelLabel(
@@ -1482,12 +1557,15 @@ export {
   DEFAULT_STEP_TIMEOUT_MS,
   DESKTOP_MODEL_SERVER_PORT,
   DESKTOP_CONTROL_SERVER_PORT,
+  MODEL_REQUEST_TIMEOUT_MS,
   MODEL_PROTOCOL_MATRIX_TIMEOUT_MS,
   COMPOSER_READY_STABILITY_MS,
   DESKTOP_CONTROL_DELIVERY_TIMEOUT_MS,
   DESKTOP_CONTROL_RESULT_GRACE_MS,
   QUEUE_MANAGEMENT_REQUEST_TIMEOUT_MS,
   readPositiveTimeout,
+  readPositiveInteger,
+  readNonNegativeNumber,
   readOptionalPort,
   TASK_PROMPT,
   COMPLETION_TEXT,
@@ -1498,6 +1576,10 @@ export {
   FORK_FOLLOW_UP_PROMPT,
   FORK_FOLLOW_UP_COMPLETION_TEXT,
   FORK_ENCRYPTED_CONTENT,
+  FORK_PROVIDER_SOURCE_PROMPT,
+  FORK_PROVIDER_SOURCE_COMPLETION_TEXT,
+  FORK_PROVIDER_FOLLOW_UP_PROMPT,
+  FORK_PROVIDER_FOLLOW_UP_COMPLETION_TEXT,
   REQUEST_USER_INPUT_PROMPT,
   REQUEST_USER_INPUT_QUESTION,
   REQUEST_USER_INPUT_COMPLETION_TEXT,
@@ -1522,6 +1604,8 @@ export {
   GUIDANCE_SCROLL_COMPLETION_TEXT,
   EMBEDDED_BROWSER_SETUP_PROMPT,
   EMBEDDED_BROWSER_SETUP_COMPLETION_TEXT,
+  EMBEDDED_BROWSER_BRIDGE_COLLISION_PROMPT,
+  EMBEDDED_BROWSER_BRIDGE_COLLISION_COMPLETION_TEXT,
   QUEUE_DIRECT_INITIAL,
   QUEUE_DIRECT_FIRST,
   QUEUE_DIRECT_SECOND,
@@ -1546,14 +1630,20 @@ export {
   GOAL_IDLE_PROMPT,
   GOAL_IDLE_INITIAL_TEXT,
   GOAL_IDLE_COMPLETION_TEXT,
+  GOAL_IDLE_FOLLOW_UP_PROMPT,
+  GOAL_IDLE_FOLLOW_UP_TEXT,
+  GOAL_SNAPSHOT_RECONCILIATION_PROMPT,
+  GOAL_SNAPSHOT_RECONCILIATION_TEXT,
   GOAL_BUSY_PLAN_PROMPT,
   GOAL_BUSY_PLAN_TEXT,
   GOAL_BUSY_OBJECTIVE,
   GOAL_BUSY_COMPLETION_TEXT,
   GOAL_RESTART_PROMPT,
   GOAL_RESTART_INITIAL_TEXT,
-  GOAL_RESTART_RESUME_PROMPT,
   GOAL_RESTART_COMPLETION_TEXT,
+  GOAL_RESTART_BLOCKER_PROMPT,
+  GOAL_RESTART_BLOCKER_INITIAL_TEXT,
+  GOAL_RESTART_BLOCKER_COMPLETION_TEXT,
   SUPERVISOR_PROMPT,
   SUPERVISOR_COMPLETION_TEXT,
   SUPERVISOR_PRINCIPLES,
@@ -1562,6 +1652,8 @@ export {
   WINDOW_LIFECYCLE_COMPLETION_RESPONSE,
   CHECKPOINT_TASK_PROMPT,
   CHECKPOINT_TASK_COMPLETION_TEXT,
+  LATE_BOUND_PROJECT_SPACE_PROMPT,
+  LATE_BOUND_PROJECT_SPACE_COMPLETION_TEXT,
   MESSAGE_EDIT_ORIGINAL_PROMPT,
   MESSAGE_EDIT_ORIGINAL_COMPLETION_TEXT,
   MESSAGE_EDIT_UPDATED_PROMPT,
@@ -1590,10 +1682,17 @@ export {
   RETRY_COMPLETION_TEXT,
   RATE_LIMIT_PROMPT,
   RATE_LIMIT_COMPLETION_TEXT,
+  MODEL_SERVICE_CONNECTION_PROMPT,
+  MODEL_SERVICE_CONNECTION_ENDPOINT,
+  MODEL_SERVICE_CONNECTION_ERROR,
   ANTHROPIC_EMPTY_PROMPT,
   ANTHROPIC_EMPTY_COMPLETION_TEXT,
   RECONNECT_PROMPT,
   RECONNECT_COMPLETION_TEXT,
+  MODEL_PROXY_RESTART_INITIAL_PROMPT,
+  MODEL_PROXY_RESTART_INITIAL_COMPLETION_TEXT,
+  MODEL_PROXY_RESTART_FOLLOW_UP_PROMPT,
+  MODEL_PROXY_RESTART_FOLLOW_UP_COMPLETION_TEXT,
   MEMORY_PROMPT,
   MEMORY_COMPLETION_TEXT,
   CONCURRENT_MEMORY_TASK_COUNT,
@@ -1604,6 +1703,7 @@ export {
   MEMORY_MAX_PEAK_GROWTH_KIB,
   MEMORY_MAX_SETTLED_GROWTH_KIB,
   MEMORY_MAX_SETTLED_DOM_NODE_GROWTH,
+  MEMORY_MAX_JS_HEAP_BYTES,
   MEMORY_MIN_BASELINE_SAMPLES,
   MEMORY_MAX_BASELINE_SAMPLES,
   MEMORY_MIN_SETTLED_SAMPLES,
@@ -1674,6 +1774,7 @@ export {
   TELEMETRY_FORBIDDEN_PROPERTY_PATTERN,
   CLOUD_PUBLIC_MODEL_NAME,
   CLOUD_PUBLIC_MODEL_LABEL,
+  CLOUD_PUBLIC_MODEL_OPTIONS,
   CLOUD_DEVICE_ID,
   REMOTE_DOCKER_DEVICE_ID,
   FRESH_CHAT_PROMPT,

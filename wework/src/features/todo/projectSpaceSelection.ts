@@ -1,8 +1,18 @@
-import { isDefaultWorkItemProject, type CloudProject } from '@/api/deliveries'
+import { isDefaultWorkItemProject, type CloudLoopItem, type CloudProject } from '@/api/deliveries'
+import { canEditCollaborationIssue } from '@wegent/collaboration'
 import type { WorkbenchServices } from '@/features/workbench/workbenchServices'
 import type { RuntimeProjectSpaceRef, RuntimeTaskAddress } from '@/types/api'
 
 export type ProjectSpaceApi = NonNullable<WorkbenchServices['deliveryApi']>
+export interface ProjectSpaceTaskContextApi {
+  findCloudContextForTask(
+    task: RuntimeTaskAddress
+  ): Promise<{ project: CloudProject; loop_item: CloudLoopItem | null }>
+}
+export interface ProjectSpaceTaskContextSource<TApi extends ProjectSpaceTaskContextApi> {
+  api: TApi
+  context: Awaited<ReturnType<ProjectSpaceTaskContextApi['findCloudContextForTask']>>
+}
 export type LocatedProjectSpace = CloudProject & {
   location: 'local' | 'cloud'
 }
@@ -15,21 +25,88 @@ export interface ProjectSpaceOption {
 
 export { isDefaultWorkItemProject }
 
+export function canEditProjectSpaceIssue(issue: {
+  can_edit?: boolean
+  project_store?: 'local' | 'backend'
+}): boolean {
+  return issue.project_store === 'local' ? true : canEditCollaborationIssue(issue)
+}
+
 export function projectStoreLocation(
   projectStore: RuntimeProjectSpaceRef['projectStore']
 ): 'local' | 'cloud' {
   return projectStore === 'local' ? 'local' : 'cloud'
 }
 
-const projectSpaceTaskContextListeners = new Set<(task: RuntimeTaskAddress) => void>()
-const projectSpaceTaskBindingListeners = new Set<(task: RuntimeTaskAddress) => void>()
+export interface ProjectSpaceTaskChange {
+  task: RuntimeTaskAddress
+  project: RuntimeProjectSpaceRef
+}
 
-export function publishProjectSpaceTaskContextChanged(task: RuntimeTaskAddress) {
-  for (const listener of projectSpaceTaskContextListeners) listener(task)
+export interface ProjectSpaceTaskBindingChange extends ProjectSpaceTaskChange {
+  type: 'bound' | 'unbound'
+}
+
+const projectSpaceByRuntimeTask = new Map<string, RuntimeProjectSpaceRef>()
+const projectSpaceTaskContextListeners = new Set<(change: ProjectSpaceTaskChange) => void>()
+const projectSpaceTaskBindingListeners = new Set<(change: ProjectSpaceTaskBindingChange) => void>()
+
+function runtimeTaskKey(task: RuntimeTaskAddress): string {
+  return `${task.deviceId}\0${task.taskId}`
+}
+
+export function rememberProjectSpaceTaskBinding(
+  task: RuntimeTaskAddress,
+  project: RuntimeProjectSpaceRef
+): boolean {
+  const key = runtimeTaskKey(task)
+  if (sameProjectSpace(projectSpaceByRuntimeTask.get(key), project)) return false
+  projectSpaceByRuntimeTask.set(key, project)
+  return true
+}
+
+export function forgetProjectSpaceTaskBinding(
+  task: RuntimeTaskAddress,
+  project: RuntimeProjectSpaceRef
+): boolean {
+  const key = runtimeTaskKey(task)
+  if (!sameProjectSpace(projectSpaceByRuntimeTask.get(key), project)) return false
+  return projectSpaceByRuntimeTask.delete(key)
+}
+
+export function projectSpaceForRuntimeTask(
+  task: RuntimeTaskAddress
+): RuntimeProjectSpaceRef | undefined {
+  return projectSpaceByRuntimeTask.get(runtimeTaskKey(task))
+}
+
+export function reconcileProjectSpaceTaskBindings(
+  project: RuntimeProjectSpaceRef,
+  tasks: readonly RuntimeTaskAddress[]
+): boolean {
+  const snapshotTaskKeys = new Set(tasks.map(runtimeTaskKey))
+  let changed = false
+
+  for (const [key, mappedProject] of projectSpaceByRuntimeTask) {
+    if (!sameProjectSpace(mappedProject, project) || snapshotTaskKeys.has(key)) continue
+    projectSpaceByRuntimeTask.delete(key)
+    changed = true
+  }
+
+  for (const task of tasks) {
+    changed = rememberProjectSpaceTaskBinding(task, project) || changed
+  }
+
+  return changed
+}
+
+export function publishProjectSpaceTaskContextChanged(change: ProjectSpaceTaskChange) {
+  rememberProjectSpaceTaskBinding(change.task, change.project)
+  for (const listener of projectSpaceTaskContextListeners) listener(change)
 }
 
 export function subscribeProjectSpaceTaskContextChanged(
-  listener: (task: RuntimeTaskAddress) => void
+  listener: (change: ProjectSpaceTaskChange) => void
 ) {
   projectSpaceTaskContextListeners.add(listener)
   return () => {
@@ -37,12 +114,17 @@ export function subscribeProjectSpaceTaskContextChanged(
   }
 }
 
-export function publishProjectSpaceTaskBindingChanged(task: RuntimeTaskAddress) {
-  for (const listener of projectSpaceTaskBindingListeners) listener(task)
+export function publishProjectSpaceTaskBindingChanged(change: ProjectSpaceTaskBindingChange) {
+  if (change.type === 'unbound') {
+    forgetProjectSpaceTaskBinding(change.task, change.project)
+  } else {
+    rememberProjectSpaceTaskBinding(change.task, change.project)
+  }
+  for (const listener of projectSpaceTaskBindingListeners) listener(change)
 }
 
 export function subscribeProjectSpaceTaskBindingChanged(
-  listener: (task: RuntimeTaskAddress) => void
+  listener: (change: ProjectSpaceTaskBindingChange) => void
 ) {
   projectSpaceTaskBindingListeners.add(listener)
   return () => {
@@ -108,22 +190,23 @@ export function projectSupportsRobotAutomation(project: CloudProject): boolean {
   return ['local', 'github', 'gitlab'].includes(project.task_provider)
 }
 
-export async function findProjectSpaceContextForTask(
-  apis: ProjectSpaceApi[],
+export async function findProjectSpaceContextSourceForTask<TApi extends ProjectSpaceTaskContextApi>(
+  apis: TApi[],
   task: RuntimeTaskAddress,
   timeoutMs = 5_000
-): ReturnType<ProjectSpaceApi['findCloudContextForTask']> {
-  type TaskContext = Awaited<ReturnType<ProjectSpaceApi['findCloudContextForTask']>>
-  const results: Array<PromiseSettledResult<TaskContext> | undefined> = new Array(apis.length)
-  let resolveUserContext: ((context: TaskContext) => void) | undefined
-  const userContextFound = new Promise<TaskContext>(resolve => {
+): Promise<ProjectSpaceTaskContextSource<TApi>> {
+  type TaskContextSource = ProjectSpaceTaskContextSource<TApi>
+  const results: Array<PromiseSettledResult<TaskContextSource> | undefined> = new Array(apis.length)
+  let resolveUserContext: ((source: TaskContextSource) => void) | undefined
+  const userContextFound = new Promise<TaskContextSource>(resolve => {
     resolveUserContext = resolve
   })
   const requests = apis.map((api, index) =>
     api.findCloudContextForTask(task).then(
-      value => {
-        results[index] = { status: 'fulfilled', value }
-        if (!isDefaultWorkItemProject(value.project)) resolveUserContext?.(value)
+      context => {
+        const source = { api, context }
+        results[index] = { status: 'fulfilled', value: source }
+        if (!isDefaultWorkItemProject(context.project)) resolveUserContext?.(source)
       },
       reason => {
         results[index] = { status: 'rejected', reason }
@@ -141,12 +224,12 @@ export async function findProjectSpaceContextForTask(
   if (timeoutId !== undefined) clearTimeout(timeoutId)
   if (outcome.kind === 'user-context') return outcome.context
   const settledResults = results.filter(result => result !== undefined)
-  const contexts = settledResults.flatMap(result =>
+  const sources = settledResults.flatMap(result =>
     result.status === 'fulfilled' ? [result.value] : []
   )
-  const userContext = contexts.find(context => !isDefaultWorkItemProject(context.project))
+  const userContext = sources.find(source => !isDefaultWorkItemProject(source.context.project))
   if (userContext) return userContext
-  if (contexts[0]) return contexts[0]
+  if (sources[0]) return sources[0]
   const errors = settledResults.flatMap(result =>
     result.status === 'rejected' ? [result.reason] : []
   )
@@ -154,6 +237,14 @@ export async function findProjectSpaceContextForTask(
     errors.push(new Error(`Project-space context lookup timed out after ${timeoutMs}ms`))
   }
   throw new AggregateError(errors, 'Task is not linked to a project space')
+}
+
+export async function findProjectSpaceContextForTask(
+  apis: ProjectSpaceTaskContextApi[],
+  task: RuntimeTaskAddress,
+  timeoutMs = 5_000
+): ReturnType<ProjectSpaceTaskContextApi['findCloudContextForTask']> {
+  return (await findProjectSpaceContextSourceForTask(apis, task, timeoutMs)).context
 }
 
 export async function loadProjectSpaceOptions(

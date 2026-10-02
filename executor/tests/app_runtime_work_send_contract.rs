@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex as AsyncMutex, OwnedMutexGuard};
 use wegent_executor::{local::app_ipc::RuntimeWorkHandler, runtime_work::RuntimeWorkRpcHandler};
 
+#[path = "support/runtime_task_project_move.rs"]
+mod runtime_task_project_move;
+
 struct EnvLockGuard {
     _guard: OwnedMutexGuard<()>,
 }
@@ -858,6 +861,12 @@ async fn runtime_tasks_create_ephemeral_codex_thread_hidden_from_task_list() {
                 "workspacePath": "/tmp/project",
                 "message": "quick side question",
                 "ephemeral": true,
+                "execution": {
+                    "workspace": {
+                        "source": "git_worktree",
+                        "branch": "feature/side-chat"
+                    }
+                },
                 "sideSource": {
                     "deviceId": "device-1",
                     "taskId": "main-task-1",
@@ -872,6 +881,7 @@ async fn runtime_tasks_create_ephemeral_codex_thread_hidden_from_task_list() {
                     "subtask_id": "side-turn-1",
                     "prompt": "quick side question",
                     "project_workspace_path": "/tmp/project",
+                    "workspace_source": "git_worktree",
                     "ephemeral": true,
                     "bot": [{"shell_type": "ClaudeCode"}],
                     "model_config": {
@@ -936,7 +946,145 @@ async fn runtime_tasks_create_ephemeral_codex_thread_hidden_from_task_list() {
 }
 
 #[tokio::test]
-async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missing_turn() {
+async fn runtime_tasks_reject_side_source_workspace_conflicts() {
+    let _lock = env_lock().await;
+    let _home = EnvGuard::set(
+        "WEGENT_EXECUTOR_HOME",
+        &temp_path("runtime-side-workspace-conflict-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let _codex_home = EnvGuard::set(
+        "CODEX_HOME",
+        &temp_path("runtime-side-workspace-conflict-codex-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let log_path = temp_path("runtime-side-workspace-conflict-log", "jsonl");
+    let fake_codex = write_fake_codex(&log_path);
+    let handler = RuntimeWorkRpcHandler::new("device-1", fake_codex.display().to_string());
+
+    let error = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.create",
+            "payload": {
+                "taskId": "side-chat-conflict",
+                "workspacePath": "/tmp/other-project",
+                "message": "quick side question",
+                "ephemeral": true,
+                "sideSource": {
+                    "deviceId": "device-1",
+                    "taskId": "main-task-1",
+                    "workspacePath": "/tmp/project",
+                    "runtimeHandle": {
+                        "threadId": "parent-thread-1"
+                    }
+                },
+                "executionRequest": {
+                    "task_id": "side-chat-conflict",
+                    "subtask_id": "side-turn-conflict",
+                    "prompt": "quick side question",
+                    "project_workspace_path": "/tmp/other-project",
+                    "ephemeral": true,
+                    "bot": [{"shell_type": "ClaudeCode"}],
+                    "model_config": {
+                        "model": "openai",
+                        "model_id": "gpt-5.5",
+                        "api_format": "responses"
+                    }
+                }
+            }
+        }))
+        .await
+        .expect_err("conflicting side source workspace should be rejected");
+
+    assert_eq!(error.code, "bad_request");
+    assert_eq!(
+        error.message,
+        "sideSource workspacePath conflicts with the requested workspace"
+    );
+    assert!(
+        read_json_lines(&log_path).is_empty(),
+        "a rejected side conversation must not call Codex"
+    );
+}
+
+#[tokio::test]
+async fn runtime_tasks_reject_side_source_without_parent_workspace() {
+    let _lock = env_lock().await;
+    let _home = EnvGuard::set(
+        "WEGENT_EXECUTOR_HOME",
+        &temp_path("runtime-side-missing-workspace-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let _codex_home = EnvGuard::set(
+        "CODEX_HOME",
+        &temp_path("runtime-side-missing-workspace-codex-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let log_path = temp_path("runtime-side-missing-workspace-log", "jsonl");
+    let fake_codex = write_fake_codex(&log_path);
+    let handler = RuntimeWorkRpcHandler::new("device-1", fake_codex.display().to_string());
+
+    let error = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.create",
+            "payload": {
+                "taskId": "side-chat-missing-workspace",
+                "workspacePath": "/tmp/fallback-project",
+                "message": "quick side question",
+                "ephemeral": true,
+                "sideSource": {
+                    "deviceId": "device-1",
+                    "taskId": "main-task-1",
+                    "runtimeHandle": {
+                        "threadId": "parent-thread-1"
+                    }
+                },
+                "executionRequest": {
+                    "task_id": "side-chat-missing-workspace",
+                    "subtask_id": "side-turn-missing-workspace",
+                    "prompt": "quick side question",
+                    "project_workspace_path": "/tmp/fallback-project",
+                    "ephemeral": true,
+                    "bot": [{"shell_type": "ClaudeCode"}],
+                    "model_config": {
+                        "model": "openai",
+                        "model_id": "gpt-5.5",
+                        "api_format": "responses"
+                    }
+                }
+            }
+        }))
+        .await
+        .expect_err("side source without its parent workspace should be rejected");
+
+    assert_eq!(error.code, "bad_request");
+    assert_eq!(error.message, "sideSource workspacePath is required");
+    assert!(
+        read_json_lines(&log_path).is_empty(),
+        "a rejected side conversation must not call Codex"
+    );
+}
+
+#[tokio::test]
+async fn runtime_tasks_fork_completed_turn_preserves_workspace_model_and_rejects_missing_turn() {
+    assert_runtime_tasks_fork_completed_turn(false, false).await;
+}
+
+#[tokio::test]
+async fn runtime_tasks_fork_preserves_created_task_when_transcript_fails() {
+    assert_runtime_tasks_fork_completed_turn(true, false).await;
+}
+
+#[tokio::test]
+async fn runtime_tasks_fork_cloud_model_without_a_registered_source_route() {
+    assert_runtime_tasks_fork_completed_turn(false, true).await;
+}
+
+async fn assert_runtime_tasks_fork_completed_turn(fail_transcript: bool, cloud_model: bool) {
     let _lock = env_lock().await;
     let _home = EnvGuard::set(
         "WEGENT_EXECUTOR_HOME",
@@ -950,8 +1098,18 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
             .display()
             .to_string(),
     );
+    let _wework_codex_home = EnvGuard::set(
+        "WEGENT_CODEX_HOME",
+        &temp_path("runtime-fork-wework-codex-home", "dir")
+            .display()
+            .to_string(),
+    );
     let log_path = temp_path("runtime-fork-turn-log", "jsonl");
     let fake_codex = write_fake_codex(&log_path);
+    if fail_transcript {
+        fs::write(format!("{}.fail-fork-read", log_path.display()), "fail")
+            .expect("fork read failure marker should be written");
+    }
     let handler = RuntimeWorkRpcHandler::new("device-1", fake_codex.display().to_string());
 
     let created = handler
@@ -970,12 +1128,30 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
     wait_for_thread_mapping(&handler, "source-task-1", "thread-1").await;
     wait_until_task_idle(&handler, "source-task-1").await;
 
+    let fork_model_config = if cloud_model {
+        json!({
+            "model": "openai",
+            "model_id": "gpt-5.6-sol",
+            "base_url": "https://cloud-model.example/v1",
+            "api_key": "test-cloud-key",
+            "api_format": "responses",
+            "codex_responses_compat_proxy": true
+        })
+    } else {
+        json!({ "model": "openai", "model_id": "gpt-5.6-sol" })
+    };
     let forked = handler
         .handle_runtime_rpc(json!({
             "method": "runtime.tasks.fork_at_turn",
             "payload": {
                 "taskId": "source-task-1",
-                "lastTurnId": "turn-1"
+                "lastTurnId": "turn-1",
+                "modelSelection": {
+                    "modelName": "gpt-5.6-sol",
+                    "modelType": "runtime",
+                    "options": {"reasoning": "high"}
+                },
+                "modelConfig": fork_model_config
             }
         }))
         .await
@@ -985,6 +1161,15 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
     assert_eq!(forked["source"]["workspacePath"], "/tmp/project");
     assert_eq!(forked["target"]["taskId"], "thread-fork-1");
     assert_eq!(forked["target"]["workspacePath"], "/tmp/project");
+    if fail_transcript {
+        assert!(forked["transcript"].is_null());
+        assert!(forked["setupError"]
+            .as_str()
+            .is_some_and(|error| error.contains("fork transcript unavailable")));
+    } else {
+        assert!(forked["transcript"].is_object());
+        assert!(forked["setupError"].is_null());
+    }
 
     let listed = handler
         .handle_runtime_rpc(json!({"method": "runtime.tasks.list", "payload": {}}))
@@ -997,6 +1182,18 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
     assert!(tasks
         .iter()
         .all(|task| task["workspacePath"] == "/tmp/project"));
+    let forked_task = tasks
+        .iter()
+        .find(|task| task["taskId"] == "thread-fork-1")
+        .expect("forked task should be listed");
+    assert_eq!(
+        forked_task["runtimeHandle"]["executionRequest"]["model_config"]["model_id"],
+        "gpt-5.6-sol"
+    );
+    assert_eq!(
+        forked_task["runtimeHandle"]["modelSelection"]["modelName"],
+        "gpt-5.6-sol"
+    );
 
     let calls = read_json_lines(&log_path);
     let fork_call = calls
@@ -1005,6 +1202,73 @@ async fn runtime_tasks_fork_completed_turn_preserves_workspace_and_rejects_missi
         .expect("turn-bounded thread/fork should be called");
     assert_eq!(fork_call["params"]["threadId"], "thread-1");
     assert_eq!(fork_call["params"]["cwd"], "/tmp/project");
+    assert_eq!(fork_call["params"]["model"], "gpt-5.6-sol");
+    assert_eq!(
+        fork_call["params"]["modelProvider"],
+        if cloud_model {
+            "wework-router"
+        } else {
+            "openai"
+        }
+    );
+    assert_eq!(fork_call["params"]["excludeTurns"], true);
+
+    let mut follow_up_request = if cloud_model {
+        execution_request_with_model_config("follow up", "/tmp/project", fork_model_config)
+    } else {
+        codex_execution_request("follow up", "/tmp/project", "gpt-5.5")
+    };
+    follow_up_request["task_id"] = json!("thread-fork-1");
+    let follow_up = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.send",
+            "payload": {
+                "taskId": "thread-fork-1",
+                "workspacePath": "/tmp/project",
+                "message": "follow up",
+                "executionRequest": follow_up_request
+            }
+        }))
+        .await
+        .expect("fork follow-up should be accepted");
+    assert_eq!(follow_up["accepted"], true);
+    wait_for_turn_count(&log_path, 2).await;
+    wait_until_task_idle(&handler, "thread-fork-1").await;
+
+    let calls = read_json_lines(&log_path);
+    let resume_call = calls
+        .iter()
+        .find(|call| {
+            call["method"] == "thread/resume" && call["params"]["threadId"] == "thread-fork-1"
+        })
+        .expect("fork follow-up should resume the forked thread");
+    assert_eq!(
+        resume_call["params"]["model"],
+        if cloud_model {
+            "gpt-5.6-sol"
+        } else {
+            "gpt-5.5"
+        }
+    );
+    assert_eq!(
+        resume_call["params"]["modelProvider"],
+        if cloud_model {
+            "wework-router"
+        } else {
+            "openai"
+        }
+    );
+    if cloud_model {
+        let fork_proxy_url = fork_call["params"]["config"]
+            ["model_providers.wework-router.base_url"]
+            .as_str()
+            .expect("cloud fork should configure an authenticated proxy route");
+        assert_eq!(
+            resume_call["params"]["config"]["model_providers.wework-router.base_url"].as_str(),
+            Some(fork_proxy_url),
+            "fork follow-up should reuse its own authenticated route"
+        );
+    }
 
     let missing = handler
         .handle_runtime_rpc(json!({
@@ -1360,6 +1624,112 @@ async fn runtime_tasks_keep_subscription_between_turns_and_release_it_on_archive
         .expect("archive should succeed");
     assert_eq!(archived["success"], true);
     wait_for_method_count(&log_path, "thread/unsubscribe", 1).await;
+}
+
+#[tokio::test]
+async fn runtime_tasks_reload_a_generic_codex_thread_when_project_space_is_bound() {
+    let _lock = env_lock().await;
+    let _home = EnvGuard::set(
+        "WEGENT_EXECUTOR_HOME",
+        &temp_path("runtime-project-space-upgrade-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let _codex_home = EnvGuard::set(
+        "CODEX_HOME",
+        &temp_path("runtime-project-space-upgrade-codex-home", "dir")
+            .display()
+            .to_string(),
+    );
+    let log_path = temp_path("runtime-project-space-upgrade-log", "jsonl");
+    let fake_codex = write_fake_codex_persistent_two_turns(&log_path);
+    let handler = RuntimeWorkRpcHandler::new("device-1", fake_codex.display().to_string());
+
+    handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.create",
+            "payload": {
+                "taskId": "local-task-project-space-upgrade",
+                "workspacePath": "/tmp/project",
+                "message": "first turn",
+                "executionRequest": {
+                    "task_id": 5201,
+                    "subtask_id": 6201,
+                    "prompt": "first turn",
+                    "project_workspace_path": "/tmp/project",
+                    "bot": [{"shell_type": "ClaudeCode"}],
+                    "model_config": {
+                        "model": "openai",
+                        "model_id": "gpt-5.5",
+                        "api_format": "responses"
+                    }
+                }
+            }
+        }))
+        .await
+        .expect("generic task creation should be accepted");
+    wait_for_thread_mapping(
+        &handler,
+        "local-task-project-space-upgrade",
+        "thread-persistent",
+    )
+    .await;
+    wait_until_task_idle(&handler, "local-task-project-space-upgrade").await;
+
+    let sent = handler
+        .handle_runtime_rpc(json!({
+            "method": "runtime.tasks.send",
+            "payload": {
+                "taskId": "local-task-project-space-upgrade",
+                "workspacePath": "/tmp/project",
+                "message": "read the bound Issue attachment",
+                "executionRequest": {
+                    "task_id": 5201,
+                    "subtask_id": 6202,
+                    "prompt": "read the bound Issue attachment",
+                    "project_workspace_path": "/tmp/project",
+                    "origin": {
+                        "type": "board_task",
+                        "projectStore": "local",
+                        "cloudProjectId": "space-1",
+                        "loopItemId": "issue-1"
+                    },
+                    "bot": [{"shell_type": "ClaudeCode"}],
+                    "model_config": {
+                        "model": "openai",
+                        "model_id": "gpt-5.5",
+                        "api_format": "responses"
+                    }
+                }
+            }
+        }))
+        .await
+        .expect("bound follow-up should be accepted");
+    assert_eq!(sent["accepted"], true);
+    wait_for_turn_count(&log_path, 2).await;
+    wait_until_task_idle(&handler, "local-task-project-space-upgrade").await;
+
+    let calls = read_json_lines(&log_path);
+    let unsubscribe_index = calls
+        .iter()
+        .position(|call| call["method"] == "thread/unsubscribe")
+        .expect("the retained generic-thread subscription should be released");
+    let resume_index = calls
+        .iter()
+        .position(|call| call["method"] == "thread/resume")
+        .expect("the bound task should resume its Codex thread");
+    assert!(
+        unsubscribe_index < resume_index,
+        "the thread must be unsubscribed before resume applies the project-space override"
+    );
+    let resume_call = &calls[resume_index];
+    assert_eq!(
+        resume_call["params"]["config"]["mcp_servers.wework_space.enabled"],
+        true
+    );
+    assert!(resume_call["params"]["developerInstructions"]
+        .as_str()
+        .is_some_and(|instructions| instructions.contains("Wework 项目空间 routing:")));
 }
 
 #[tokio::test]
@@ -3745,7 +4115,7 @@ async fn runtime_tasks_send_recovers_thread_from_unique_workspace_when_visible_t
         .iter()
         .find(|call| call["method"] == "thread/list")
         .expect("send should recover from thread list");
-    assert_eq!(list["params"]["sortKey"], "updated_at");
+    assert_eq!(list["params"]["sortKey"], "recency_at");
     let resume = calls
         .iter()
         .find(|call| call["method"] == "thread/resume")
@@ -3824,6 +4194,7 @@ fn write_fake_codex(log_path: &Path) -> PathBuf {
         r#"#!/bin/sh
 LOG_PATH='{}'
 turn_count=0
+active_thread_id=thread-1
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$LOG_PATH"
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -3837,6 +4208,14 @@ while IFS= read -r line; do
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"data":[{{"id":"thread-1","cwd":"/tmp/project","name":"Runtime task","preview":"runtime","path":"/tmp/codex/thread-1.jsonl","createdAt":1780000000,"updatedAt":1780000060,"status":"idle","turns":[]}}],"nextCursor":null,"backwardsCursor":null}}}}'
       ;;
     *'"method":"thread/read"'*)
+      case "$line" in
+        *'"threadId":"thread-fork-1"'*)
+          if [ -f "$LOG_PATH.fail-fork-read" ]; then
+            printf '%s\n' '{{"id":'"$request_id"',"error":{{"code":-32603,"message":"fork transcript unavailable"}}}}'
+            continue
+          fi
+          ;;
+      esac
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1","cwd":"/tmp/project","name":"Runtime task","preview":"runtime","path":"/tmp/codex/thread-1.jsonl","createdAt":1780000000,"updatedAt":1780000060,"status":"idle","turns":[]}}}}}}'
       ;;
     *'"method":"thread/turns/list"'*)
@@ -3852,7 +4231,15 @@ while IFS= read -r line; do
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"status":"unsubscribed"}}}}'
       ;;
     *'"method":"thread/resume"'*)
-      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1"}}}}}}'
+      case "$line" in
+        *'"threadId":"thread-fork-1"'*)
+          active_thread_id=thread-fork-1
+          ;;
+        *)
+          active_thread_id=thread-1
+          ;;
+      esac
+      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"'"$active_thread_id"'"}}}}}}'
       ;;
     *'"method":"thread/fork"'*)
       case "$line" in
@@ -3860,6 +4247,7 @@ while IFS= read -r line; do
           printf '%s\n' '{{"id":'"$request_id"',"error":{{"code":-32602,"message":"fork turn was not found"}}}}'
           ;;
         *'"lastTurnId":"turn-1"'*)
+          active_thread_id=thread-fork-1
           printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-fork-1"}}}}}}'
           ;;
         *)
@@ -3883,9 +4271,6 @@ while IFS= read -r line; do
     *'"method":"thread/rollback"'*)
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1"}}}}}}'
       ;;
-    *'"method":"thread/resume"'*)
-      printf '%s\n' '{{"id":'"$request_id"',"result":{{"thread":{{"id":"thread-1"}}}}}}'
-      ;;
     *'"method":"thread/goal/get"'*)
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"goal":null}}}}'
       ;;
@@ -3898,14 +4283,14 @@ while IFS= read -r line; do
       progress_id="progress-$turn_count"
       final_id="final-$turn_count"
       printf '%s\n' '{{"id":'"$request_id"',"result":{{"turn":{{"id":"'"$turn_id"'","status":"inProgress"}}}}}}'
-      printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"thread-1","turn":{{"id":"'"$turn_id"'","status":"inProgress"}}}}}}'
-      printf '%s\n' '{{"method":"item/started","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","item":{{"id":"'"$progress_id"'","type":"agentMessage","phase":"commentary"}}}}}}'
-      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","itemId":"'"$progress_id"'","delta":"Inspecting "}}}}'
-      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","itemId":"'"$progress_id"'","delta":"workspace."}}}}'
-      printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","item":{{"id":"'"$progress_id"'","type":"agentMessage","text":"Inspecting workspace.","phase":"commentary"}}}}}}'
-      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","itemId":"'"$final_id"'","delta":"done","phase":"finalAnswer"}}}}'
-      printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thread-1","turnId":"'"$turn_id"'","item":{{"id":"'"$final_id"'","type":"agentMessage","text":"done","phase":"finalAnswer"}}}}}}'
-      printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thread-1","turn":{{"id":"'"$turn_id"'","status":"completed"}}}}}}'
+      printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"'"$active_thread_id"'","turn":{{"id":"'"$turn_id"'","status":"inProgress"}}}}}}'
+      printf '%s\n' '{{"method":"item/started","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","item":{{"id":"'"$progress_id"'","type":"agentMessage","phase":"commentary"}}}}}}'
+      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","itemId":"'"$progress_id"'","delta":"Inspecting "}}}}'
+      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","itemId":"'"$progress_id"'","delta":"workspace."}}}}'
+      printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","item":{{"id":"'"$progress_id"'","type":"agentMessage","text":"Inspecting workspace.","phase":"commentary"}}}}}}'
+      printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","itemId":"'"$final_id"'","delta":"done","phase":"finalAnswer"}}}}'
+      printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"'"$active_thread_id"'","turnId":"'"$turn_id"'","item":{{"id":"'"$final_id"'","type":"agentMessage","text":"done","phase":"finalAnswer"}}}}}}'
+      printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"'"$active_thread_id"'","turn":{{"id":"'"$turn_id"'","status":"completed"}}}}}}'
       ;;
   esac
 done

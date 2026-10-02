@@ -59,6 +59,9 @@ class FakeWebContents extends EventEmitter {
     canGoForward: vi.fn(() => false),
     goBack: vi.fn(),
     goForward: vi.fn(),
+    getActiveIndex: vi.fn(() => 0),
+    getEntryAtIndex: vi.fn(() => ({ url: 'about:blank' })),
+    removeEntryAtIndex: vi.fn(() => true),
   }
   private destroyed = false
   private url = 'about:blank'
@@ -301,6 +304,46 @@ describe('EmbeddedBrowserManager lifecycle', () => {
     await rm(directory, { recursive: true, force: true })
   })
 
+  test('waits for a replacement webview before completing a close request', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
+    const events: BrowserHostEvent[] = []
+    const manager = new EmbeddedBrowserManager(directory, event => events.push(event))
+    const contents = new FakeWebContents()
+    contents.loadURL.mockImplementation(async url => {
+      contents.commitUrl(url)
+    })
+    manager.attach('workspace-browser', contents as unknown as WebContents)
+    await manager.open({
+      label: 'workspace-browser',
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      visible: true,
+      navigateExisting: true,
+    })
+
+    let closeCompleted = false
+    const closeRequest = manager.requestClose('workspace-browser').then(() => {
+      closeCompleted = true
+    })
+    await Promise.resolve()
+
+    expect(closeCompleted).toBe(false)
+    expect(contents.close).toHaveBeenCalledOnce()
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'close-request',
+        payload: expect.objectContaining({ label: 'workspace-browser' }),
+      })
+    )
+
+    const replacement = new FakeWebContents()
+    manager.attach('workspace-browser', replacement as unknown as WebContents)
+    await closeRequest
+
+    expect(closeCompleted).toBe(true)
+    await rm(directory, { recursive: true, force: true })
+  })
+
   test('ignores aborted load rejections instead of recording a navigation error', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
     const manager = new EmbeddedBrowserManager(directory)
@@ -473,6 +516,56 @@ describe('EmbeddedBrowserManager lifecycle', () => {
     })
     await rm(directory, { recursive: true, force: true })
   })
+
+  test.each(['about:blank', 'https://previous.test/'])(
+    'removes only a bootstrap blank entry from initial history starting at %s',
+    async firstUrl => {
+      const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
+      const manager = new EmbeddedBrowserManager(directory)
+      const contents = new FakeWebContents()
+      contents.loadURL.mockImplementation(async url => {
+        contents.commitUrl(url)
+        contents.emit('did-navigate', {}, url)
+      })
+      manager.attach('workspace-browser', contents as unknown as WebContents)
+      try {
+        await manager.open({
+          label: 'workspace-browser',
+          url: 'about:blank',
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+          visible: true,
+          navigateExisting: true,
+        })
+        expect(contents.navigationHistory.removeEntryAtIndex).not.toHaveBeenCalled()
+        contents.navigationHistory.getActiveIndex.mockReturnValue(1)
+        contents.navigationHistory.getEntryAtIndex.mockReturnValue({ url: firstUrl })
+        contents.navigationHistory.canGoBack.mockReturnValue(true)
+        contents.navigationHistory.removeEntryAtIndex.mockImplementation(() => {
+          contents.navigationHistory.canGoBack.mockReturnValue(false)
+          return true
+        })
+        await manager.navigate('workspace-browser', 'https://first.test/')
+        const blankBootstrap = firstUrl === 'about:blank'
+        expect(contents.navigationHistory.removeEntryAtIndex).toHaveBeenCalledTimes(
+          blankBootstrap ? 1 : 0
+        )
+        if (blankBootstrap) {
+          expect(contents.navigationHistory.removeEntryAtIndex).toHaveBeenCalledWith(0)
+        }
+        expect(manager.state('workspace-browser').canGoBack).toBe(!blankBootstrap)
+
+        contents.navigationHistory.removeEntryAtIndex.mockClear()
+        contents.navigationHistory.canGoBack.mockReturnValue(true)
+        await manager.navigate('workspace-browser', 'https://second.test/')
+        expect(contents.navigationHistory.removeEntryAtIndex).not.toHaveBeenCalled()
+        expect(manager.state('workspace-browser').canGoBack).toBe(true)
+        manager.goBack('workspace-browser')
+        expect(contents.navigationHistory.goBack).toHaveBeenCalledOnce()
+      } finally {
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  )
 
   test('toggles the detached Inspector with a bare F12 keydown', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
@@ -822,6 +915,31 @@ describe('EmbeddedBrowserManager lifecycle', () => {
     await rm(directory, { recursive: true, force: true })
   })
 
+  test('removes active tab routes that point to a closed browser', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
+    const manager = new EmbeddedBrowserManager(directory)
+    const contents = new FakeWebContents()
+    contents.loadURL.mockImplementation(async url => {
+      contents.commitUrl(url)
+    })
+    const firstTaskLabel = 'workspace-browser-task-1'
+    const secondTaskLabel = 'workspace-browser-task-2'
+    manager.attach(secondTaskLabel, contents as unknown as WebContents)
+    await manager.open({
+      label: secondTaskLabel,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      visible: true,
+      navigateExisting: true,
+    })
+    manager.setActiveTab(firstTaskLabel, secondTaskLabel)
+
+    manager.close(secondTaskLabel)
+
+    expect(manager.activeLabel(firstTaskLabel)).toBe(firstTaskLabel)
+    await rm(directory, { recursive: true, force: true })
+  })
+
   test('settles a pending target open when relabeling an attached browser', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
     const manager = new EmbeddedBrowserManager(directory)
@@ -1053,6 +1171,49 @@ describe('EmbeddedBrowserManager lifecycle', () => {
         closedVisible: false,
       })
       expect(contents.openDevTools).toHaveBeenCalledWith({ mode: 'detach', activate: true })
+      expect(contents.closeDevTools).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('allows a detached Inspector to finish a slow native startup', async () => {
+    vi.useFakeTimers()
+    const directory = await mkdtemp(join(tmpdir(), 'wework-browser-manager-'))
+    try {
+      const manager = new EmbeddedBrowserManager(directory)
+      const contents = new FakeWebContents()
+      let inspectorOpened = false
+      contents.loadURL.mockImplementation(async url => {
+        contents.commitUrl(url)
+      })
+      contents.openDevTools.mockImplementation(() => {
+        setTimeout(() => {
+          inspectorOpened = true
+        }, 6_000)
+      })
+      contents.isDevToolsOpened.mockImplementation(() => inspectorOpened)
+      contents.closeDevTools.mockImplementation(() => {
+        inspectorOpened = false
+      })
+      manager.attach('workspace-browser', contents as unknown as WebContents)
+      await manager.open({
+        label: 'workspace-browser',
+        url: 'https://example.test/',
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        visible: true,
+        navigateExisting: true,
+      })
+
+      const verification = manager.verifyDetachedInspector('workspace-browser')
+      await vi.advanceTimersByTimeAsync(8_000)
+
+      await expect(verification).resolves.toMatchObject({
+        visible: true,
+        closedVisible: false,
+      })
+      expect(contents.openDevTools).toHaveBeenCalledOnce()
       expect(contents.closeDevTools).toHaveBeenCalledOnce()
     } finally {
       vi.useRealTimers()

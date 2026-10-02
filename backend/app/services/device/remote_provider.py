@@ -95,6 +95,7 @@ class RemoteDeviceProvider(LocalDeviceProvider):
             ),
             "client_ip": spec.get("clientIp"),
             "runtime_transfer_host": spec.get("runtimeTransferHost"),
+            "runtime_transfer_port": spec.get("runtimeTransferPort"),
             "runtime_instance_id": spec.get("runtimeInstanceId"),
             "app_device_id": spec.get("appDeviceId"),
             "runtime_features": (
@@ -134,7 +135,7 @@ class RemoteDeviceProvider(LocalDeviceProvider):
         redis_keys = [
             self.generate_online_key(user_id, device.name) for device in remote_devices
         ]
-        online_info_map = await cache_manager.mget(redis_keys)
+        online_info_map = await cache_manager.mget_or_raise(redis_keys)
         latest_version = (
             await executor_version_service.get_latest_version()
             or settings.EXECUTOR_LATEST_VERSION
@@ -185,6 +186,7 @@ class RemoteDeviceProvider(LocalDeviceProvider):
                     ),
                     "client_ip": spec.get("clientIp"),
                     "runtime_transfer_host": spec.get("runtimeTransferHost"),
+                    "runtime_transfer_port": spec.get("runtimeTransferPort"),
                     "runtime_instance_id": spec.get("runtimeInstanceId"),
                     "app_device_id": spec.get("appDeviceId"),
                     "runtime_features": (

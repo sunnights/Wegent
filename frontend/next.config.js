@@ -4,6 +4,11 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require('path')
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const fs = require('fs')
+const extensionsDir = fs.existsSync(path.resolve(__dirname, 'wecode/extensions'))
+  ? path.resolve(__dirname, 'wecode/extensions')
+  : path.resolve(__dirname, 'src/extensions')
 
 // Check if running with Turbopack (development mode with --turbopack flag)
 const isTurbopack = process.env.TURBOPACK === '1'
@@ -34,6 +39,7 @@ const nextConfig = {
     '@replit/codemirror-vim',
     'katex',
     '@wegent/chat-core',
+    '@wegent/collaboration',
   ],
   // Webpack configuration for production builds
   // Note: In development mode with Turbopack, this is not used
@@ -49,6 +55,7 @@ const nextConfig = {
           config.resolve.alias = {
             ...config.resolve.alias,
             'remark-gfm': path.resolve(__dirname, 'src/lib/remark-gfm-safe.ts'),
+            '@extensions': extensionsDir,
           }
 
           // Keep Next.js route-aware chunk splitting. A single global vendors

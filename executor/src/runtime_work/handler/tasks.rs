@@ -5,15 +5,149 @@
 use super::*;
 
 impl RuntimeWorkRpcHandler {
+    pub(super) async fn create_collaboration_dispatch(
+        &self,
+        payload: Value,
+    ) -> Result<Value, AppIpcError> {
+        if payload.get("dispatchKind").and_then(Value::as_str) != Some("collaboration_group") {
+            return Err(AppIpcError::new(
+                "bad_request",
+                "collaboration dispatch kind is required",
+            ));
+        }
+        let dispatch_task_id = string_field(&payload, "dispatchTaskId")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AppIpcError::new(
+                    "bad_request",
+                    "collaboration dispatch task identity is required",
+                )
+            })?;
+        let mut manager_request = payload
+            .get("managerRuntimeRequest")
+            .cloned()
+            .filter(Value::is_object)
+            .ok_or_else(|| {
+                AppIpcError::new(
+                    "bad_request",
+                    "collaboration manager Runtime request is required",
+                )
+            })?;
+        let claimed_dispatch_task_id = id_field(&manager_request, "taskId")
+            .or_else(|| id_field(&manager_request, "localTaskId"))
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AppIpcError::new(
+                    "bad_request",
+                    "collaboration manager task identity is required",
+                )
+            })?;
+        if claimed_dispatch_task_id != dispatch_task_id {
+            return Err(AppIpcError::new(
+                "bad_request",
+                "collaboration manager must run inside the claimed dispatch",
+            ));
+        }
+        let manager_task_id = format!("{dispatch_task_id}-manager-initial");
+        let member_profiles = payload
+            .get("memberRuntimeProfiles")
+            .and_then(Value::as_array)
+            .filter(|profiles| !profiles.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                AppIpcError::new(
+                    "bad_request",
+                    "collaboration member Runtime profiles are required",
+                )
+            })?;
+        detach_collaboration_manager_from_backend_execution(&mut manager_request, &manager_task_id);
+        let manager_context = string_field(&manager_request, "message")
+            .or_else(|| string_field(&manager_request, "content"))
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AppIpcError::new("bad_request", "collaboration manager context is required")
+            })?;
+        {
+            let manager_request_object = manager_request
+                .as_object_mut()
+                .expect("validated collaboration manager request");
+            manager_request_object.insert(
+                "collaborationDispatch".to_owned(),
+                json!({"taskId": dispatch_task_id}),
+            );
+            let runtime_handle = manager_request_object
+                .entry("runtimeHandle")
+                .or_insert_with(|| json!({}));
+            if !runtime_handle.is_object() {
+                *runtime_handle = json!({});
+            }
+            runtime_handle
+                .as_object_mut()
+                .expect("collaboration Runtime handle was normalized")
+                .insert(
+                    COLLABORATION_MANAGER_CONTEXT_KEY.to_owned(),
+                    Value::String(manager_context),
+                );
+            runtime_handle
+                .as_object_mut()
+                .expect("collaboration Runtime handle was normalized")
+                .insert(
+                    "collaborationDispatchTaskId".to_owned(),
+                    Value::String(dispatch_task_id),
+                );
+            runtime_handle
+                .as_object_mut()
+                .expect("collaboration Runtime handle was normalized")
+                .insert(
+                    "collaborationMemberRuntimeProfiles".to_owned(),
+                    Value::Array(member_profiles),
+                );
+        }
+        self.create_task(manager_request).await
+    }
+
     pub(super) async fn generate_text(&self, payload: Value) -> Result<Value, AppIpcError> {
         let mut request = execution_request(&payload)
             .ok_or_else(|| AppIpcError::new("bad_request", "executionRequest is required"))?;
         request.ephemeral = true;
-        let turn = self
-            .codex_app_server
-            .run_turn_with_cancel(request, CodexAppServerTurnOptions::default())
-            .await
-            .map_err(|error| AppIpcError::new("model_transport_failed", error))?;
+        let local_task_id = request.task_id.clone();
+        let stream_request = request.clone();
+        let (notification_tx, mut notification_rx) = mpsc::unbounded_channel::<Value>();
+        let mut turn_future = Box::pin(self.codex_app_server.run_turn_with_cancel(
+            request,
+            CodexAppServerTurnOptions {
+                notifications: Some(notification_tx),
+                ..CodexAppServerTurnOptions::default()
+            },
+        ));
+        let mut event_mapper = CodexNotificationEventMapper::default();
+        let result = loop {
+            tokio::select! {
+                result = &mut turn_future => break result,
+                message = notification_rx.recv() => {
+                    let Some(message) = message else {
+                        break turn_future.await;
+                    };
+                    event_mapper.map(
+                        &self.event_tx,
+                        &self.device_id,
+                        &local_task_id,
+                        &stream_request,
+                        message,
+                    );
+                }
+            }
+        };
+        while let Ok(message) = notification_rx.try_recv() {
+            event_mapper.map(
+                &self.event_tx,
+                &self.device_id,
+                &local_task_id,
+                &stream_request,
+                message,
+            );
+        }
+        let turn = result.map_err(|error| AppIpcError::new("model_transport_failed", error))?;
         match turn.outcome {
             ExecutionOutcome::Completed { content } => Ok(json!({"content": content})),
             ExecutionOutcome::Failed { message } => {
@@ -214,16 +348,23 @@ impl RuntimeWorkRpcHandler {
                 ("last_turn_id", last_turn_id.clone()),
             ],
         );
+        let mut source_for_fork = source.clone();
+        set_runtime_handle_model_selection(&mut source_for_fork.runtime_handle, &payload);
+        let mut request = runtime_event_request_from_link(&source_for_fork);
+        apply_runtime_payload_metadata(&mut request, &payload);
+        if let Some(model_config) = payload
+            .get("modelConfig")
+            .or_else(|| payload.get("model_config"))
+            .filter(|value| value.is_object())
+            .cloned()
+        {
+            request.model_config = model_config;
+        }
+        store_runtime_execution_request(&mut source_for_fork.runtime_handle, &request);
+        self.ensure_notification_router().await;
         let response = match self
-            .call_codex_thread_method(
-                "thread/fork",
-                json!({
-                    "threadId": source_thread_id,
-                    "lastTurnId": last_turn_id,
-                    "cwd": source.workspace_path,
-                    "excludeTurns": true,
-                }),
-            )
+            .codex_app_server
+            .fork_thread_at(&source_thread_id, None, &last_turn_id, &request)
             .await
         {
             Ok(response) => response,
@@ -247,9 +388,9 @@ impl RuntimeWorkRpcHandler {
         let local_task_id = thread_id.clone();
         let title = string_field(&payload, "title").unwrap_or_else(|| source.title.clone());
         let link = forked_task_link(
-            &source,
+            &source_for_fork,
             local_task_id.clone(),
-            thread_id,
+            thread_id.clone(),
             title,
             json!({
                 "taskId": source.local_task_id,
@@ -258,6 +399,20 @@ impl RuntimeWorkRpcHandler {
             }),
         );
         self.upsert_local_task(link);
+        let (transcript, setup_error) =
+            match self.transcript(json!({ "taskId": local_task_id })).await {
+                Ok(transcript) => (Some(transcript), None),
+                Err(error) => {
+                    log_executor_event(
+                        "runtime task fork transcript failed",
+                        &[
+                            ("target_task_id", local_task_id.clone()),
+                            ("error", error.message.clone()),
+                        ],
+                    );
+                    (None, Some(error.message))
+                }
+            };
         log_executor_event(
             "runtime task fork completed",
             &[
@@ -279,6 +434,8 @@ impl RuntimeWorkRpcHandler {
                 "workspacePath": source.workspace_path,
             },
             "runtime": "codex",
+            "transcript": transcript,
+            "setupError": setup_error,
         }))
     }
 
@@ -318,6 +475,9 @@ impl RuntimeWorkRpcHandler {
         } else {
             "codex".to_owned()
         };
+        let force_start = bool_field(&payload, "forceStart")
+            .or_else(|| bool_field(&payload, "force_start"))
+            .unwrap_or(false);
         let local_task_id = id_field(&payload, "taskId")
             .or_else(|| id_field(&payload, "task_id"))
             .unwrap_or_else(|| format!("{runtime}-local-{}", now_ms()));
@@ -328,7 +488,11 @@ impl RuntimeWorkRpcHandler {
         let mut request = execution_request(&payload)
             .ok_or_else(|| AppIpcError::new("bad_request", "executionRequest is required"))?;
         apply_runtime_payload_metadata(&mut request, &payload);
+        if is_claude_runtime(&runtime) {
+            ensure_claude_execution_identity(&local_task_id, &mut request);
+        }
         set_runtime_task_title(&mut request, &title);
+        self.retain_runtime_model_config(&local_task_id, &request.model_config);
         log_executor_event(
             "runtime task create identity",
             &[
@@ -383,6 +547,25 @@ impl RuntimeWorkRpcHandler {
             .get("workspaceSourceTask")
             .or_else(|| payload.get("workspace_source_task"))
             .and_then(Value::as_object);
+        let mut side_source = side_source_thread(&payload)?;
+        let side_source_workspace_path = side_source
+            .as_ref()
+            .map(|source| source.workspace_path.clone());
+        if let Some(source_workspace_path) = side_source_workspace_path.as_deref() {
+            for requested_workspace_path in [payload_workspace_path.as_deref(), request.cwd()]
+                .into_iter()
+                .flatten()
+            {
+                if normalize_workspace_path(requested_workspace_path)
+                    != normalize_workspace_path(source_workspace_path)
+                {
+                    return Err(AppIpcError::new(
+                        "bad_request",
+                        "sideSource workspacePath conflicts with the requested workspace",
+                    ));
+                }
+            }
+        }
         let inherited_workspace_path = if let Some(source) = workspace_source_task {
             let source_device_id = source
                 .get("deviceId")
@@ -417,7 +600,8 @@ impl RuntimeWorkRpcHandler {
         } else {
             None
         };
-        let source_workspace_path = payload_workspace_path
+        let source_workspace_path = side_source_workspace_path
+            .or(payload_workspace_path)
             .or(inherited_workspace_path)
             .or_else(|| request.cwd().map(str::to_owned))
             .or_else(|| {
@@ -464,7 +648,9 @@ impl RuntimeWorkRpcHandler {
                 );
                 AppIpcError::new("bad_request", "workspacePath is required")
             })?;
-        let workspace_path = if request.workspace_source.as_deref() == Some("git_worktree") {
+        let workspace_path = if side_source.is_none()
+            && request.workspace_source.as_deref() == Some("git_worktree")
+        {
             let git_ref = payload
                 .get("execution")
                 .and_then(|execution| execution.get("workspace"))
@@ -530,6 +716,7 @@ impl RuntimeWorkRpcHandler {
         link.project_instructions = request.system_prompt.clone();
         link.project_plugin_ids = project_plugin_ids(&request);
         set_runtime_handle_model_selection(&mut link.runtime_handle, &payload);
+        store_runtime_execution_request(&mut link.runtime_handle, &request);
         if let (Some(runtime_handle), Some(payload_handle)) = (
             link.runtime_handle.as_object_mut(),
             payload
@@ -537,7 +724,12 @@ impl RuntimeWorkRpcHandler {
                 .or_else(|| payload.get("runtime_handle"))
                 .and_then(Value::as_object),
         ) {
-            for key in ["wegentTeam"] {
+            for key in [
+                "wegentTeam",
+                COLLABORATION_MANAGER_CONTEXT_KEY,
+                "collaborationDispatchTaskId",
+                "collaborationMemberRuntimeProfiles",
+            ] {
                 if let Some(value) = payload_handle.get(key) {
                     runtime_handle.insert(key.to_owned(), value.clone());
                 }
@@ -607,13 +799,15 @@ impl RuntimeWorkRpcHandler {
         self.schedule_worktree_prune();
         if is_claude_runtime(&runtime) {
             self.prepare_claude_goal(&local_task_id, &mut request, &payload);
-            if let Err(error) = self.spawn_claude_turn(local_task_id.clone(), request).await {
+            if let Err(error) = self
+                .spawn_claude_turn(local_task_id.clone(), request, force_start)
+                .await
+            {
                 self.retain_failed_runtime_task(&local_task_id, &error);
                 return Err(error);
             }
         } else {
             let initial_thread_goal = initial_thread_goal_from_payload(&payload);
-            let mut side_source = side_source_thread(&payload);
             if let Some(source) = &mut side_source {
                 self.wait_for_running_side_source_turn(&source.thread_id)
                     .await;
@@ -621,20 +815,24 @@ impl RuntimeWorkRpcHandler {
                     source.thread_path = self.thread_path_for_id(&source.thread_id).await;
                 }
             }
-            if let Err(error) = self
-                .spawn_turn(SpawnTurnRequest {
-                    local_task_id: local_task_id.clone(),
-                    runtime: "codex".to_owned(),
-                    request,
-                    direct_thread_id: None,
-                    fork_thread_id: side_source.as_ref().map(|source| source.thread_id.clone()),
-                    fork_thread_path: side_source.and_then(|source| source.thread_path),
-                    resume_thread_id: None,
-                    initial_thread_goal,
-                })
-                .await
-            {
+            let turn = SpawnTurnRequest {
+                local_task_id: local_task_id.clone(),
+                runtime: "codex".to_owned(),
+                request,
+                direct_thread_id: None,
+                fork_thread_id: side_source.as_ref().map(|source| source.thread_id.clone()),
+                fork_thread_path: side_source.and_then(|source| source.thread_path),
+                resume_thread_id: None,
+                initial_thread_goal,
+            };
+            let spawn_result = if force_start {
+                self.spawn_forced_turn(turn).await
+            } else {
+                self.spawn_turn(turn).await
+            };
+            if let Err(error) = spawn_result {
                 self.retain_failed_runtime_task(&local_task_id, &error);
+                self.forget_runtime_model_config(&local_task_id);
                 self.supervisor_model_configs
                     .lock()
                     .expect("supervisor model config map lock should not be poisoned")
@@ -887,6 +1085,13 @@ impl RuntimeWorkRpcHandler {
             .or_else(|| string_field(&payload, "runtime"))
             .unwrap_or_else(|| "codex".to_owned());
         if is_claude_runtime(&runtime) {
+            ensure_claude_execution_identity(&local_task_id, &mut request);
+            if let Some(session) = existing_link
+                .as_ref()
+                .and_then(|link| link.runtime_handle.get("executorSession"))
+            {
+                request.inherited_sessions.insert(0, session.clone());
+            }
             if request.extra.get("runtime_executable_path").is_none() {
                 if let Some(executable_path) = existing_link
                     .as_ref()
@@ -911,7 +1116,7 @@ impl RuntimeWorkRpcHandler {
             }
             self.prepare_claude_goal(&local_task_id, &mut request, &payload);
             self.prepare_claude_send(&local_task_id, &workspace_path, &request, &payload);
-            self.spawn_claude_turn(local_task_id.clone(), request)
+            self.spawn_claude_turn(local_task_id.clone(), request, false)
                 .await?;
             let queue_position = self
                 .queued_local_task_position(&local_task_id)
@@ -976,6 +1181,9 @@ impl RuntimeWorkRpcHandler {
             &request,
             &payload,
         );
+        self.store.update_task(&local_task_id, |link| {
+            store_runtime_execution_request(&mut link.runtime_handle, &request);
+        });
         if let Some(turn_id) = retry_source_turn_id(&payload) {
             self.record_superseded_runtime_transcript_turn(&local_task_id, &turn_id);
         }
@@ -1527,6 +1735,7 @@ impl RuntimeWorkRpcHandler {
                 "runtime": "codex",
             }));
         }
+        self.set_interaction_status(local_task_id, None);
         Ok(json!({
             "success": true,
             "accepted": true,
@@ -1548,13 +1757,7 @@ impl RuntimeWorkRpcHandler {
     ) -> Result<Value, AppIpcError> {
         let local_task_id = runtime_task_id(&payload)
             .ok_or_else(|| AppIpcError::new("bad_request", "taskId is required"))?;
-        let link = self
-            .store
-            .update_task(&local_task_id, |link| {
-                link.updated_at = now_ms();
-                link.completed_at = Some(link.updated_at);
-            })
-            .or_else(|| self.local_task_link(&local_task_id));
+        let link = self.local_task_link(&local_task_id);
         let thread_id = link.as_ref().and_then(runtime_session_id_from_link);
         let is_codex = link
             .as_ref()
@@ -1853,6 +2056,51 @@ impl RuntimeWorkRpcHandler {
     }
 }
 
+fn detach_collaboration_manager_from_backend_execution(
+    manager_request: &mut Value,
+    manager_task_id: &str,
+) {
+    let Some(request) = manager_request.as_object_mut() else {
+        return;
+    };
+    request.insert(
+        "taskId".to_owned(),
+        Value::String(manager_task_id.to_owned()),
+    );
+    request.insert(
+        "localTaskId".to_owned(),
+        Value::String(manager_task_id.to_owned()),
+    );
+    if let Some(origin) = request.get_mut("origin").and_then(Value::as_object_mut) {
+        origin.remove("executionId");
+        origin.remove("execution_id");
+    }
+    let execution_request = if request.contains_key("executionRequest") {
+        request.get_mut("executionRequest")
+    } else {
+        request.get_mut("execution_request")
+    };
+    if let Some(execution_request) = execution_request.and_then(Value::as_object_mut) {
+        execution_request.insert(
+            "task_id".to_owned(),
+            Value::String(manager_task_id.to_owned()),
+        );
+        execution_request.insert(
+            "subtask_id".to_owned(),
+            Value::String(format!("{manager_task_id}-initial")),
+        );
+        if let Some(origin) = execution_request
+            .get_mut("extra")
+            .and_then(Value::as_object_mut)
+            .and_then(|extra| extra.get_mut("origin"))
+            .and_then(Value::as_object_mut)
+        {
+            origin.remove("executionId");
+            origin.remove("execution_id");
+        }
+    }
+}
+
 pub(super) fn forked_task_link(
     source: &RuntimeTaskLink,
     local_task_id: String,
@@ -1872,6 +2120,20 @@ pub(super) fn forked_task_link(
     link.runtime_workspace_roots = source.runtime_workspace_roots.clone();
     link.project_instructions = source.project_instructions.clone();
     link.project_plugin_ids = source.project_plugin_ids.clone();
+    if let Some(execution_request) = source
+        .runtime_handle
+        .get("executionRequest")
+        .or_else(|| source.runtime_handle.get("execution_request"))
+    {
+        link.runtime_handle["executionRequest"] = execution_request.clone();
+    }
+    if let Some(model_selection) = source
+        .runtime_handle
+        .get("modelSelection")
+        .or_else(|| source.runtime_handle.get("model_selection"))
+    {
+        link.runtime_handle["modelSelection"] = model_selection.clone();
+    }
     link
 }
 

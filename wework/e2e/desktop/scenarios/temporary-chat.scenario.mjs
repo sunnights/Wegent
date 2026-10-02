@@ -5,6 +5,7 @@ import { join } from 'node:path'
 const ACTIVE_SURFACE = '[data-workspace-tab-content][aria-hidden="false"]'
 const MAIN_COMPOSER = `${ACTIVE_SURFACE} [data-testid="desktop-empty-composer-frame"] [data-testid="chat-message-input"]`
 const SIDE_CHAT = `${ACTIVE_SURFACE} [data-testid="right-workspace-chat-panel"]`
+const SIDE_SCROLL = `${SIDE_CHAT} [data-testid="right-workspace-chat-scroll-area"]`
 const SIDE_COMPOSER = `${SIDE_CHAT} [data-testid="chat-message-input"]`
 const SOURCE_PROMPT = 'TEMPORARY_CHAT_SOURCE_CONVERSATION'
 const SOURCE_COMPLETION = 'TEMPORARY_CHAT_SOURCE_COMPLETE'
@@ -12,6 +13,74 @@ const INITIAL_PROMPT = 'TEMPORARY_CHAT_INITIAL_MESSAGE'
 const INITIAL_COMPLETION = 'TEMPORARY_CHAT_INITIAL_COMPLETE'
 const FOLLOW_UP_PROMPT = 'TEMPORARY_CHAT_DIRECT_FOLLOW_UP'
 const FOLLOW_UP_COMPLETION = 'TEMPORARY_CHAT_FOLLOW_UP_COMPLETE'
+const ATTACHMENT_FILENAME = 'clipboard-text-narrow-chat.txt'
+const ATTACHMENT_TEXT = JSON.stringify({
+  cardInstanceId: '501435'.repeat(20),
+  content: 'Long attachment preview in a narrow chat '.repeat(20),
+})
+
+async function waitForRightPanelWidth(control, predicate, message, timeoutMs) {
+  const selector = `${ACTIVE_SURFACE} [data-testid="right-workspace-panel-shell"]`
+  const startedAt = Date.now()
+  let lastWidth = null
+  while (Date.now() - startedAt < timeoutMs) {
+    const [metrics] = JSON.parse(await control.command('getElementMetrics', selector))
+    lastWidth = metrics?.width ?? null
+    if (typeof lastWidth === 'number' && predicate(lastWidth)) return lastWidth
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  throw new Error(`${message}: observed=${lastWidth}`)
+}
+
+async function narrowSideChatPanel(control, timeoutMs) {
+  const panelSelector = `${ACTIVE_SURFACE} [data-testid="right-workspace-panel-shell"]`
+  await control.command('waitFor', '[data-testid="right-workspace-resize-handle"]', {
+    timeoutMs,
+  })
+  const [panel] = JSON.parse(await control.command('getElementMetrics', panelSelector))
+  assert.ok(panel, 'The right workspace panel was not measurable before narrowing')
+  const targetWidth = 320
+  if (panel.width <= targetWidth + 1) return panel.width
+  await control.command('dragBy', '[data-testid="right-workspace-resize-handle"]', {
+    value: JSON.stringify({ x: Math.max(1, Math.round(panel.width - targetWidth)), y: 0 }),
+  })
+  return waitForRightPanelWidth(
+    control,
+    width => width <= targetWidth + 8,
+    'The temporary-chat side panel did not narrow for attachment regression',
+    timeoutMs
+  )
+}
+
+async function assertTextAttachmentFits(control, timeoutMs) {
+  const attachmentSelector = `${SIDE_CHAT} [data-testid="message-text-attachment"]`
+  await control.command('waitFor', attachmentSelector, {
+    visible: true,
+    stableMs: 500,
+    timeoutMs,
+  })
+  const [attachment] = JSON.parse(await control.command('getElementMetrics', attachmentSelector))
+  const [message] = JSON.parse(
+    await control.command(
+      'getElementMetrics',
+      `${SIDE_CHAT} [data-testid="message-user"] [data-testid="message-hover-region"]`
+    )
+  )
+  const [preview] = JSON.parse(
+    await control.command(
+      'getElementMetrics',
+      `${attachmentSelector} [data-testid="message-text-attachment-preview"]`
+    )
+  )
+  assert.ok(attachment && message && preview, 'The sent text attachment was not measurable')
+  assert.ok(
+    attachment.left >= message.left - 1 && attachment.right <= message.right + 1,
+    `The sent text attachment overflowed its message: ${JSON.stringify({ attachment, message })}`
+  )
+  assert.ok(attachment.width <= 360, 'The text attachment exceeded its desktop width limit')
+  assert.ok(preview.scrollWidth > preview.clientWidth, 'The long text preview did not truncate')
+  return attachment.width
+}
 
 function sse(events) {
   return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
@@ -190,6 +259,22 @@ async function waitForThinkingToSettle(control, timeoutMs) {
     await new Promise(resolve => setTimeout(resolve, 100))
   }
   throw new Error('The temporary-chat response did not settle before the direct follow-up')
+}
+
+async function assertSideChatBottomOrigin(control) {
+  assert.equal(
+    await control.command('getAttribute', SIDE_SCROLL, {
+      value: 'data-scroll-origin',
+    }),
+    'bottom',
+    'The temporary chat did not use bottom-origin scrolling'
+  )
+  const [metrics] = JSON.parse(await control.command('getElementMetrics', SIDE_SCROLL))
+  assert.ok(metrics, 'The temporary-chat scroll container was not measurable')
+  assert.ok(
+    metrics.scrollTop >= -1,
+    `The temporary chat was not anchored at the bottom: ${JSON.stringify(metrics)}`
+  )
 }
 
 async function waitForRuntimeSource(control, taskId, timeoutMs) {
@@ -389,12 +474,32 @@ export function createDesktopScenario({
       await control.command('waitFor', SIDE_COMPOSER, { timeoutMs: uiTimeoutMs })
       const executorLogPath = join(resultDir, 'executor.log')
       const executorLogOffset = (await readFile(executorLogPath, 'utf8').catch(() => '')).length
+      await control.command('dropFile', SIDE_COMPOSER, {
+        filename: ATTACHMENT_FILENAME,
+        mimeType: 'text/plain',
+        value: Buffer.from(ATTACHMENT_TEXT).toString('base64'),
+      })
+      await control.command('waitFor', `${SIDE_CHAT} [data-testid="attachment-badge"]`, {
+        text: ATTACHMENT_FILENAME,
+        timeoutMs: uiTimeoutMs,
+      })
       await control.command('fill', SIDE_COMPOSER, { value: INITIAL_PROMPT })
       await control.command('press', SIDE_COMPOSER, { key: 'Enter' })
       await control.command('waitFor', `${SIDE_CHAT} [data-testid="message-assistant"]`, {
         text: INITIAL_COMPLETION,
         timeoutMs: taskTimeoutMs,
       })
+      await assertSideChatBottomOrigin(control)
+      const [scrollMetrics] = JSON.parse(await control.command('getElementMetrics', SIDE_SCROLL))
+      const [firstUserMetrics] = JSON.parse(
+        await control.command('getElementMetrics', `${SIDE_CHAT} [data-testid="message-user"]`)
+      )
+      assert.ok(scrollMetrics && firstUserMetrics, 'The first side-chat message was not measurable')
+      assert.ok(
+        firstUserMetrics.top >= scrollMetrics.top - 1 &&
+          firstUserMetrics.top <= scrollMetrics.top + 40,
+        'The first side-chat message did not start at the top of the viewport'
+      )
       await waitForThinkingToSettle(control, taskTimeoutMs)
       const sideThreadId = await waitForRetainedSideThread(
         executorLogPath,
@@ -402,6 +507,21 @@ export function createDesktopScenario({
         executorLogOffset,
         taskTimeoutMs
       )
+
+      await narrowSideChatPanel(control, uiTimeoutMs)
+      const narrowWidth = await assertTextAttachmentFits(control, uiTimeoutMs)
+      assert.ok(narrowWidth < 360, 'The attachment regression did not exercise a narrow container')
+      const expandButton = `${ACTIVE_SURFACE} [data-testid="toggle-right-workspace-panel-expanded-button"]`
+      await control.command('click', expandButton)
+      const expandedWidth = await assertTextAttachmentFits(control, uiTimeoutMs)
+      assert.ok(expandedWidth > narrowWidth, 'The text attachment did not grow with its container')
+      await control.command('click', expandButton)
+      const restoredWidth = await assertTextAttachmentFits(control, uiTimeoutMs)
+      assert.ok(
+        Math.abs(restoredWidth - narrowWidth) <= 1,
+        'The text attachment did not shrink after restoring the panel'
+      )
+      await captureScreenshot(control, 'temporary-chat-text-attachment-narrow.png', SIDE_CHAT)
 
       await expandProject(control, uiTimeoutMs)
       await control.command('click', '[data-testid="new-chat-button"]')
@@ -452,6 +572,7 @@ export function createDesktopScenario({
           text: FOLLOW_UP_PROMPT,
           timeoutMs: taskTimeoutMs,
         })
+        await assertSideChatBottomOrigin(control)
 
         const restoredSideChat = JSON.parse(await control.command('snapshot', SIDE_CHAT))
         assert.ok(

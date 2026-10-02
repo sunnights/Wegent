@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { DESKTOP_CHECKPOINTS } from './checkpoints.mjs'
+import { runWithCheckpointResources } from './checkpoint-scheduler.mjs'
+import { resolveDesktopCodexBinary } from './modules/desktop-build-flows.mjs'
+import { reservePort } from './port-reservation.mjs'
 import {
   compactInactiveDesktopE2EResults,
   resolveDesktopE2EResultRoot,
@@ -14,8 +17,30 @@ import { runCommandToLog } from '../../scripts/lib/command-log.mjs'
 
 const HEARTBEAT_INTERVAL_MS = 30_000
 const DEFAULT_PARALLEL_CHECKPOINTS = 1
+const CHECKPOINT_RESOURCES = new Map([
+  // Fresh packaged runtime extraction contends when these cloud checkpoints share a runner.
+  ['plugin-account-auth', ['desktop-runtime-intensive']],
+  ['cloud-device-lifecycle', ['desktop-runtime-intensive']],
+  ['resilience', ['desktop-runtime-intensive']],
+  ['environment-panel-scroll', ['desktop-runtime-intensive']],
+  ['workspace-attachments', ['desktop-runtime-intensive']],
+  ['automation-lifecycle', ['desktop-runtime-intensive']],
+  ['collaboration-shared-core', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  ['collaboration-local-agent-dispatch', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  ['collaboration-remote-agent-dispatch', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  ['collaboration-local-group-coordinate', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  ['collaboration-remote-group-coordinate', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  ['collaboration-human-round-resume', ['collaboration-runtime', 'desktop-runtime-intensive']],
+  [
+    'collaboration-local-group-cancellation',
+    ['collaboration-runtime', 'desktop-runtime-intensive'],
+  ],
+  ['collaboration-issue-comment-notification', ['collaboration-runtime']],
+])
 const CHECKPOINT_SCENARIO_MODULES = {
+  'cloud-model-recovery': './scenarios/cloud-model-recovery.scenario.mjs',
   'plugin-account-auth': './scenarios/plugin-account-auth.scenario.mjs',
+  'codex-account-login': './scenarios/codex-account-login.scenario.mjs',
   'cloud-space-mention': './scenarios/cloud-space-mention.scenario.mjs',
   'conversation-state': './scenarios/conversation-mention.scenario.mjs',
   'temporary-chat': './scenarios/temporary-chat.scenario.mjs',
@@ -32,10 +57,11 @@ const CHECKPOINT_SCENARIO_MODULES = {
   'browser-annotation-design': './scenarios/embedded-browser-annotation.scenario.mjs',
   'rendering-extensions': './scenarios/streaming-text.scenario.mjs',
   'runtime-task-queue': './scenarios/runtime-task-queue.scenario.mjs',
-  'runtime-terminal-convergence': './scenarios/runtime-terminal-convergence.scenario.mjs',
+  'codex-invalid-launch-cwd': './scenarios/codex-invalid-launch-cwd.scenario.mjs',
   'executor-stream-recovery': './scenarios/executor-stream-recovery.scenario.mjs',
   'transcript-sync': './scenarios/transcript-sync.scenario.mjs',
   'running-conversation-history': './scenarios/running-conversation-history.scenario.mjs',
+  'running-plan-history': './scenarios/running-plan-history.scenario.mjs',
   'codex-notification-isolation': './scenarios/codex-notification-isolation.scenario.mjs',
   'context-compaction': './scenarios/context-compaction.scenario.mjs',
   'computer-use': './scenarios/computer-use.scenario.mjs',
@@ -52,14 +78,39 @@ const CHECKPOINT_SCENARIO_MODULES = {
   'project-assignment-notification': './scenarios/project-assignment-notification.scenario.mjs',
   'offline-local-project-space': './scenarios/offline-local-project-space.scenario.mjs',
   'cloud-context-resilience': './scenarios/cloud-context-resilience.scenario.mjs',
+  'cloud-login-proxy': './scenarios/cloud-login-proxy.scenario.mjs',
+  'collaboration-shared-core': './scenarios/collaboration-shared-core.scenario.mjs',
+  'collaboration-first-use': './scenarios/collaboration-first-use.scenario.mjs',
+  'collaboration-group-onboarding': './scenarios/collaboration-group-onboarding.scenario.mjs',
+  'collaboration-local-agent-dispatch':
+    './scenarios/collaboration-local-agent-dispatch.scenario.mjs',
+  'collaboration-remote-agent-dispatch':
+    './scenarios/collaboration-remote-agent-dispatch.scenario.mjs',
+  'collaboration-local-group-coordinate':
+    './scenarios/collaboration-local-group-coordinate.scenario.mjs',
+  'collaboration-remote-group-coordinate':
+    './scenarios/collaboration-remote-group-coordinate.scenario.mjs',
+  'collaboration-human-round-resume': './scenarios/collaboration-human-round-resume.scenario.mjs',
+  'collaboration-local-group-cancellation':
+    './scenarios/collaboration-local-group-cancellation.scenario.mjs',
+  'collaboration-issue-comment-mention':
+    './scenarios/collaboration-issue-comment-mention.scenario.mjs',
+  'collaboration-issue-comment-notification':
+    './scenarios/collaboration-issue-comment-notification.scenario.mjs',
   'plugin-development': './scenarios/plugin-development.scenario.mjs',
   'task-attachments': './scenarios/task-attachments.scenario.mjs',
   'external-content-import': './scenarios/external-content-import.scenario.mjs',
+  'send-key-preference': './scenarios/send-key-preference.scenario.mjs',
+  'system-proxy': './scenarios/system-proxy.scenario.mjs',
+  'system-pac': './scenarios/system-pac.scenario.mjs',
   'workbench-mode': './scenarios/workbench-mode.scenario.mjs',
+  'task-board-bulk-actions': './scenarios/task-board-bulk-actions.scenario.mjs',
   'dsh-owner-capture': './scenarios/dsh-owner-capture.scenario.mjs',
 }
 const SCENARIO_ONLY_CHECKPOINTS = new Set([
+  'cloud-model-recovery',
   'plugin-account-auth',
+  'codex-account-login',
   'cloud-space-mention',
   'change-request-status',
   'claude-runtime',
@@ -68,14 +119,27 @@ const SCENARIO_ONLY_CHECKPOINTS = new Set([
   'harness-apps',
   'offline-local-project-space',
   'cloud-context-resilience',
+  'cloud-login-proxy',
+  'collaboration-shared-core',
+  'collaboration-first-use',
+  'collaboration-group-onboarding',
+  'collaboration-local-agent-dispatch',
+  'collaboration-remote-agent-dispatch',
+  'collaboration-local-group-coordinate',
+  'collaboration-remote-group-coordinate',
+  'collaboration-human-round-resume',
+  'collaboration-local-group-cancellation',
+  'collaboration-issue-comment-mention',
+  'collaboration-issue-comment-notification',
   'plugin-development',
   'task-attachments',
   'project-assignment-notification',
   'runtime-task-queue',
-  'runtime-terminal-convergence',
+  'codex-invalid-launch-cwd',
   'executor-stream-recovery',
   'transcript-sync',
   'running-conversation-history',
+  'running-plan-history',
   'codex-notification-isolation',
   'context-compaction',
   'computer-use',
@@ -93,9 +157,14 @@ const SCENARIO_ONLY_CHECKPOINTS = new Set([
   'browser-annotation-anchors',
   'browser-annotation-design',
   'external-content-import',
+  'send-key-preference',
+  'system-proxy',
+  'system-pac',
   'workbench-mode',
+  'task-board-bulk-actions',
 ])
 const CLOUD_ONLY_CHECKPOINTS = new Set([
+  'cloud-device-lifecycle',
   'plugin-auto-update',
   'plugin-workspace-publication',
   'cloud-git-worktree',
@@ -104,7 +173,6 @@ const CLOUD_ONLY_CHECKPOINTS = new Set([
   'cloud-worktree-queued-cancel',
   'cloud-worktree-tools',
   'cloud-worktree-archive-restore',
-  'cloud-worktree-device-restart',
 ])
 const COMPOSITE_CHECKPOINTS = new Map([
   [
@@ -119,7 +187,6 @@ const COMPOSITE_CHECKPOINTS = new Map([
       'cloud-worktree-queued-cancel',
       'cloud-worktree-tools',
       'cloud-worktree-archive-restore',
-      'cloud-worktree-device-restart',
     ],
   ],
 ])
@@ -140,20 +207,6 @@ function formatDuration(durationMs) {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
 }
 
-async function reservePort() {
-  const server = createServer()
-  await new Promise((resolvePromise, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolvePromise)
-  })
-  const address = server.address()
-  if (!address || typeof address === 'string') {
-    throw new Error('Unable to reserve a desktop E2E port')
-  }
-  await new Promise(resolvePromise => server.close(resolvePromise))
-  return address.port
-}
-
 function configuredPort(value, name) {
   if (value === undefined) return null
   const port = Number(value)
@@ -172,17 +225,18 @@ async function resolveServerPorts(env) {
     env.WEWORK_E2E_CONTROL_SERVER_PORT,
     'WEWORK_E2E_CONTROL_SERVER_PORT'
   )
-  let modelServerPort = configuredModelPort ?? (await reservePort())
-  let controlServerPort = configuredControlPort ?? (await reservePort())
+  const registryDir = env.WEWORK_E2E_PORT_REGISTRY_DIR
+  let modelServerPort = configuredModelPort ?? (await reservePort(registryDir))
+  let controlServerPort = configuredControlPort ?? (await reservePort(registryDir))
 
   while (controlServerPort === modelServerPort) {
     if (configuredControlPort !== null && configuredModelPort !== null) {
       throw new Error('Desktop E2E control and model server ports must differ')
     }
     if (configuredControlPort !== null) {
-      modelServerPort = await reservePort()
+      modelServerPort = await reservePort(registryDir)
     } else {
-      controlServerPort = await reservePort()
+      controlServerPort = await reservePort(registryDir)
     }
   }
   return { controlServerPort, modelServerPort }
@@ -270,7 +324,13 @@ async function readFailureSummary(result) {
 
 function checkpointScenarioEnv(env, checkpoint) {
   const nextEnv = { ...env }
-  if (checkpoint === 'native-window-chrome' || checkpoint === 'browser-multi-tabs') {
+  if (
+    checkpoint === 'native-window-chrome' ||
+    checkpoint === 'browser-multi-tabs' ||
+    checkpoint === 'core-task-flow'
+  ) {
+    // Core task flow verifies the native drag-to-popout window. macOS background
+    // mode prohibits activation and hides the app when that window is presented.
     nextEnv.WEWORK_E2E_BACKGROUND_WINDOW = '0'
   }
   const module = CHECKPOINT_SCENARIO_MODULES[checkpoint]
@@ -327,17 +387,21 @@ async function runDesktopBuild() {
 }
 
 async function sharedBuildEnvironment(environment = process.env) {
-  const build = await prepareDesktopE2EBuild({
-    environment,
-    runBuild: runDesktopBuild,
-    weworkDir,
-  })
+  const [build, codexBinary] = await Promise.all([
+    prepareDesktopE2EBuild({
+      environment,
+      runBuild: runDesktopBuild,
+      weworkDir,
+    }),
+    resolveDesktopCodexBinary(),
+  ])
   console.log(
-    `[desktop-e2e] shared build ready: app=${build.appBinary}, executor=${build.executorBinary}`
+    `[desktop-e2e] shared build ready: app=${build.appBinary}, executor=${build.executorBinary}, codex=${codexBinary}`
   )
   return {
     ...environment,
     WEWORK_E2E_APP_BIN: build.appBinary,
+    WEWORK_E2E_CODEX_BIN: codexBinary,
     WEWORK_E2E_EXECUTOR_BIN: build.executorBinary,
   }
 }
@@ -435,53 +499,59 @@ async function runRequestedArgs() {
 }
 
 async function runParallelCheckpoints(checkpoints) {
-  const sharedEnv = await sharedBuildEnvironment()
-  const pending = [...checkpoints]
-  const failures = []
-  const workerCount = Math.min(parallelCheckpointLimit(), pending.length)
-  console.log(
-    `[desktop-e2e] Running ${pending.length} checkpoints with ${workerCount} parallel workers`
-  )
+  const portRegistryDir = await mkdtemp(join(tmpdir(), 'wework-e2e-ports-'))
+  try {
+    const sharedEnv = {
+      ...(await sharedBuildEnvironment()),
+      WEWORK_E2E_PORT_REGISTRY_DIR: portRegistryDir,
+    }
+    const failures = []
+    const workerCount = Math.min(parallelCheckpointLimit(), checkpoints.length)
+    console.log(
+      `[desktop-e2e] Running ${checkpoints.length} checkpoints with ${workerCount} parallel workers`
+    )
 
-  async function runWorker() {
-    while (pending.length > 0) {
-      const checkpoint = pending.shift()
-      if (!checkpoint) return
-      const env = checkpointScenarioEnv({ ...sharedEnv }, checkpoint)
-      delete env.WEWORK_E2E_CONTROL_SERVER_PORT
-      delete env.WEWORK_E2E_MODEL_SERVER_PORT
-      const { controlServerPort, modelServerPort } = await resolveServerPorts(env)
-      env.WEWORK_E2E_CONTROL_SERVER_PORT = String(controlServerPort)
-      env.WEWORK_E2E_MODEL_SERVER_PORT = String(modelServerPort)
-      console.log(`\n[desktop-e2e] START ${checkpoint}`)
-      const result = await runTaskFlow(parallelCheckpointArgs(checkpoint), env, checkpoint)
-      if (result.code === 0) {
-        console.log(
-          `[desktop-e2e] PASS ${checkpoint}: duration=${formatDuration(result.durationMs)}, assertion-errors=none${result.resultDir ? `, evidence=${result.resultDir}` : ''}`
+    await runWithCheckpointResources({
+      checkpoints,
+      workerCount,
+      resourceFor: checkpoint => CHECKPOINT_RESOURCES.get(checkpoint),
+      run: async checkpoint => {
+        const env = checkpointScenarioEnv({ ...sharedEnv }, checkpoint)
+        delete env.WEWORK_E2E_CONTROL_SERVER_PORT
+        delete env.WEWORK_E2E_MODEL_SERVER_PORT
+        const { controlServerPort, modelServerPort } = await resolveServerPorts(env)
+        env.WEWORK_E2E_CONTROL_SERVER_PORT = String(controlServerPort)
+        env.WEWORK_E2E_MODEL_SERVER_PORT = String(modelServerPort)
+        console.log(`\n[desktop-e2e] START ${checkpoint}`)
+        const result = await runTaskFlow(parallelCheckpointArgs(checkpoint), env, checkpoint)
+        if (result.code === 0) {
+          console.log(
+            `[desktop-e2e] PASS ${checkpoint}: duration=${formatDuration(result.durationMs)}, assertion-errors=none${result.resultDir ? `, evidence=${result.resultDir}` : ''}`
+          )
+          return
+        }
+        const failure = await readFailureSummary(result)
+        failures.push({ checkpoint, failure, ...result })
+        console.error(
+          `[desktop-e2e] FAIL ${checkpoint}: duration=${formatDuration(result.durationMs)}, ${result.signal ? `signal=${result.signal}` : `exit=${result.code}`}, error=${failure}${result.resultDir ? `, evidence=${result.resultDir}` : ''}`
         )
-        continue
-      }
-      const failure = await readFailureSummary(result)
-      failures.push({ checkpoint, failure, ...result })
+      },
+    })
+    if (failures.length === 0) {
+      console.log('\n[desktop-e2e] All parallel checkpoints passed.')
+      return
+    }
+
+    console.error('\n[desktop-e2e] Parallel checkpoint failure summary:')
+    for (const failure of failures) {
       console.error(
-        `[desktop-e2e] FAIL ${checkpoint}: duration=${formatDuration(result.durationMs)}, ${result.signal ? `signal=${result.signal}` : `exit=${result.code}`}, error=${failure}${result.resultDir ? `, evidence=${result.resultDir}` : ''}`
+        `- ${failure.checkpoint}: ${failure.failure}${failure.resultDir ? ` (${failure.resultDir})` : ''}`
       )
     }
+    process.exitCode = 1
+  } finally {
+    await rm(portRegistryDir, { recursive: true, force: true })
   }
-
-  await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
-  if (failures.length === 0) {
-    console.log('\n[desktop-e2e] All parallel checkpoints passed.')
-    return
-  }
-
-  console.error('\n[desktop-e2e] Parallel checkpoint failure summary:')
-  for (const failure of failures) {
-    console.error(
-      `- ${failure.checkpoint}: ${failure.failure}${failure.resultDir ? ` (${failure.resultDir})` : ''}`
-    )
-  }
-  process.exitCode = 1
 }
 
 async function runCheckpoints(checkpoints) {

@@ -12,6 +12,7 @@ import type {
 interface UseProjectRuntimeTaskComposerOptions {
   project: ProjectWithTasks | null
   deviceWorkspaceId?: number | null
+  workspaceExecution?: RuntimeTaskCreateRequest['execution'] | null
   workspaceSource?: RuntimeTaskAddress | null
   taskRequest?: RuntimeTaskCreateRequest | null
   runtimeContext: Pick<RuntimeSendRequest, 'cloudProjectId' | 'origin' | 'additionalContext'>
@@ -28,6 +29,7 @@ interface UseProjectRuntimeTaskComposerOptions {
 export function useProjectRuntimeTaskComposer({
   project,
   deviceWorkspaceId,
+  workspaceExecution,
   workspaceSource,
   taskRequest,
   runtimeContext,
@@ -41,8 +43,10 @@ export function useProjectRuntimeTaskComposer({
       const address = await createProjectRuntimeTask(message, {
         project,
         deviceWorkspaceId,
+        ...(workspaceExecution !== undefined ? { workspaceExecution } : {}),
+        automaticWorkspaceSelection: true,
         workspaceSource,
-        taskRequest,
+        ...(taskRequest !== undefined ? { taskRequest } : {}),
         runtime: 'codex',
         attachments: options.attachments,
         ...(options.initialGoal ? { initialGoal: options.initialGoal } : {}),
@@ -67,6 +71,7 @@ export function useProjectRuntimeTaskComposer({
       project,
       runtimeContext,
       taskRequest,
+      workspaceExecution,
       workspaceSource,
     ]
   )

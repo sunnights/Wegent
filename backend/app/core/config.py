@@ -133,6 +133,15 @@ class Settings(BaseSettings):
     # Database auto-migration configuration (only in development)
     DB_AUTO_MIGRATE: bool = True
 
+    # Database connection pool configuration. Each Backend or Celery process owns
+    # its own pool, so deployment capacity must account for every process.
+    DB_POOL_SIZE: int = Field(default=20, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=40, ge=0)
+    DB_ASYNC_POOL_SIZE: int = Field(default=10, ge=1)
+    DB_ASYNC_MAX_OVERFLOW: int = Field(default=20, ge=0)
+    DB_POOL_TIMEOUT: int = Field(default=30, ge=1)
+    DB_POOL_RECYCLE: int = Field(default=3600, ge=1)
+
     # Executor configuration
     EXECUTOR_DELETE_TASK_URL: str = (
         "http://localhost:8001/executor-manager/executor/delete"
@@ -160,6 +169,7 @@ class Settings(BaseSettings):
     # JWT configuration
     SECRET_KEY: str = "secret-key"
     ALGORITHM: str = "HS256"
+    WEWORK_TRANSCRIPT_ENCRYPTION_SECRET: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 7 * 24 * 60  # 7 days in minutes
     WEWORK_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     WEWORK_REFRESH_TOKEN_EXPIRE_MINUTES: int = 365 * 24 * 60
@@ -175,6 +185,7 @@ class Settings(BaseSettings):
 
     # Task limits
     MAX_RUNNING_TASKS_PER_USER: int = 10
+    WORKTREE_CLEANUP_RETENTION_DAYS: int = Field(default=7, ge=0)
 
     # Group entity member configuration
     # Maximum number of entity members (departments, etc.) per group
@@ -249,7 +260,6 @@ class Settings(BaseSettings):
     WORKSPACE_ARCHIVE_ENABLED: bool = True
     WORKSPACE_ARCHIVE_TIMEZONE: str = "Asia/Shanghai"
     WEWORK_TRANSCRIPT_S3_BUCKET: str = "wework-transcripts"
-    WEWORK_TRANSCRIPT_DOWNLOAD_URL_EXPIRE_SECONDS: int = 900
 
     # Publish storage configuration
     PUBLISH_PRESIGNED_UPLOAD_EXPIRE_SECONDS: int = 3600
@@ -308,6 +318,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_GET_RESPONSE: str = "120/minute"  # GET /api/v1/responses/{id}
     RATE_LIMIT_CANCEL_RESPONSE: str = "30/minute"  # POST /api/v1/responses/{id}/cancel
     RATE_LIMIT_DELETE_RESPONSE: str = "30/minute"  # DELETE /api/v1/responses/{id}
+    RATE_LIMIT_MCP_IDENTITY: str = (
+        "60/minute"  # GET /api/external/mcp-identity/userinfo
+    )
 
     # External knowledge MCP configuration
     # Disabled by default because this endpoint is intended for trusted integrations.
@@ -325,6 +338,26 @@ class Settings(BaseSettings):
     EXTERNAL_KNOWLEDGE_MCP_DOWNLOAD_PREAUTH_DOCUMENT_RATE_LIMIT_WINDOW_SECONDS: int = 60
     EXTERNAL_KNOWLEDGE_MCP_DOWNLOAD_RATE_LIMIT_REQUESTS: int = 20
     EXTERNAL_KNOWLEDGE_MCP_DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # External Wiki import, page-picker, and scheduled refresh configuration.
+    WIKIJS_GRAPHQL_TIMEOUT_SECONDS: int = 30  # Wiki.js connector per-request timeout
+    WIKI_TREE_MAX_PAGES: int = Field(
+        default=5000, ge=1
+    )  # Tree browse page-list upper bound
+    # Controls scheduled refresh only; manual import and refresh remain available.
+    EXTERNAL_DOC_SYNC_ENABLED: bool = False
+    EXTERNAL_DOC_SYNC_CRON: str = "0 21 * * *"
+    EXTERNAL_DOC_SYNC_SCAN_BATCH_SIZE: int = 500
+    EXTERNAL_DOC_SYNC_RUN_MAX_DOCUMENTS: int = 10000
+    EXTERNAL_DOC_SYNC_TIME_BUDGET_SECONDS: int = 2700
+    EXTERNAL_DOC_SYNC_TASK_SOFT_TIME_LIMIT_SECONDS: int = 3000
+    EXTERNAL_DOC_SYNC_TASK_TIME_LIMIT_SECONDS: int = 3300
+    WIKI_SYNC_REMOTE_BATCH_SIZE: int = 500
+    WIKI_SYNC_DOWNLOAD_CONCURRENCY: int = Field(default=8, ge=1, le=8)
+    EXTERNAL_DOC_SYNC_LOCK_TTL_SECONDS: int = 3600
+    KNOWLEDGE_ATTACHMENT_ORPHAN_RETENTION_HOURS: int = 24
+    KNOWLEDGE_ATTACHMENT_ORPHAN_SCAN_BATCH_SIZE: int = 200
+    KNOWLEDGE_ATTACHMENT_ORPHAN_SCAN_INTERVAL_SECONDS: int = 3600
 
     # Celery configuration
     CELERY_BROKER_URL: Optional[str] = None  # If None/empty, uses REDIS_URL
@@ -435,6 +468,12 @@ class Settings(BaseSettings):
     # resources but must not run maintenance, scheduling, or queue-consuming
     # workers. Scheduled work can run on a dedicated deployment instead.
     SCHEDULED_TASKS_ENABLED: bool = True
+
+    # Registers the daily DingTalk copy refresh on Celery Beat. Off by default:
+    # the schedule needs Beat plus a Worker on the default queue, and every
+    # knowledge base that opted in turns into provider and indexing work. The
+    # manual trigger endpoint does not depend on this switch.
+    DINGTALK_SYNC_SCHEDULE_ENABLED: bool = False
 
     # Scheduler backend configuration
     # Supported backends: "celery" (default), "apscheduler", "xxljob"
@@ -618,6 +657,8 @@ class Settings(BaseSettings):
     # provider holds the worker until the OS gives up on the socket. Configurable
     # because the right number depends on how far away the git host is.
     REPOSITORY_READ_TIMEOUT_SECONDS: int = 15
+    # Large GitLab file and Wiki page bodies need a separate request budget.
+    EXTERNAL_WIKI_DOWNLOAD_TIMEOUT_SECONDS: int = Field(default=300, ge=1)
 
     # Plugin marketplace package storage and controlled publishing.
     PLUGIN_STORAGE_BUCKET: str = "plugins"

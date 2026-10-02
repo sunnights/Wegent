@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::Notify;
@@ -195,6 +195,7 @@ pub struct LocalSession {
     pub terminal_attached: bool,
     terminal_protocol: Option<TerminalProtocol>,
     terminal_consumer_id: Option<String>,
+    terminal_browser_socket_id: Option<String>,
     terminal_next_sequence: u64,
     terminal_acked_sequence: u64,
     terminal_last_sent_sequence: u64,
@@ -205,6 +206,8 @@ pub struct LocalSession {
     terminal_backpressured: bool,
     terminal_utf8_decoder: TerminalUtf8Decoder,
     terminal_exit: Option<TerminalExitRecord>,
+    terminal_delivery_retry_attempts: u32,
+    terminal_delivery_retry_not_before: Option<Instant>,
     pub expires_at: u64,
     pub code_server_authenticated: bool,
 }
@@ -247,6 +250,7 @@ impl LocalSession {
             terminal_attached: false,
             terminal_protocol: None,
             terminal_consumer_id: None,
+            terminal_browser_socket_id: None,
             terminal_next_sequence: 1,
             terminal_acked_sequence: 0,
             terminal_last_sent_sequence: 0,
@@ -257,6 +261,8 @@ impl LocalSession {
             terminal_backpressured: false,
             terminal_utf8_decoder: TerminalUtf8Decoder::default(),
             terminal_exit: None,
+            terminal_delivery_retry_attempts: 0,
+            terminal_delivery_retry_not_before: None,
             expires_at,
             code_server_authenticated: false,
         }
@@ -281,6 +287,7 @@ impl LocalSession {
             terminal_attached: false,
             terminal_protocol: None,
             terminal_consumer_id: None,
+            terminal_browser_socket_id: None,
             terminal_next_sequence: 1,
             terminal_acked_sequence: 0,
             terminal_last_sent_sequence: 0,
@@ -291,6 +298,8 @@ impl LocalSession {
             terminal_backpressured: false,
             terminal_utf8_decoder: TerminalUtf8Decoder::default(),
             terminal_exit: None,
+            terminal_delivery_retry_attempts: 0,
+            terminal_delivery_retry_not_before: None,
             expires_at,
             code_server_authenticated: false,
         }
@@ -590,6 +599,12 @@ pub struct LocalSessionHandler {
     pub gateway_enabled: bool,
     pub code_server_enabled: bool,
     pub terminal_enabled: bool,
+    /// Base URL of the session gateway, always on loopback.
+    ///
+    /// The Executor cannot know a browser-reachable address, so it reports the
+    /// bound port and lets the backend replace the host for cloud and remote
+    /// devices. Local and app devices keep this URL because their browser runs
+    /// on the same machine.
     pub public_base_url: String,
     pub code_server_port: u16,
     pub workspace_root: PathBuf,
@@ -598,6 +613,12 @@ pub struct LocalSessionHandler {
     terminal_event_notifier: Arc<Notify>,
     terminal_drain_offset: usize,
 }
+
+/// Session gateway base URL for a standalone device, whose gateway is
+/// published on this port unless `DEVICE_SESSION_GATEWAY_PORT` overrides it.
+pub const DEFAULT_SESSION_PUBLIC_BASE_URL: &str = "http://localhost:17888";
+/// Session gateway base URL for an app sidecar, which binds an ephemeral port.
+pub const APP_SIDECAR_SESSION_PUBLIC_BASE_URL: &str = "http://localhost:0";
 
 const MAX_TERMINAL_READS_PER_DRAIN: usize = 16;
 const MAX_TERMINAL_SESSIONS_PER_DRAIN: usize = 32;
@@ -648,10 +669,6 @@ impl LocalSessionHandler {
             }
             _ => {}
         }
-        let path = match self.project_path(&request.path, request.create_if_missing) {
-            Ok(path) => path,
-            Err(error) => return SessionResult::error(error),
-        };
         if self.sessions.contains_key(&request.session_id) {
             if let Some(mut existing) = self.sessions.remove(&request.session_id) {
                 if let Some(mut terminal) = existing.terminal.take() {
@@ -660,6 +677,10 @@ impl LocalSessionHandler {
                 }
             }
         }
+        let path = match self.project_path(&request.path, request.create_if_missing) {
+            Ok(path) => path,
+            Err(error) => return SessionResult::error(error),
+        };
         match request.session_type {
             SessionType::CodeServer => self.start_code_server_session(request, path),
             SessionType::Terminal => self.start_terminal_session(request, path),

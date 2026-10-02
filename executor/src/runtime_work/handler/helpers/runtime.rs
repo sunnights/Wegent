@@ -82,17 +82,21 @@ fn initial_thread_goal_from_payload(payload: &Value) -> Option<Value> {
         .cloned()
 }
 
-fn side_source_thread(payload: &Value) -> Option<SideSourceThread> {
-    let source = payload
+fn side_source_thread(payload: &Value) -> Result<Option<SideSourceThread>, AppIpcError> {
+    let Some(source) = payload
         .get("sideSource")
-        .or_else(|| payload.get("side_source"))?;
+        .or_else(|| payload.get("side_source"))
+    else {
+        return Ok(None);
+    };
     let handle = source
         .get("runtimeHandle")
         .or_else(|| source.get("runtime_handle"));
     let thread_id = string_field(source, "threadId")
         .or_else(|| string_field(source, "thread_id"))
         .or_else(|| handle.and_then(runtime_session_id_from_handle))
-        .filter(|thread_id| !thread_id.trim().is_empty())?;
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| AppIpcError::new("bad_request", "sideSource threadId is required"))?;
     let thread_path = string_field(source, "threadPath")
         .or_else(|| string_field(source, "thread_path"))
         .or_else(|| string_field(source, "path"))
@@ -104,10 +108,15 @@ fn side_source_thread(payload: &Value) -> Option<SideSourceThread> {
             })
         })
         .filter(|path| !path.trim().is_empty());
-    Some(SideSourceThread {
+    let workspace_path = string_field(source, "workspacePath")
+        .or_else(|| string_field(source, "workspace_path"))
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| AppIpcError::new("bad_request", "sideSource workspacePath is required"))?;
+    Ok(Some(SideSourceThread {
         thread_id,
         thread_path,
-    })
+        workspace_path,
+    }))
 }
 
 fn runtime_session_id_from_handle(handle: &Value) -> Option<String> {
@@ -121,6 +130,42 @@ fn runtime_session_id_from_handle(handle: &Value) -> Option<String> {
 
 fn runtime_has_provider_transcript_reader(runtime: &str) -> bool {
     runtime.trim().eq_ignore_ascii_case("codex")
+}
+
+fn provider_transcript_is_unmaterialized(link: &RuntimeTaskLink) -> bool {
+    if !runtime_has_provider_transcript_reader(&link.runtime)
+        || !completed_transcript_messages(link).is_empty()
+        || !transcript_snapshot_messages(link).is_empty()
+    {
+        return false;
+    }
+    if string_field(&link.runtime_handle, "lastTurnId")
+        .or_else(|| string_field(&link.runtime_handle, "last_turn_id"))
+        .is_some()
+    {
+        return false;
+    }
+    if link
+        .runtime_handle
+        .get("turnIdsBySubtask")
+        .or_else(|| link.runtime_handle.get("turn_ids_by_subtask"))
+        .and_then(Value::as_object)
+        .is_some_and(|turns| {
+            turns
+                .values()
+                .any(|turn_id| turn_id.as_str().is_some_and(|turn_id| !turn_id.trim().is_empty()))
+        })
+    {
+        return false;
+    }
+
+    let presentations = user_message_presentations(link);
+    !presentations.is_empty()
+        && presentations.iter().all(|presentation| {
+            string_field(presentation, "turnId")
+                .or_else(|| string_field(presentation, "turn_id"))
+                .is_none()
+        })
 }
 
 fn source_parent_json(source: &super::fork_transfer::SourceTaskIdentity) -> Value {
@@ -153,4 +198,13 @@ fn fork_error_response(code: &str, error: String) -> Value {
         "error": error,
         "code": code,
     })
+}
+
+fn ensure_claude_execution_identity(local_task_id: &str, request: &mut ExecutionRequest) {
+    if request.task_id.trim().is_empty() {
+        request.task_id = local_task_id.to_owned();
+    }
+    if request.subtask_id.trim().is_empty() {
+        request.subtask_id = uuid::Uuid::new_v4().to_string();
+    }
 }

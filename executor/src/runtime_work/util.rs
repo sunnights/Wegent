@@ -80,12 +80,55 @@ pub(crate) fn apply_runtime_payload_metadata(request: &mut ExecutionRequest, pay
     {
         request.extra.insert("origin".to_owned(), origin);
     }
+    if let Some(model_selection) = payload
+        .get("modelSelection")
+        .or_else(|| payload.get("model_selection"))
+        .filter(|value| value.is_object())
+        .cloned()
+    {
+        request
+            .extra
+            .insert("modelSelection".to_owned(), model_selection);
+    }
     if let Some(attachments) = payload
         .get("attachments")
         .filter(|value| value.is_array())
         .cloned()
     {
         request.extra.insert("attachments".to_owned(), attachments);
+    }
+    if let Some(additional_skills) = payload
+        .get("additionalSkills")
+        .or_else(|| payload.get("additional_skills"))
+        .filter(|value| value.is_array())
+        .cloned()
+    {
+        let skill_names = additional_skills
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|skill| {
+                skill
+                    .as_str()
+                    .or_else(|| skill.get("name").and_then(Value::as_str))
+            })
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .fold(Vec::new(), |mut names, name| {
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_owned());
+                }
+                names
+            });
+        request
+            .extra
+            .insert("additional_skills".to_owned(), additional_skills);
+        request
+            .extra
+            .insert("preload_skills".to_owned(), json!(skill_names));
+        request
+            .extra
+            .insert("user_selected_skills".to_owned(), json!(skill_names));
     }
     if let Some(additional_context) = payload
         .get("additionalContext")
@@ -116,6 +159,7 @@ pub(crate) fn apply_runtime_payload_metadata(request: &mut ExecutionRequest, pay
     if let Some(collaboration_mode) = payload
         .get("collaborationMode")
         .or_else(|| payload.get("collaboration_mode"))
+        .or_else(|| payload.get("collaboration_model"))
         .or_else(|| {
             payload
                 .get("modelOptions")
@@ -124,6 +168,7 @@ pub(crate) fn apply_runtime_payload_metadata(request: &mut ExecutionRequest, pay
                     options
                         .get("collaborationMode")
                         .or_else(|| options.get("collaboration_mode"))
+                        .or_else(|| options.get("collaboration_model"))
                 })
         })
         .filter(|value| value.is_string())
@@ -562,11 +607,11 @@ pub(crate) fn workspace_group_path(path: &str) -> String {
 
 pub(crate) fn workspace_task_path(path: &str, group_path: &str) -> String {
     let normalized = normalize_workspace_path(path);
-    if let Some((worktree_root, _)) = resolved_worktree_root_and_id(&normalized) {
-        return worktree_root;
-    }
     if infer_workspace_kind(&normalized) == "chat" {
         return normalized;
+    }
+    if let Some((worktree_root, _)) = resolved_worktree_root_and_id(&normalized) {
+        return worktree_root;
     }
     if group_path.is_empty() {
         normalized
@@ -843,6 +888,99 @@ mod tests {
     }
 
     #[test]
+    fn copies_runtime_model_selection_from_runtime_payload() {
+        let mut request = ExecutionRequest::default();
+
+        apply_runtime_payload_metadata(
+            &mut request,
+            &json!({
+                "modelSelection": {
+                    "modelName": "deepseek-v4-pro-responses(public)",
+                    "modelType": "public",
+                    "options": {"reasoning": "medium"}
+                }
+            }),
+        );
+
+        assert_eq!(
+            request.extra.get("modelSelection"),
+            Some(&json!({
+                "modelName": "deepseek-v4-pro-responses(public)",
+                "modelType": "public",
+                "options": {"reasoning": "medium"}
+            }))
+        );
+    }
+
+    #[test]
+    fn copies_nested_collaboration_mode_into_execution_request_extra() {
+        let mut request = ExecutionRequest::default();
+
+        apply_runtime_payload_metadata(
+            &mut request,
+            &json!({"modelOptions": {"collaborationMode": "coordinate"}}),
+        );
+
+        assert_eq!(
+            request.extra.get("collaborationMode"),
+            Some(&json!("coordinate"))
+        );
+    }
+
+    #[test]
+    fn copies_backend_collaboration_model_into_execution_request_extra() {
+        let mut request = ExecutionRequest::default();
+
+        apply_runtime_payload_metadata(&mut request, &json!({"collaboration_model": "single"}));
+
+        assert_eq!(
+            request.extra.get("collaborationMode"),
+            Some(&json!("single"))
+        );
+    }
+
+    #[test]
+    fn normalizes_runtime_additional_skills_for_agent_consumers() {
+        let mut request = ExecutionRequest::default();
+
+        apply_runtime_payload_metadata(
+            &mut request,
+            &json!({
+                "additionalSkills": [
+                    {
+                        "name": "wework-plugin-creator",
+                        "namespace": "codex",
+                        "is_public": false
+                    },
+                    "review",
+                    {"name": "wework-plugin-creator", "namespace": "codex"}
+                ]
+            }),
+        );
+
+        assert_eq!(
+            request.extra.get("additional_skills"),
+            Some(&json!([
+                {
+                    "name": "wework-plugin-creator",
+                    "namespace": "codex",
+                    "is_public": false
+                },
+                "review",
+                {"name": "wework-plugin-creator", "namespace": "codex"}
+            ]))
+        );
+        assert_eq!(
+            request.extra.get("preload_skills"),
+            Some(&json!(["wework-plugin-creator", "review"]))
+        );
+        assert_eq!(
+            request.extra.get("user_selected_skills"),
+            Some(&json!(["wework-plugin-creator", "review"]))
+        );
+    }
+
+    #[test]
     fn generates_visible_user_message_for_external_im_runtime_send() {
         let mut request = ExecutionRequest::default();
 
@@ -957,6 +1095,30 @@ mod tests {
 
         assert_eq!(infer_workspace_kind(&nested_path), "workspace");
         assert_eq!(infer_worktree_id(&nested_path), None);
+    }
+
+    #[test]
+    fn standalone_chat_inside_a_worktree_keeps_its_own_workspace() {
+        let directory = tempdir().expect("temporary directory");
+        let common_dir = directory.path().join("repo").join(".git");
+        let outer_worktree = directory.path().join("outer");
+        let outer_git_dir = common_dir.join("worktrees").join("outer");
+        std::fs::create_dir_all(&outer_git_dir).expect("outer worktree metadata");
+        std::fs::create_dir_all(&outer_worktree).expect("outer worktree");
+        std::fs::write(
+            outer_worktree.join(".git"),
+            format!("gitdir: {}\n", outer_git_dir.display()),
+        )
+        .expect("outer worktree git file");
+        let chat = outer_worktree.join("executor-home/Documents/Codex/chat");
+        std::fs::create_dir_all(&chat).expect("standalone chat workspace");
+        let chat_path = chat.display().to_string();
+
+        assert_eq!(infer_workspace_kind(&chat_path), "chat");
+        assert_eq!(
+            workspace_task_path(&chat_path, &outer_worktree.display().to_string()),
+            chat_path
+        );
     }
 
     #[test]

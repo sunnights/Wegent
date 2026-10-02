@@ -437,6 +437,10 @@ def test_runtime_transcript_endpoint_dispatches_address(
             "taskId": "codex-1",
             "workspacePath": "/repo/Wegent",
             "runtime": "codex",
+            "turns": [{"id": "turn-1", "items": [], "status": "done"}],
+            "running": False,
+            "historyUnavailable": False,
+            "turnNavigation": [{"turnId": "turn-1", "messageIndex": 0}],
             "messages": [],
         }
     )
@@ -457,6 +461,9 @@ def test_runtime_transcript_endpoint_dispatches_address(
     )
 
     assert response.status_code == 200
+    assert response.json()["turns"][0]["id"] == "turn-1"
+    assert response.json()["running"] is False
+    assert response.json()["turnNavigation"][0]["turnId"] == "turn-1"
     assert response.json()["taskId"] == "codex-1"
     assert service_mock.await_args.kwargs["address"].local_task_id == "codex-1"
     assert service_mock.await_args.kwargs["address"].limit == 25
@@ -1190,10 +1197,12 @@ def test_runtime_task_im_notification_unsubscribe_endpoint_dispatches_address(
     assert address.local_task_id == "codex-1"
 
 
+@pytest.mark.parametrize("endpoint", ["responses", "chat/completions", "messages"])
 def test_llm_responses_proxy_endpoint_streams_from_provider(
     test_client,
     test_token,
     monkeypatch,
+    endpoint,
 ):
     from app.services import llm_proxy_service
 
@@ -1210,7 +1219,7 @@ def test_llm_responses_proxy_endpoint_streams_from_provider(
     )
 
     response = test_client.post(
-        "/api/runtime-work/llm-responses-proxy/responses",
+        f"/api/runtime-work/llm-responses-proxy/{endpoint}",
         headers={
             "content-type": "application/json",
             "accept": "text/event-stream",
@@ -1220,15 +1229,19 @@ def test_llm_responses_proxy_endpoint_streams_from_provider(
     )
 
     assert response.status_code == 200
+    assert response.content == b"data: ok\n\n"
     proxy_mock.assert_awaited_once()
     call_args = proxy_mock.await_args
     assert call_args.args[0].headers["authorization"] == f"Bearer {test_token}"
     assert call_args.args[2].id > 0
 
 
-def test_llm_responses_proxy_endpoint_rejects_missing_authorization(test_client):
+@pytest.mark.parametrize("endpoint", ["responses", "chat/completions", "messages"])
+def test_llm_responses_proxy_endpoint_rejects_missing_authorization(
+    test_client, endpoint
+):
     response = test_client.post(
-        "/api/runtime-work/llm-responses-proxy/responses",
+        f"/api/runtime-work/llm-responses-proxy/{endpoint}",
         headers={"content-type": "application/json", "accept": "text/event-stream"},
         json={"model": "gpt-4-turbo", "input": "hello"},
     )

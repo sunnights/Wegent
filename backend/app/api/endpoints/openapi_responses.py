@@ -23,18 +23,25 @@ from slowapi import Limiter
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
+from app.api.endpoints import wework_api
 from app.core import security
 from app.core.config import settings
 from app.core.rate_limit import get_limiter
 from app.models.subtask import Subtask, SubtaskRole, SubtaskStatus
 from app.models.task import TaskResource
 from app.models.user import User
-from app.schemas.kind import Bot, Task, Team
+from app.schemas.kind import Bot, Task, Team, resolve_model_category
 from app.schemas.openapi_response import (
     ResponseCreateInput,
     ResponseDeletedObject,
     ResponseError,
     ResponseObject,
+)
+from app.schemas.wework_api import (
+    UnifiedResponseCreate,
+    WeworkResponseCreate,
+    WeworkResponseObject,
+    is_wework_response_id,
 )
 from app.services.adapters.task_kinds import task_kinds_service
 from app.services.chat.preprocessing.contexts import link_contexts_to_subtask
@@ -55,6 +62,7 @@ from app.services.openapi.output_builder import (
 from app.services.rag.sources import ExternalRefValidationError
 from app.services.readers.kinds import KindType, kindReader
 from app.stores.tasks import subtask_store, task_access_store, task_store
+from shared.db.capability_reference import resolve_model_kind
 from shared.telemetry.decorators import (
     add_span_event,
     set_span_attribute,
@@ -164,6 +172,7 @@ def _task_to_response_object(
     model_string: str,
     subtasks: list = None,
     previous_response_id: str = None,
+    omit_mcp_binary_output: bool = False,
 ) -> ResponseObject:
     """Convert task dictionary to ResponseObject."""
     task_id = task_dict.get("id")
@@ -178,7 +187,10 @@ def _task_to_response_object(
 
     output = []
     if subtasks:
-        output = build_response_output(subtasks)
+        output = build_response_output(
+            subtasks,
+            omit_mcp_binary_output=omit_mcp_binary_output,
+        )
     pending_user_input, pending_user_input_payload = extract_pending_user_input_state(
         _latest_assistant_subtask(subtasks or [])
     )
@@ -246,11 +258,31 @@ def _exception_message(exc: HTTPException) -> str:
 def _model_category_from_kind(model: Any) -> str:
     """Return the normalized model category stored in a Model CRD."""
     model_json = model.json if model and isinstance(model.json, dict) else {}
-    spec = model_json.get("spec") if isinstance(model_json, dict) else {}
-    if not isinstance(spec, dict):
-        return "llm"
-    model_type = spec.get("modelType") or "llm"
-    return str(getattr(model_type, "value", model_type)).strip().lower()
+    spec = model_json.get("spec") if isinstance(model_json, dict) else None
+    return resolve_model_category(spec)
+
+
+def _resolve_requested_model(
+    db: Session, user_id: int, namespace: str, name: str
+) -> Optional[Any]:
+    """Resolve a requested Model through the caller-visible namespace scope.
+
+    Directly-owned models win; a model shared into the namespace keeps living
+    in its owner's namespace and is resolved through its capability reference.
+
+    A referenced model is only visible to members of the namespace (for the
+    "default" namespace, to the user it was shared with). This keeps group
+    references from leaking to unrelated callers that happen to know the
+    namespace/model name.
+    """
+    from app.services.readers.group_members import groupMemberReader
+
+    model = resolve_model_kind(db, name=name, namespace=namespace, user_id=user_id)
+    if model is None or namespace == "default":
+        return model
+    if not groupMemberReader.is_member(db, namespace, user_id):
+        return None
+    return model
 
 
 def _generation_options(request_body: ResponseCreateInput) -> Any:
@@ -364,7 +396,7 @@ async def _persist_terminal_failure(
 )
 async def create_response(
     request: Request,
-    request_body: ResponseCreateInput,
+    request_body: UnifiedResponseCreate,
     db: Session = Depends(get_db),
     auth_context: security.AuthContext = Depends(security.get_auth_context),
 ):
@@ -407,6 +439,10 @@ async def create_response(
         or ResponseObject with status 'in_progress' (background=true)
         or ResponseObject with status 'queued' (non-Chat Shell)
     """
+    if isinstance(request_body, WeworkResponseCreate):
+        user = wework_api.current_api_user(request, db)
+        return await wework_api.create_response(request, request_body, db, user)
+
     # Extract user and api_key_name from auth context
     current_user = auth_context.user
     api_key_name = auth_context.api_key_name
@@ -481,24 +517,21 @@ async def create_response(
         model_name = model_info["model_id"]
         model_namespace = model_info["namespace"]
 
-        model = kindReader.get_by_name_and_namespace(
-            db,
-            current_user.id,
-            KindType.MODEL,
-            model_namespace,
-            model_name,
+        # Resolve direct models first, then capabilities referenced into the
+        # caller-visible namespace (shared personal/group models). A model
+        # shared into the group keeps living in its owner's namespace, so a
+        # plain namespace query would not find it.
+        model = _resolve_requested_model(
+            db, current_user.id, model_namespace, model_name
         )
 
-        # If not found and namespace is not default, try with default namespace
-        # This handles the case where user passes group#group_team#public_model_id
+        # If not found and namespace is not default, fall back to the caller's
+        # default namespace. This preserves the legacy "group#team#model_id"
+        # behavior where the model lives under the caller's own default
+        # namespace, and also resolves models referenced into the caller's
+        # default namespace by another user.
         if not model and model_namespace != "default":
-            model = kindReader.get_by_name_and_namespace(
-                db,
-                current_user.id,
-                KindType.MODEL,
-                "default",
-                model_name,
-            )
+            model = _resolve_requested_model(db, current_user.id, "default", model_name)
 
         if not model:
             raise HTTPException(
@@ -555,10 +588,11 @@ async def create_response(
                     detail=f"Bot '{bot_namespace}/{bot_name}' does not have a valid model configured. Please specify model_id in the request or configure modelRef for the bot.",
                 )
             if member_index == 0:
-                default_model = kindReader.get_by_name_and_namespace(
+                # Resolve the same way as an explicit model_id so that models
+                # referenced into the team namespace are recognized here too.
+                default_model = _resolve_requested_model(
                     db,
                     current_user.id,
-                    KindType.MODEL,
                     model_ref.namespace,
                     model_ref.name,
                 )
@@ -642,6 +676,7 @@ async def _create_non_streaming_response_unified(
         api_key_name,
         auto_delete_executor,
         generation_params=_generation_options_dict(request_body),
+        omit_mcp_binary_output=request_body.omit_mcp_binary_output,
     )
 
     response_id = f"resp_{setup.task_id}"
@@ -830,6 +865,7 @@ async def _create_non_streaming_response_unified(
                 subtasks,
                 active_assistant_subtask_id=assistant_subtask_id,
                 active_assistant_status="in_progress",
+                omit_mcp_binary_output=request_body.omit_mcp_binary_output,
             ),
             pending_user_input=pending_user_input or None,
             pending_user_input_payload=pending_user_input_payload,
@@ -878,6 +914,7 @@ async def _create_non_streaming_response_unified(
                 subtasks,
                 active_assistant_subtask_id=assistant_subtask_id,
                 active_assistant_status="in_progress",
+                omit_mcp_binary_output=request_body.omit_mcp_binary_output,
             ),
             pending_user_input=pending_user_input or None,
             pending_user_input_payload=pending_user_input_payload,
@@ -924,6 +961,7 @@ async def _create_non_streaming_response_unified(
             active_assistant_subtask_id=assistant_subtask_id,
             active_assistant_status="completed",
             active_assistant_content=accumulated_content,
+            omit_mcp_binary_output=request_body.omit_mcp_binary_output,
         ),
         pending_user_input=pending_user_input or None,
         pending_user_input_payload=pending_user_input_payload,
@@ -979,6 +1017,7 @@ async def _create_streaming_response_unified(
         api_key_name,
         auto_delete_executor,
         generation_params=_generation_options_dict(request_body),
+        omit_mcp_binary_output=request_body.omit_mcp_binary_output,
     )
 
     # Add trace events for session setup
@@ -1494,7 +1533,7 @@ async def _create_streaming_response_unified(
         finally:
             if pubsub_obj is not None:
                 try:
-                    await pubsub_obj.unsubscribe()
+                    await pubsub_obj.aclose()
                 except Exception:
                     pass
             if pubsub_redis_client is not None:
@@ -1522,6 +1561,7 @@ async def _create_streaming_response_unified(
                 chat_stream=raw_chat_stream(),
                 created_at=created_at,
                 previous_response_id=request_body.previous_response_id,
+                omit_mcp_binary_output=request_body.omit_mcp_binary_output,
                 task_context=(
                     {
                         "task_id": task_kind_id,
@@ -1582,11 +1622,13 @@ async def _create_streaming_response_unified(
     )
 
 
-@router.get("/{response_id}", response_model=ResponseObject)
+@router.get("/{response_id}", response_model=WeworkResponseObject | ResponseObject)
 @limiter.limit(settings.RATE_LIMIT_GET_RESPONSE)
 async def get_response(
     request: Request,
     response_id: str,
+    stream: bool = False,
+    starting_after: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(security.get_current_user_flexible),
 ):
@@ -1599,6 +1641,12 @@ async def get_response(
     Returns:
         ResponseObject with current status and output
     """
+    if is_wework_response_id(response_id):
+        user = wework_api.current_api_user(request, db)
+        return await wework_api.get_response(
+            response_id, stream, starting_after, db, user
+        )
+
     # Extract task_id from response_id
     if not response_id.startswith("resp_"):
         raise HTTPException(
@@ -1643,24 +1691,30 @@ async def get_response(
     )
 
     model_string = "unknown"
+    omit_mcp_binary_output = False
     if task_kind and task_kind.json:
         task_crd = Task.model_validate(task_kind.json)
         team_name = task_crd.spec.teamRef.name
         team_namespace = task_crd.spec.teamRef.namespace
-        model_id = (
-            task_crd.metadata.labels.get("modelId")
-            if task_crd.metadata.labels
-            else None
-        )
+        labels = task_crd.metadata.labels or {}
+        model_id = labels.get("modelId")
+        omit_mcp_binary_output = labels.get("omitMcpBinaryOutput") == "true"
         if model_id:
             model_string = f"{team_namespace}#{team_name}#{model_id}"
         else:
             model_string = f"{team_namespace}#{team_name}"
 
-    return _task_to_response_object(task_dict, model_string, subtasks=subtasks)
+    return _task_to_response_object(
+        task_dict,
+        model_string,
+        subtasks=subtasks,
+        omit_mcp_binary_output=omit_mcp_binary_output,
+    )
 
 
-@router.post("/{response_id}/cancel", response_model=ResponseObject)
+@router.post(
+    "/{response_id}/cancel", response_model=WeworkResponseObject | ResponseObject
+)
 @limiter.limit(settings.RATE_LIMIT_CANCEL_RESPONSE)
 async def cancel_response(
     request: Request,
@@ -1683,6 +1737,10 @@ async def cancel_response(
     Returns:
         ResponseObject with status 'cancelled' or current status
     """
+    if is_wework_response_id(response_id):
+        user = wework_api.current_api_user(request, db)
+        return await wework_api.cancel_response(response_id, db, user)
+
     from app.services.chat.storage import db_handler, session_manager
 
     # Extract task_id from response_id
@@ -1838,21 +1896,25 @@ async def cancel_response(
 
     # Reconstruct model string
     model_string = "unknown"
+    omit_mcp_binary_output = False
     if task_kind and task_kind.json:
         task_crd = Task.model_validate(task_kind.json)
         team_name = task_crd.spec.teamRef.name
         team_namespace = task_crd.spec.teamRef.namespace
-        model_id = (
-            task_crd.metadata.labels.get("modelId")
-            if task_crd.metadata.labels
-            else None
-        )
+        labels = task_crd.metadata.labels or {}
+        model_id = labels.get("modelId")
+        omit_mcp_binary_output = labels.get("omitMcpBinaryOutput") == "true"
         if model_id:
             model_string = f"{team_namespace}#{team_name}#{model_id}"
         else:
             model_string = f"{team_namespace}#{team_name}"
 
-    return _task_to_response_object(task_dict, model_string, subtasks=subtasks)
+    return _task_to_response_object(
+        task_dict,
+        model_string,
+        subtasks=subtasks,
+        omit_mcp_binary_output=omit_mcp_binary_output,
+    )
 
 
 @router.delete("/{response_id}", response_model=ResponseDeletedObject)

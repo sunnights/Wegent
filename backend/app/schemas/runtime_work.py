@@ -9,6 +9,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.plugin_config import validate_non_secret_plugin_configs
+
 RuntimeName = Literal["codex", "claude_code"]
 RuntimeWorkspaceKind = Literal["workspace", "worktree", "chat"]
 RuntimeWorkspaceSource = Literal["local", "remote"]
@@ -125,13 +127,27 @@ class RuntimeSupervisorCreateInput(BaseModel):
     )
 
 
+class ProjectSessionScope(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: str = Field(..., alias="projectId", min_length=1)
+    issue_id: str = Field(..., alias="issueId", min_length=1)
+
+
 class RuntimeTranscriptRequest(RuntimeTaskAddress):
     """Request a page of a device-local runtime transcript."""
 
     limit: Optional[int] = Field(default=None, ge=1, le=200)
+    project_session: Optional[ProjectSessionScope] = Field(
+        default=None, alias="projectSession"
+    )
     before_cursor: Optional[str] = Field(default=None, alias="beforeCursor")
     after_cursor: Optional[str] = Field(default=None, alias="afterCursor")
     include_full_content: bool = Field(default=False, alias="includeFullContent")
+    conversation_context_only: bool = Field(
+        default=False,
+        alias="conversationContextOnly",
+    )
 
 
 class RuntimeFileChangesRevertRequest(BaseModel):
@@ -169,11 +185,15 @@ class NormalizedRuntimeMessage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
+    client_user_message_id: Optional[str] = Field(
+        default=None, alias="clientUserMessageId"
+    )
+    turn_id: Optional[str] = Field(default=None, alias="turnId")
     role: Literal["user", "assistant", "system", "tool"]
     content: str = ""
-    subtask_id: Optional[int] = Field(default=None, alias="subtaskId")
+    subtask_id: Optional[str | int] = Field(default=None, alias="subtaskId")
     status: Optional[str] = None
-    created_at: Optional[str] = Field(default=None, alias="createdAt")
+    created_at: Optional[str | int] = Field(default=None, alias="createdAt")
     source: Optional[RuntimeMessageSource] = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     blocks: list[dict[str, Any]] = Field(default_factory=list)
@@ -217,6 +237,7 @@ class LocalTaskSummary(BaseModel):
     children: list[RuntimeTaskAddressRef] = Field(default_factory=list)
     created_at: Optional[str | int] = Field(default=None, alias="createdAt")
     updated_at: Optional[str | int] = Field(default=None, alias="updatedAt")
+    recency_at: Optional[str | int] = Field(default=None, alias="recencyAt")
     completed_at: Optional[str | int] = Field(default=None, alias="completedAt")
     running: bool = False
     continuable: Optional[bool] = None
@@ -497,6 +518,13 @@ class RuntimeTranscriptResponse(BaseModel):
     runtime: RuntimeName
     title: Optional[str] = None
     messages: list[NormalizedRuntimeMessage] = Field(default_factory=list)
+    turns: list[dict[str, Any]]
+    running: Optional[bool] = None
+    origin: Optional[dict[str, Any]] = None
+    history_unavailable: bool = Field(default=False, alias="historyUnavailable")
+    turn_navigation: list[dict[str, Any]] = Field(
+        default_factory=list, alias="turnNavigation"
+    )
     context_usage: Optional[dict[str, Any]] = Field(default=None, alias="contextUsage")
     full_content: bool = Field(default=False, alias="fullContent")
     range_start: Optional[int] = Field(default=None, alias="rangeStart")
@@ -585,8 +613,12 @@ class RuntimeSendRequest(BaseModel):
 class RuntimeSendResponse(BaseModel):
     """Acknowledgement from the runtime send RPC."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     accepted: bool
     local_task_id: str = Field(..., alias="taskId")
+    status: Optional[Literal["queued", "running"]] = None
+    queue_position: Optional[int] = Field(default=None, alias="queuePosition")
     error: Optional[str] = None
 
 
@@ -878,6 +910,7 @@ class RuntimeTaskCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     schema_version: Literal[1, 2, 3] = Field(default=1, alias="schemaVersion")
+    force_start: Optional[bool] = Field(default=None, alias="forceStart")
     wegent_team_id: Optional[int] = Field(
         default=None,
         alias="wegentTeamId",
@@ -993,6 +1026,10 @@ class RuntimeTaskCreateRequest(BaseModel):
     def validate_versioned_intent_boundary(self) -> "RuntimeTaskCreateRequest":
         """Validate fields introduced by versioned producer contracts."""
 
+        validate_non_secret_plugin_configs(
+            self.project_plugins,
+            field_name="projectPlugins",
+        )
         if self.schema_version >= 2 and self.runtime_model_config is not None:
             raise ValueError(
                 "RuntimeTaskCreateRequest V2+ cannot carry materialized modelConfig"
@@ -1014,6 +1051,7 @@ class RuntimeTaskCreatePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     schema_version: Literal[1, 2] = Field(default=1, alias="schemaVersion")
+    force_start: Optional[bool] = Field(default=None, alias="forceStart")
     runtime: RuntimeName
     message: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
@@ -1051,6 +1089,10 @@ class RuntimeTaskCreatePayload(BaseModel):
     project_plugins: list[dict[str, Any]] = Field(
         default_factory=list,
         alias="projectPlugins",
+    )
+    additional_skills: list[Any] = Field(
+        default_factory=list,
+        alias="additionalSkills",
     )
     bot: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[dict[str, Any]] = Field(default_factory=list)

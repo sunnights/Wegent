@@ -82,6 +82,21 @@ export function startupSplashBlocksMainWindowActivation(
   return snapshot !== null && snapshot.state !== 'closed'
 }
 
+export function createStartupReadyHandler<T>(
+  completeStartup: (source: T) => Promise<void>
+): (source: T) => Promise<void> {
+  let completion: Promise<void> | null = null
+  return source => {
+    completion ??= Promise.resolve()
+      .then(() => completeStartup(source))
+      .catch(error => {
+        completion = null
+        throw error
+      })
+    return completion
+  }
+}
+
 async function writePng(path: string, bytes: Buffer): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, bytes)
@@ -127,12 +142,16 @@ export class StartupSplash {
     return this.closePromise
   }
 
-  showError(): Promise<void> {
+  showError(pluginName: string | null = null): Promise<void> {
     if (this.showErrorPromise) return this.showErrorPromise
     const target = this.options.window
     if (target.webContents.isDestroyed()) return Promise.resolve()
     this.showErrorPromise = target.webContents
-      .executeJavaScript("window.dispatchEvent(new CustomEvent('wework-startup-error')); true")
+      .executeJavaScript(
+        `window.dispatchEvent(new CustomEvent('wework-startup-error', { detail: { pluginName: ${JSON.stringify(
+          pluginName
+        )} } })); true`
+      )
       .then(() => undefined)
       .finally(() => {
         this.showErrorPromise = null

@@ -80,7 +80,7 @@ class ShellRecommendation(BaseModel):
     """Shell recommendation with reason"""
 
     shell_name: str
-    shell_type: str  # ClaudeCode, Agno, Chat, Dify
+    shell_type: str  # Codex, ClaudeCode, Agno, Chat, Dify
     reason: str
     confidence: float  # 0.0 - 1.0
 
@@ -158,6 +158,7 @@ class CreateAllRequest(BaseModel):
     namespace: str = "default"
     icon: Optional[str] = None
     skills: Optional[List[str]] = None  # Skill names to add to Ghost
+    inherit_base_capabilities: bool = False
 
 
 class CreateAllResponse(BaseModel):

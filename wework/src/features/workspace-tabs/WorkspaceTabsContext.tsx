@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import { flushSync } from 'react-dom'
-import { navigateTo, replaceTo } from '@/lib/navigation'
+import { isSettingsRoute, navigateTo, replaceTo } from '@/lib/navigation'
 import {
   closeWorkspaceTab,
   createWorkspaceTab,
@@ -24,8 +24,14 @@ import {
   type WorkspaceTabKind,
   type WorkspaceTabLabels,
 } from './workspaceTabs'
-import { WorkspaceTabsContext, type WorkspaceTabsContextValue } from './workspaceTabsContextValue'
+import {
+  WorkspaceTabActivityContext,
+  WorkspaceTabsContext,
+  type WorkspaceTabsContextValue,
+} from './workspaceTabsContextValue'
 import { resolveDshRoute } from '@/features/dsh-runtime/dshRoutes'
+import { projectSpaceRouteRequestsDefaultProject } from '@/features/todo/projectSpaceRoute'
+import { writeSettingsReturnPath } from './settingsReturnPath'
 
 interface PersistedWorkspaceTabs {
   activeTabId: string
@@ -77,10 +83,23 @@ function validTab(value: unknown): value is WorkspaceTab {
 function normalizePersistedTab(tab: WorkspaceTab, labels: WorkspaceTabLabels): WorkspaceTab {
   const isLegacyDefaultBoard =
     tab.kind === 'board' &&
-    tab.contentRoute === '/todo' &&
-    ['工作项', '项目空间', 'Work items', 'Project spaces'].includes(tab.title)
+    (tab.contentRoute === '/todo' || projectSpaceRouteRequestsDefaultProject(tab.contentRoute)) &&
+    [
+      '工作项',
+      '项目空间',
+      '工作空间',
+      '协作',
+      '协作 (Beta)',
+      'Work items',
+      'Project spaces',
+      'Workspaces',
+      'Collaboration',
+      'Collaboration (Beta)',
+    ].includes(tab.title)
   const normalized = { ...tab, fixed: tab.fixed === true }
-  return isLegacyDefaultBoard ? { ...normalized, title: labels.board } : normalized
+  return isLegacyDefaultBoard
+    ? { ...normalized, title: labels.board, contentRoute: '/todo' }
+    : normalized
 }
 
 function loadPersistedTabs(
@@ -155,10 +174,20 @@ function workspaceTabsReducer(
         : undefined
       const kind = inferWorkspaceTabKind(action.pathname)
       if (requested) {
+        const title =
+          location.tabTitle ?? workspaceTabTitle(kind, location.contentRoute, action.labels)
+        if (
+          state.activeTabId === requested.id &&
+          requested.kind === kind &&
+          requested.title === title &&
+          requested.contentRoute === location.contentRoute
+        ) {
+          return state
+        }
         const updated = {
           ...requested,
           kind,
-          title: location.tabTitle ?? workspaceTabTitle(kind, location.contentRoute, action.labels),
+          title,
           contentRoute: location.contentRoute,
         }
         return {
@@ -170,10 +199,18 @@ function workspaceTabsReducer(
       if (!location.tabId) {
         const activeTab = state.tabs.find(tab => tab.id === state.activeTabId)
         if (activeTab) {
+          const title = workspaceTabTitle(kind, location.contentRoute, action.labels)
+          if (
+            activeTab.kind === kind &&
+            activeTab.title === title &&
+            activeTab.contentRoute === location.contentRoute
+          ) {
+            return state
+          }
           const updated = {
             ...activeTab,
             kind,
-            title: workspaceTabTitle(kind, location.contentRoute, action.labels),
+            title,
             contentRoute: location.contentRoute,
           }
           return {
@@ -310,6 +347,7 @@ export function WorkspaceTabsProvider({
   children,
 }: WorkspaceTabsProviderProps) {
   const startupTabApplied = useRef(false)
+  const previousPathnameRef = useRef(pathname)
   const [state, dispatch] = useReducer(
     workspaceTabsReducer,
     undefined,
@@ -322,11 +360,23 @@ export function WorkspaceTabsProvider({
     stateRef.current = state
   }, [state])
 
+  const isWorkspaceTabActive = useCallback(
+    (tabId: string) => stateRef.current.activeTabId === tabId,
+    []
+  )
+
   useEffect(() => {
     if (fixedTabs.length > 0) dispatch({ type: 'syncFixed', tabs: fixedTabs })
   }, [fixedTabs])
 
   useLayoutEffect(() => {
+    const enteringSettings =
+      isSettingsRoute(pathname) && !isSettingsRoute(previousPathnameRef.current)
+    if (enteringSettings) {
+      const activeTab = stateRef.current.tabs.find(tab => tab.id === stateRef.current.activeTabId)
+      if (activeTab) writeSettingsReturnPath(activeTab.contentRoute)
+    }
+    previousPathnameRef.current = pathname
     dispatch({ type: 'routeChanged', pathname, search, labels })
   }, [labels, pathname, search])
 
@@ -486,5 +536,9 @@ export function WorkspaceTabsProvider({
     ]
   )
 
-  return <WorkspaceTabsContext.Provider value={value}>{children}</WorkspaceTabsContext.Provider>
+  return (
+    <WorkspaceTabActivityContext.Provider value={isWorkspaceTabActive}>
+      <WorkspaceTabsContext.Provider value={value}>{children}</WorkspaceTabsContext.Provider>
+    </WorkspaceTabActivityContext.Provider>
+  )
 }

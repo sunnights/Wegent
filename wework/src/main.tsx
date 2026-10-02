@@ -1,8 +1,10 @@
+import { initializeProviderModelConfiguration } from '@/features/model-settings/providerModelConfiguration'
 import './i18n'
 import { Profiler, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import 'prosemirror-view/style/prosemirror.css'
 import '@xyflow/react/dist/style.css'
+import '@wegent/collaboration/styles.css'
 import './styles/globals.css'
 import App from './App.tsx'
 import { installAppLogging } from './lib/app-logging'
@@ -118,6 +120,7 @@ const desktopStorageReady = (async () => {
   logRendererStartupStep('renderer-storage-initialize', 'started')
   try {
     await initializeDesktopLocalStoragePersistence()
+    await initializeProviderModelConfiguration()
     logRendererStartupStep('renderer-storage-initialize', 'completed')
     return null
   } catch (error) {

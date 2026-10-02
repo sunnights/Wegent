@@ -13,19 +13,32 @@ export type ProjectAutomationRunStatus =
   | 'skipped'
   | 'cancelled'
 
-interface ProjectAutomationRuleBase {
+export type ProjectAutomationEventType =
+  | 'task.created'
+  | 'task.tag_added'
+  | 'task.status_changed'
+  | 'change_request.checks_failed'
+  | 'change_request.merge_conflict'
+  | 'change_request.review_submitted'
+  | 'change_request.comment_created'
+  | 'document.changed'
+
+export type ProjectAutomationTargetKind = 'human' | 'agent' | 'collaboration_group'
+
+export interface ProjectAutomationRule {
   id: string
   projectId: string
   name: string
   prompt: string
-  triggerType: 'schedule' | 'event' | 'workflow'
-  eventType: 'task.created' | 'task.status_changed' | null
+  triggerType: 'manual' | 'schedule' | 'event' | 'workflow'
+  eventType: ProjectAutomationEventType | null
   eventConfig: Record<string, unknown>
-  webhookEventId: string | null
-  webhookSecret: string | null
   cronExpression: string | null
   timezone: string
-  agentName: string
+  executionDeviceId: string | null
+  targetKind: ProjectAutomationTargetKind
+  targetId: string
+  targetName: string
   enabled: boolean
   nextRunAt: string | null
   lastRunAt: string | null
@@ -33,20 +46,6 @@ interface ProjectAutomationRuleBase {
   version: number
   createdAt: string
   updatedAt: string
-  roleSource?: 'generic' | 'agent'
-  runtimeSource?: 'agent_default' | 'fixed_profile' | 'issue_creator' | 'runtime_user'
-  runtimeProfileId?: string | null
-  runtimeUserId?: number | null
-}
-
-export interface ProjectAutomationRule extends ProjectAutomationRuleBase {
-  assignmentMode: 'manual' | 'ai_managed'
-  managerType: 'custom' | 'wegent' | null
-  agentId: string | null
-  wegentTeamId: number | null
-  model: string | null
-  executionEnvironment: 'local' | 'cloud' | 'managed'
-  executionDeviceId: string | null
 }
 
 export interface ProjectAutomationRun {
@@ -67,31 +66,23 @@ export interface ProjectAutomationRun {
   updatedAt: string
   completedAt: string | null
   retryable?: boolean
+  triggerType?: 'schedule' | 'event' | 'workflow' | null
+  eventType?: ProjectAutomationEventType | null
+  eventConfig?: Record<string, unknown> | null
 }
 
-interface ProjectAutomationInputBase {
+export interface ProjectAutomationInput {
   name: string
   prompt: string
-  triggerType: 'schedule' | 'event' | 'workflow'
-  eventType: 'task.created' | 'task.status_changed' | null
+  triggerType: 'manual' | 'schedule' | 'event' | 'workflow'
+  eventType: ProjectAutomationEventType | null
   eventConfig: Record<string, unknown>
   cronExpression: string | null
   timezone: string
-  enabled: boolean
-  roleSource?: 'generic' | 'agent'
-  runtimeSource?: 'agent_default' | 'fixed_profile' | 'issue_creator' | 'runtime_user'
-  runtimeProfileId?: string | null
-  runtimeUserId?: number | null
-}
-
-export interface ProjectAutomationInput extends ProjectAutomationInputBase {
-  assignmentMode: 'manual' | 'ai_managed'
-  managerType: 'custom' | 'wegent' | null
-  agentId: string | null
-  wegentTeamId: number | null
-  model: string | null
-  executionEnvironment: 'local' | 'cloud' | null
   executionDeviceId: string | null
+  targetKind: ProjectAutomationTargetKind
+  targetId: string
+  enabled: boolean
 }
 
 export interface ProjectAutomationWorkflowMigrationResult {
@@ -213,27 +204,9 @@ export function createProjectAutomationApi(client: HttpClient) {
         `/v1/cloud-projects/${projectId}/automations/${automationId}`
       )
     },
-    rotateWebhookSecret(projectId: string, automationId: string) {
-      return client.post<ProjectAutomationRule>(
-        `/v1/cloud-projects/${projectId}/automations/${automationId}/rotate-webhook-secret`,
-        {}
-      )
-    },
     runNow(projectId: string, automationId: string) {
       return client.post<ProjectAutomationRun>(
         `/v1/cloud-projects/${projectId}/automations/${automationId}/run`,
-        {}
-      )
-    },
-    runWorkflowNode(
-      projectId: string,
-      itemId: string,
-      workflowNodeId: string,
-      automationId: string
-    ) {
-      const query = new URLSearchParams({ automation_id: automationId })
-      return client.post<ProjectAutomationRun>(
-        `/v1/cloud-projects/${projectId}/loop-items/${encodeURIComponent(itemId)}/workflow-nodes/${encodeURIComponent(workflowNodeId)}/run?${query.toString()}`,
         {}
       )
     },

@@ -106,6 +106,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
         capabilities: Optional[List[str]] = None,
         client_ip: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
         runtime_instance_id: Optional[str] = None,
         app_device_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -123,6 +124,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
             capabilities: Device capability tags
             client_ip: Device's client IP address
             runtime_transfer_host: Host peers should use for direct transfers
+            runtime_transfer_port: Executor session gateway port
 
         Returns:
             Dict with device 'id' and 'is_default'
@@ -138,6 +140,8 @@ class LocalDeviceProvider(BaseDeviceProvider):
             capabilities=capabilities,
             client_ip=client_ip,
             runtime_transfer_host=runtime_transfer_host,
+            runtime_transfer_port=runtime_transfer_port,
+            update_runtime_transfer_port=True,
             runtime_instance_id=runtime_instance_id,
             app_device_id=app_device_id,
         )
@@ -153,6 +157,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
                 executor_version=executor_version,
                 client_ip=client_ip,
                 runtime_transfer_host=runtime_transfer_host,
+                runtime_transfer_port=runtime_transfer_port,
                 runtime_instance_id=runtime_instance_id,
             )
 
@@ -171,6 +176,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
         executor_version: Optional[str] = None,
         client_ip: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
         runtime_instance_id: Optional[str] = None,
         runtime_features: Optional[Dict[str, Any]] = None,
     ) -> bool:
@@ -184,10 +190,11 @@ class LocalDeviceProvider(BaseDeviceProvider):
             "executor_version": executor_version,
             "client_ip": client_ip,
             "runtime_transfer_host": runtime_transfer_host,
+            "runtime_transfer_port": runtime_transfer_port,
             "runtime_instance_id": runtime_instance_id,
             "runtime_features": runtime_features,
         }
-        result = await cache_manager.set(key, data, expire=DEVICE_ONLINE_TTL)
+        result = await cache_manager.set_or_raise(key, data, expire=DEVICE_ONLINE_TTL)
         logger.info(f"[LocalDeviceProvider] set_online: key={key}, result={result}")
         return result
 
@@ -199,7 +206,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
     ) -> bool:
         """Unregister device (remove from Redis online state)."""
         key = self.generate_online_key(user_id, device_id)
-        result = await cache_manager.delete(key)
+        result = await cache_manager.delete_or_raise(key)
         logger.info(f"[LocalDeviceProvider] unregister: key={key}, result={result}")
         return result
 
@@ -270,6 +277,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
             "update_available": update_available,
             "client_ip": spec.get("clientIp"),
             "runtime_transfer_host": spec.get("runtimeTransferHost"),
+            "runtime_transfer_port": spec.get("runtimeTransferPort"),
             "runtime_instance_id": spec.get("runtimeInstanceId"),
             "app_device_id": spec.get("appDeviceId"),
             "runtime_features": (
@@ -285,7 +293,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
     ) -> Optional[Dict[str, Any]]:
         """Get device online info from Redis."""
         key = self.generate_online_key(user_id, device_id)
-        result = await cache_manager.get(key)
+        result = await cache_manager.get_or_raise(key)
         logger.debug(
             f"[LocalDeviceProvider] get_online_info: key={key}, found={result is not None}"
         )
@@ -346,7 +354,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
         # Batch fetch online info from Redis using mget
         device_ids = [record_route_id(d) for d in local_devices]
         redis_keys = [self.generate_online_key(user_id, did) for did in device_ids]
-        online_info_map = await cache_manager.mget(redis_keys)
+        online_info_map = await cache_manager.mget_or_raise(redis_keys)
 
         # Build result list
         result = []
@@ -419,6 +427,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
                     "update_available": update_available,
                     "client_ip": spec.get("clientIp"),
                     "runtime_transfer_host": spec.get("runtimeTransferHost"),
+                    "runtime_transfer_port": spec.get("runtimeTransferPort"),
                     "runtime_instance_id": spec.get("runtimeInstanceId"),
                     "app_device_id": spec.get("appDeviceId"),
                     "runtime_features": (
@@ -437,13 +446,14 @@ class LocalDeviceProvider(BaseDeviceProvider):
         running_task_ids: Optional[List[int]] = None,
         executor_version: Optional[str] = None,
         runtime_transfer_host: Optional[str] = None,
+        runtime_transfer_port: Optional[int] = None,
         runtime_instance_id: Optional[str] = None,
         runtime_capacity: Optional[Dict[str, Any]] = None,
         runtime_features: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Refresh device heartbeat in Redis."""
         key = self.generate_online_key(user_id, device_id)
-        data = await cache_manager.get(key)
+        data = await cache_manager.get_or_raise(key)
         if data:
             data["last_heartbeat"] = datetime.now().isoformat()
             if running_task_ids is not None:
@@ -452,13 +462,16 @@ class LocalDeviceProvider(BaseDeviceProvider):
                 data["executor_version"] = executor_version
             if runtime_transfer_host is not None:
                 data["runtime_transfer_host"] = runtime_transfer_host
+            data["runtime_transfer_port"] = runtime_transfer_port
             # Every heartbeat replaces the capacity observation. A missing
             # snapshot must clear the previous value instead of extending a
             # stale capacity truth with the online TTL.
             data["runtime_instance_id"] = runtime_instance_id
             data["runtime_capacity"] = runtime_capacity
             data["runtime_features"] = runtime_features
-            result = await cache_manager.set(key, data, expire=DEVICE_ONLINE_TTL)
+            result = await cache_manager.set_or_raise(
+                key, data, expire=DEVICE_ONLINE_TTL
+            )
             logger.debug(
                 f"[LocalDeviceProvider] refresh_heartbeat: key={key}, "
                 f"running_tasks={len(running_task_ids) if running_task_ids else 0}"
@@ -550,7 +563,7 @@ class LocalDeviceProvider(BaseDeviceProvider):
         device_id: str,
     ) -> Dict[str, Any]:
         """Get slot usage information for sync callers."""
-        device_info = cache_manager.get_sync(
+        device_info = cache_manager.get_sync_or_raise(
             self.generate_online_key(user_id, device_id)
         )
 
@@ -568,11 +581,13 @@ class LocalDeviceProvider(BaseDeviceProvider):
     ) -> bool:
         """Update device status in Redis."""
         key = self.generate_online_key(user_id, device_id)
-        data = await cache_manager.get(key)
+        data = await cache_manager.get_or_raise(key)
         if data:
             data["status"] = status
             data["last_heartbeat"] = datetime.now().isoformat()
-            result = await cache_manager.set(key, data, expire=DEVICE_ONLINE_TTL)
+            result = await cache_manager.set_or_raise(
+                key, data, expire=DEVICE_ONLINE_TTL
+            )
             logger.debug(
                 f"[LocalDeviceProvider] update_status: key={key}, status={status}"
             )

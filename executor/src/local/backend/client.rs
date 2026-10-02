@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    fmt,
     future::Future,
     path::Path,
     pin::Pin,
@@ -25,6 +26,37 @@ const REGISTER_EVENT: &str = "device:register";
 const HEARTBEAT_EVENT: &str = "device:heartbeat";
 const RUNTIME_TASK_PULL_EVENT: &str = "runtime.tasks.pull";
 const RUNTIME_TASK_ACCEPT_EVENT: &str = "runtime.tasks.accept";
+const RUNTIME_WORKSPACE_CLEANUP_CLAIM_EVENT: &str = "runtime.workspace_cleanup.claim";
+const RUNTIME_WORKSPACE_CLEANUP_ACCEPT_EVENT: &str = "runtime.workspace_cleanup.accept";
+
+pub struct RuntimeWorkPull {
+    pub task: Option<Value>,
+    pub workspace_cleanup_intents: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RawEventCallError {
+    Transport(String),
+    Rejected {
+        code: Option<String>,
+        message: String,
+        retryable: bool,
+        terminal_end_dispatched: bool,
+    },
+}
+
+impl fmt::Display for RawEventCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(message) => formatter.write_str(message),
+            Self::Rejected { code, message, .. } => match code {
+                Some(code) => write!(formatter, "{message} ({code})"),
+                None => formatter.write_str(message),
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalBackendClient<T>
 where
@@ -34,7 +66,7 @@ where
     pub(super) transport: T,
     running_tasks: LocalRunningTaskTracker,
     capability_reporter: Arc<dyn CapabilityReportProvider>,
-    runtime_capacity: Arc<Mutex<Option<Value>>>,
+    runtime_transfer_port: Arc<Mutex<Option<u16>>>,
 }
 
 impl<T> LocalBackendClient<T>
@@ -75,7 +107,7 @@ where
             transport,
             running_tasks,
             capability_reporter: Arc::new(capability_reporter),
-            runtime_capacity: Arc::new(Mutex::new(None)),
+            runtime_transfer_port: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -120,19 +152,10 @@ where
             .await
     }
 
-    pub async fn pull_runtime_task(&self, timeout: Duration) -> Result<Option<Value>, String> {
-        let runtime_capacity = self
-            .runtime_capacity
-            .lock()
-            .expect("runtime capacity lock should not be poisoned")
-            .clone();
+    pub async fn pull_runtime_work(&self, timeout: Duration) -> Result<RuntimeWorkPull, String> {
         let response = self
             .transport
-            .call(
-                RUNTIME_TASK_PULL_EVENT,
-                json!({"runtime_capacity": runtime_capacity}),
-                timeout,
-            )
+            .call(RUNTIME_TASK_PULL_EVENT, json!({}), timeout)
             .await?;
         let payload = ack_payload(&response);
         if payload
@@ -146,10 +169,17 @@ where
                 .unwrap_or("Runtime task pull failed")
                 .to_owned());
         }
-        Ok(payload
-            .and_then(|value| value.get("task"))
-            .cloned()
-            .filter(|task| !task.is_null()))
+        Ok(RuntimeWorkPull {
+            task: payload
+                .and_then(|value| value.get("task"))
+                .cloned()
+                .filter(|task| !task.is_null()),
+            workspace_cleanup_intents: payload
+                .and_then(|value| value.get("workspace_cleanup_intents"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 
     pub async fn acknowledge_runtime_task(
@@ -185,6 +215,60 @@ where
             .to_owned())
     }
 
+    pub async fn acknowledge_workspace_cleanup(
+        &self,
+        intent: &Value,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let response = self
+            .transport
+            .call(
+                RUNTIME_WORKSPACE_CLEANUP_ACCEPT_EVENT,
+                json!({
+                    "intent_id": intent.get("intent_id"),
+                    "issue_version": intent.get("issue_version"),
+                }),
+                timeout,
+            )
+            .await?;
+        let payload = ack_payload(&response);
+        if payload
+            .and_then(|value| value.get("success"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Ok(());
+        }
+        Err(payload
+            .and_then(|value| value.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("Workspace cleanup acceptance report failed")
+            .to_owned())
+    }
+
+    pub async fn claim_workspace_cleanup(
+        &self,
+        intent: &Value,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let response = self
+            .transport
+            .call(
+                RUNTIME_WORKSPACE_CLEANUP_CLAIM_EVENT,
+                json!({
+                    "intent_id": intent.get("intent_id"),
+                    "issue_version": intent.get("issue_version"),
+                }),
+                timeout,
+            )
+            .await?;
+        let payload = ack_payload(&response);
+        Ok(payload
+            .and_then(|value| value.get("success"))
+            .and_then(Value::as_bool)
+            == Some(true))
+    }
+
     pub async fn emit_event(&self, event: EventEnvelope) -> Result<(), String> {
         let event_type = event.event_type.clone();
         let payload = backend_event_payload(event)?;
@@ -195,21 +279,44 @@ where
         self.transport.emit(event, payload).await
     }
 
-    pub async fn call_raw_event(
+    pub(super) async fn call_raw_event(
         &self,
         event: &str,
         payload: Value,
         timeout: Duration,
-    ) -> Result<(), String> {
-        let response = self.transport.call(event, payload, timeout).await?;
+    ) -> Result<(), RawEventCallError> {
+        let response = self
+            .transport
+            .call(event, payload, timeout)
+            .await
+            .map_err(RawEventCallError::Transport)?;
         if ack_success(&response) {
             return Ok(());
         }
-        Err(ack_payload(&response)
+        let payload = ack_payload(&response);
+        let message = payload
             .and_then(|value| value.get("error"))
             .and_then(Value::as_str)
             .unwrap_or("Backend rejected executor event")
-            .to_owned())
+            .to_owned();
+        let code = payload
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let retryable = payload
+            .and_then(|value| value.get("retryable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let terminal_end_dispatched = payload
+            .and_then(|value| value.get("terminal_end_dispatched"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Err(RawEventCallError::Rejected {
+            code,
+            message,
+            retryable,
+            terminal_end_dispatched,
+        })
     }
 
     pub fn set_running_task_ids<I>(&self, task_ids: I)
@@ -219,14 +326,18 @@ where
         self.running_tasks.set(task_ids);
     }
 
-    pub fn set_runtime_capacity(&self, capacity: Option<Value>) {
+    pub fn set_runtime_transfer_port(&self, port: Option<u16>) {
         *self
-            .runtime_capacity
+            .runtime_transfer_port
             .lock()
-            .expect("runtime capacity lock should not be poisoned") = capacity;
+            .expect("runtime transfer port lock should not be poisoned") = port;
     }
 
     fn registration_payload(&self) -> Value {
+        let runtime_transfer_port = *self
+            .runtime_transfer_port
+            .lock()
+            .expect("runtime transfer port lock should not be poisoned");
         json!({
             "device_id": self.config.device_id,
             "runtime_instance_id": self.config.runtime_instance_id,
@@ -236,6 +347,7 @@ where
             "executor_version": self.config.executor_version,
             "client_ip": self.config.client_ip,
             "runtime_transfer_host": self.config.runtime_transfer_host,
+            "runtime_transfer_port": runtime_transfer_port,
             "app_device_id": self.config.app_device_id,
             "runtime_features": runtime_features(),
         })
@@ -243,15 +355,13 @@ where
 
     pub(super) fn heartbeat_payload(&self) -> Value {
         let running_task_ids = self.running_tasks.running_task_ids();
-        let runtime_capacity = self
-            .runtime_capacity
+        let runtime_transfer_port = *self
+            .runtime_transfer_port
             .lock()
-            .expect("runtime capacity lock should not be poisoned")
-            .clone();
+            .expect("runtime transfer port lock should not be poisoned");
         json!({
             "device_id": self.config.device_id,
             "runtime_instance_id": self.config.runtime_instance_id,
-            "runtime_capacity": runtime_capacity,
             "running_task_ids": running_task_ids,
             "executor_version": self.config.executor_version,
             "capabilities": self.capability_reporter.build_report(),
@@ -260,6 +370,7 @@ where
                 &crate::agents::wework_codex_home()
             ),
             "runtime_transfer_host": self.config.runtime_transfer_host,
+            "runtime_transfer_port": runtime_transfer_port,
         })
     }
 }

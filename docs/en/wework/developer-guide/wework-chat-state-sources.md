@@ -33,6 +33,16 @@ This document records the state sources for the Wework chat path. The goal is to
 | Attachment/model/skill selection      | `projectChat` context                                                                                                                                                                    | Send payload, composer controls                                                                                    | In-task option locking is derived from `projectChat.isOptionsLocked`                                                                                                                                                                        |
 | Device availability                   | `state.devices` + current task/project device selection                                                                                                                                  | Composer disabled reason, device prompts                                                                           | Use only for send preconditions; never for assistant streaming status                                                                                                                                                                       |
 
+## Board Conversation Split Views
+
+The project-space board Hover task panel is a split view of the original task conversation, not a separate preview conversation. The Task page, Hover panel, and card summary must use the same runtime task address and read the same canonical `RuntimeConversationTurn[]` from `runtimeConversationCache`.
+
+- The Hover panel directly reuses `TemporaryChatPanel`; message loading, live events, continuation, and attachments all target the original task conversation.
+- Card progress text and tool activity may only be projected from canonical turns through pure selectors. Do not persist `finalResponsePreview`, serialize assistant messages, or introduce board/Hover-specific message caches.
+- When the server confirms that a transcript is idle, that response is the task's authoritative snapshot and replaces old terminal turns absent from the server. Only an active transcript is merged with buffered local events.
+- A terminal conversation is evicted after five idle minutes when no full conversation view retains it. Card summaries may observe updates but must not prevent eviction merely because the board remains mounted; an open Task page or Hover split view retains the conversation while subscribed.
+- The board prefetches only a bounded transcript tail for running and review tasks. Increasing that range requires evidence that the UI needs it; a one-line summary must not load or copy complete tool output.
+
 ## Runtime Event Flow
 
 1. A new message submit sets `sendPhase` to `submitting`.
@@ -214,6 +224,14 @@ These rules apply only to local Codex projects. Remote and cloud tasks retain
 their existing single-workspace selection semantics; local multi-root support
 must not implicitly broaden a remote execution scope.
 
+### Context Compaction Results
+
+The executor live-item cache must retain compaction start/completion status. Persisting an interrupted turn must preserve the incomplete result of an unfinished compaction.
+
+Only a compaction completion event can mark `context_compaction` successful. When a turn ends or the user stops it, an unfinished compaction displays “Context compaction did not complete”; ordinary block settlement must not mark it `done`. A completed compaction stays successful even if its containing turn is subsequently stopped.
+
+Interrupted compaction has not reduced the context, so the next turn may compact again. History refresh must not turn an interrupted attempt into a success; Codex history may omit unfinished attempts. The desktop `context-compaction` checkpoint covers successful compaction, interruption, history refresh, and subsequent compaction recovery.
+
 ### Web Search Tool Blocks
 
 A Codex web search may not include its query action in `item/started`; the final `action` can arrive only in `item/completed`. The executor must update the same block id, settle its status as `done`, and write the final `action` into `tool_input`. Otherwise Wework keeps showing a running web search whose expanded details are empty. Live events and historical transcripts must produce the same `web_search` tool block shape.
@@ -394,6 +412,7 @@ The right workspace **Temporary chat** feature starts a short side conversation 
 - Creating a new runtime task from either the project-space board task modal or the project-space task tab must call `useProjectRuntimeTaskComposer` and then follow the same `createProjectRuntimeTask` path. `TemporaryChatPanel` constructs one optimistic user message with a stable id and passes that same message object into the creation path. `sendPreparedRuntimeMessage` owns forwarding the id to the executor and writing the message to `runtimeConversationCache`. Entry components must not append the first message independently, or the live UI can retain both the local message and the transcript message until refresh.
 - Each temporary chat tab has an independent `chat:<id>` instance id, so the right workspace can hold multiple temporary chats at the same time.
 - Before a runtime thread exists, `TemporaryChatPanel` uses the instance id as its `conversationKey`. After creation, pane workspace state retains the tab's runtime address and `runtimeConversationCache` restores its live message projection. Temporary threads do not support `thread/turns/list`, so a main-conversation switch that unmounts and remounts the panel cannot depend on transcript loading to recover content.
+- `TemporaryChatPanel` defaults to the same DOM bottom-origin scrolling model as the main conversation. When existing messages first appear or a conversation is reopened, the virtualizer must restore the bottom or the saved reading position within the layout commit instead of painting a top position and visibly correcting downward. Only callers with an explicit top-origin requirement may override this default.
 - Attachment selection, upload progress, and errors are also isolated per temporary-chat instance and must not reuse the main composer attachment state. The first message passes that instance's attachments explicitly to `createTemporaryRuntimeTask`.
 - Every successfully sent or optimistically displayed user message must retain its persisted attachment references, including the first message, regular follow-ups, and queued sends. Clearing composer attachments only resets the current input state and must not remove sent attachments from the message list; local `blob:` preview URLs must be converted to recoverable local paths.
 - When a temporary chat is the only open right-workspace tab, the panel defaults to a compact `420px` width. Opening another workspace tab restores the general split default, while a user-resized width remains authoritative.
@@ -407,7 +426,7 @@ The right workspace **Temporary chat** feature starts a short side conversation 
 
 Maintenance rule: do not add UI fallbacks that insert temporary chats into the left task list, and do not fabricate rollout records for temporary threads in the executor. The primary path is `ephemeral + sideSource + direct_thread_id`.
 
-After changing this path, run `pnpm --filter wework e2e:desktop --segment temporary-chat`. The independent real Electron scenario holds an assistant response open, asserts that a regular follow-up stays above the Thinking indicator, switches the main conversation, and verifies that both temporary-chat user messages are restored after switching back. It writes screenshots for each critical stage to `wework/test-results/desktop-e2e/<run-id>/`.
+After changing this path, run `pnpm --filter wework e2e:desktop --segment temporary-chat`. The independent real Electron scenario holds an assistant response open, asserts that a regular follow-up stays above the Thinking indicator, verifies bottom-origin and bottom anchoring when messages first appear and after reopening the conversation, and confirms that both temporary-chat user messages are restored after switching back. It writes screenshots for each critical stage to `wework/test-results/desktop-e2e/<run-id>/`.
 
 ## Top-Level Page Transitions
 

@@ -26,11 +26,13 @@ Beat Scheduler Storage:
 import logging
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import (
     after_setup_logger,
     after_setup_task_logger,
     task_postrun,
     task_prerun,
+    worker_process_init,
     worker_shutdown,
     worker_shutting_down,
 )
@@ -49,7 +51,7 @@ def build_beat_schedule() -> dict:
     if not settings.SCHEDULED_TASKS_ENABLED:
         return {}
 
-    return {
+    schedule = {
         "check-due-subscriptions": {
             "task": "app.tasks.subscription_tasks.check_due_subscriptions",
             "schedule": float(settings.FLOW_SCHEDULER_INTERVAL_SECONDS),
@@ -68,15 +70,49 @@ def build_beat_schedule() -> dict:
             "task": "app.tasks.project_automation_tasks.check_due_project_automations",
             "schedule": float(settings.FLOW_SCHEDULER_INTERVAL_SECONDS),
         },
+        "check-pending-project-incoming-events": {
+            "task": (
+                "app.tasks.project_automation_tasks."
+                "check_pending_project_incoming_events"
+            ),
+            "schedule": float(settings.FLOW_SCHEDULER_INTERVAL_SECONDS),
+        },
+        "check-due-project-event-subscriptions": {
+            "task": (
+                "app.tasks.project_automation_tasks."
+                "check_due_project_event_subscriptions"
+            ),
+            "schedule": float(settings.FLOW_SCHEDULER_INTERVAL_SECONDS),
+        },
         "scan-stale-index-tasks": {
             "task": "app.tasks.knowledge_tasks.scan_stale_index_tasks",
             "schedule": 5 * 60,  # every 5 minutes
+        },
+        "cleanup-knowledge-attachment-orphans": {
+            "task": "app.tasks.knowledge_tasks.cleanup_knowledge_attachment_orphans",
+            "schedule": float(
+                settings.KNOWLEDGE_ATTACHMENT_ORPHAN_SCAN_INTERVAL_SECONDS
+            ),
+        },
+        "sync-external-documents": {
+            "task": "app.tasks.external_document_sync_tasks.sync_external_documents",
+            "schedule": crontab.from_string(settings.EXTERNAL_DOC_SYNC_CRON),
         },
         "sync-plugin-upstreams": {
             "task": "app.tasks.plugin_marketplace_tasks.sync_plugin_upstreams",
             "schedule": 6 * 60 * 60,
         },
     }
+
+    if settings.DINGTALK_SYNC_SCHEDULE_ENABLED:
+        schedule["sync-dingtalk-copies"] = {
+            "task": "app.tasks.dingtalk_auto_sync_tasks.scan_dingtalk_copies",
+            # Celery evaluates the crontab in UTC: 18:00 UTC is 02:00 in CN.
+            "schedule": crontab(minute=0, hour=18),
+            "options": {"expires": 24 * 60 * 60},
+        }
+
+    return schedule
 
 
 celery_app = Celery(
@@ -86,6 +122,8 @@ celery_app = Celery(
     include=[
         "app.tasks.subscription_tasks",
         "app.tasks.knowledge_tasks",
+        "app.tasks.external_document_sync_tasks",
+        "app.tasks.dingtalk_auto_sync_tasks",
         "app.tasks.robot_queue_tasks",
         "app.tasks.project_automation_tasks",
         "app.tasks.plugin_marketplace_tasks",
@@ -189,6 +227,14 @@ def setup_celery_task_logger(logger, *args, **kwargs):
     and write to the rotating log file.
     """
     _apply_backend_format(logger)
+
+
+@worker_process_init.connect
+def log_worker_database_pool_configuration(*args, **kwargs):
+    """Log the per-process database pool budget after a worker forks."""
+    from app.db.pool_observability import log_registered_pool_configurations
+
+    log_registered_pool_configurations()
 
 
 @task_prerun.connect

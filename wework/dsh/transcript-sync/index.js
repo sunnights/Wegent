@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { SqliteSyncOutbox } from './outbox.js'
@@ -13,6 +14,9 @@ export const inject = [
 ]
 
 const PACKAGE_NAME = '@wegent/dsh-transcript-sync'
+const SNAPSHOT_INTERVAL = 10
+const MAX_ENCRYPTED_SEGMENT_BYTES = 256 * 1024 * 1024 + 33
+const SYNC_OPT_IN_VERSION = 1
 const PREFERENCES_UNIT = 'portable_preferences'
 const PREFERENCES_FIELDS = [
   'appearanceMode',
@@ -22,7 +26,6 @@ const PREFERENCES_FIELDS = [
   'supervisorPrinciples',
   'supervisorModelSelection',
   'supervisorIntervalSeconds',
-  'taskCompletionNotificationsEnabled',
   'browserExternalLinkTarget',
   'browserLocalLinkTarget',
   'browserAskBeforeDownload',
@@ -38,7 +41,8 @@ export async function apply(ctx) {
   await state.load()
   const outbox = new SqliteSyncOutbox(join(home, 'wework-transcript-sync-outbox.sqlite3'))
   const secure = ctx.weworkSecureStorage.scope('wework-transcript-sync')
-  let clientId = await secure.get('client-id')
+  let clientId = process.env.WEGENT_APP_IPC_DEVICE_ID?.trim()
+  if (!clientId) clientId = await secure.get('client-id')
   if (typeof clientId !== 'string' || !clientId) {
     clientId = randomUUID()
     await secure.set('client-id', clientId)
@@ -52,10 +56,16 @@ export async function apply(ctx) {
     state,
     target: ctx.weworkTranscriptTarget,
   })
+  const service = sync.service()
   ctx.weworkPluginRuntime.register(ctx, {
     id: name,
     methods: {
       getSettings: () => ({ enabled: sync.enabled }),
+      getStatus: () => service.status(),
+      flush: async () => {
+        await service.flush()
+        return service.status()
+      },
       setEnabled: ({ enabled }) => sync.setEnabled(enabled),
     },
   })
@@ -65,7 +75,7 @@ export async function apply(ctx) {
     })
   })
   ctx.effect(() => {
-    const unprovide = ctx.reflect.provide('weworkTranscriptSync', sync.service())
+    const unprovide = ctx.reflect.provide('weworkTranscriptSync', service)
     return () => {
       unsubscribe()
       unprovide()
@@ -89,6 +99,7 @@ export class WeworkSync {
     pollIntervalMs = 5000,
   }) {
     this.apiBaseUrl = apiBaseUrl
+    this.environmentApiBaseUrl = apiBaseUrl
     this.clientId = clientId
     this.desktop = desktop
     this.outbox = outbox
@@ -96,11 +107,13 @@ export class WeworkSync {
     this.state = state
     this.target = target
     this.pollIntervalMs = pollIntervalMs
-    this.enabled = state.value.enabled !== false
+    this.enabled = state.value.enabled === true
     this.active = false
     this.processing = null
     this.timer = null
     this.lastError = null
+    this.lastAttemptAt = null
+    this.lastSuccessAt = null
     this.failureCount = 0
   }
 
@@ -124,7 +137,10 @@ export class WeworkSync {
         enabled: this.enabled,
         pendingTurns: this.outbox.count(),
         transcripts: Object.keys(this.state.value.transcripts).length,
+        syncing: Boolean(this.processing),
         lastError: this.lastError,
+        lastAttemptAt: this.lastAttemptAt,
+        lastSuccessAt: this.lastSuccessAt,
       }),
       list: () => structuredClone(Object.values(this.state.value.transcripts)),
       flush: () => this.flush(),
@@ -152,27 +168,39 @@ export class WeworkSync {
   async enqueue(turn) {
     const target = this.outbox.target(turn)
     const knownSequence = this.state.value.transcripts[target]?.currentSequence ?? 0
-    this.outbox.enqueue(turn, knownSequence)
-    if (this.enabled) this.schedule(0)
+    const enqueued = this.outbox.enqueue(turn, knownSequence)
+    if (enqueued !== false && this.enabled) this.schedule(0)
   }
 
   flush() {
     if (!this.enabled) return Promise.resolve()
     if (this.processing) return this.processing
     const operation = async () => {
-      if (!this.enabled) return
-      if (!(await this.ensureApiBaseUrl())) return
-      if (!this.enabled) return
-      await this.flushPending()
-      if (!this.enabled) return
-      await this.pullTranscripts()
-      if (!this.enabled) return
-      await this.syncPreferences()
+      this.lastAttemptAt = new Date().toISOString()
+      if (!this.enabled) return false
+      if (!(await this.ensureApiBaseUrl())) return false
+      const failures = []
+      for (const [phase, synchronize] of [
+        ['Conversation upload', () => this.flushPending()],
+        ['Conversation download', () => this.pullTranscripts()],
+        ['Preference synchronization', () => this.syncPreferences()],
+      ]) {
+        if (!this.enabled) break
+        try {
+          await synchronize()
+        } catch (error) {
+          failures.push({ phase, error })
+        }
+      }
+      if (failures.length) throw synchronizationFailure(failures)
+      return this.enabled
     }
     this.processing = operation()
-      .then(result => {
+      .then(completed => {
+        if (!completed) return
         this.failureCount = 0
-        return result
+        this.lastError = null
+        this.lastSuccessAt = new Date().toISOString()
       })
       .catch(error => {
         this.failureCount += 1
@@ -188,56 +216,116 @@ export class WeworkSync {
   }
 
   async flushPending() {
-    let pending
-    while (this.enabled && (pending = this.outbox.first())) {
-      const turn = await this.source.read(pending)
-      const lease = await this.request(
-        `/wework-transcripts/${encodeURIComponent(turn.transcriptId)}/lease`,
-        'POST',
-        {
-          clientId: this.clientId,
-          ttlSeconds: 300,
-          title: turn.title || '',
-          ...(turn.parentTranscriptId
-            ? {
-                parentTranscriptId: turn.parentTranscriptId,
-                forkedAtSequence: turn.forkedAtSequence,
-              }
-            : {}),
-        }
-      )
-      if (lease.currentSequence < turn.baseSequence) {
-        throw new Error('Cloud transcript sequence moved behind the local causal base')
-      }
-      if (lease.currentSequence !== turn.baseSequence) {
-        const delivered = await this.reconcilePendingTurn(turn)
-        await this.releaseLease(turn, lease)
-        if (delivered) {
-          await this.acknowledgeNativeTurn(turn)
-          this.outbox.acknowledge(turn)
-        } else {
-          this.forkPendingTurn(turn)
-        }
-        continue
-      }
-      try {
-        await this.appendPendingTurn(turn, lease)
-      } catch (error) {
-        if (!isSequenceConflict(error)) throw error
-        const delivered = await this.reconcilePendingTurn(turn)
-        await this.releaseLease(turn, lease)
-        if (delivered) {
-          await this.acknowledgeNativeTurn(turn)
-          this.outbox.acknowledge(turn)
-        } else {
-          this.forkPendingTurn(turn)
-        }
-        continue
-      }
-      await this.releaseLease(turn, lease)
-      await this.acknowledgeNativeTurn(turn)
-      this.outbox.acknowledge(turn)
+    for (const sessionId of this.outbox.sessionIds()) {
+      await this.flushPendingSession(sessionId)
     }
+  }
+
+  async flushPendingSession(sessionId) {
+    let pending
+    while (this.enabled && (pending = this.outbox.firstForSession(sessionId))) {
+      try {
+        await this.flushPendingTurn(pending)
+      } catch (error) {
+        if (
+          error?.code !== 'transcript_turn_missing' &&
+          error?.code !== 'transcript_task_missing'
+        ) {
+          throw error
+        }
+        this.outbox.discardTurn(pending)
+        console.warn('[wework-transcript-sync] skipped unavailable transcript turn', {
+          sessionId,
+          turnId: pending.turnId,
+          executorTurnId: pending.executorTurnId,
+        })
+      }
+    }
+  }
+
+  async flushPendingTurn(turn) {
+    const summarized = await this.source.summarize(turn)
+    const lease = await this.acquireLease(turn)
+    if (lease.currentSequence !== turn.baseSequence) {
+      await this.reconcileOrForkPendingTurn(turn, lease)
+      return
+    }
+    const snapshot = turn.cloudSequence === 1 || turn.cloudSequence % SNAPSHOT_INTERVAL === 0
+    const encryption = await this.transcriptEncryption(turn.transcriptId)
+    let segment
+    let released = false
+    try {
+      segment = await this.source.read(turn, {
+        baseSequence: turn.cloudSequence - 1,
+        sequence: turn.cloudSequence,
+        snapshot,
+        encryptionKey: encryption.key,
+        summary: summarized.payload,
+      })
+      try {
+        await this.uploadPendingSegment(turn, segment, lease)
+      } catch (error) {
+        if (!snapshot && isSnapshotRequired(error)) {
+          await removeSegmentFile(segment)
+          segment = await this.source.read(turn, {
+            baseSequence: turn.cloudSequence - 1,
+            sequence: turn.cloudSequence,
+            snapshot: true,
+            encryptionKey: encryption.key,
+            summary: summarized.payload,
+          })
+          await this.uploadPendingSegment(turn, segment, lease)
+        } else {
+          throw error
+        }
+      }
+    } catch (error) {
+      await this.releaseLease(turn, lease)
+      released = true
+      if (isSequenceConflict(error)) {
+        this.forkPendingTurn(turn)
+        return
+      }
+      throw error
+    } finally {
+      await removeSegmentFile(segment)
+    }
+    if (!released) await this.releaseLease(turn, lease)
+    await this.acknowledgeNativeTurn({ ...turn, rolloutEnd: segment.rolloutEnd })
+    this.outbox.acknowledge(turn)
+  }
+
+  acquireLease(turn) {
+    return this.request(
+      `/wework-transcripts/${encodeURIComponent(turn.transcriptId)}/lease`,
+      'POST',
+      {
+        clientId: this.clientId,
+        ttlSeconds: 300,
+        title: turn.title || '',
+        ...(turn.parentTranscriptId
+          ? {
+              parentTranscriptId: turn.parentTranscriptId,
+              forkedAtSequence: turn.forkedAtSequence,
+            }
+          : {}),
+      }
+    )
+  }
+
+  async reconcileOrForkPendingTurn(turn, lease) {
+    let delivered
+    try {
+      delivered = await this.reconcilePendingSegment(turn, lease)
+    } finally {
+      await this.releaseLease(turn, lease)
+    }
+    if (!delivered) {
+      this.forkPendingTurn(turn, Math.min(turn.baseSequence, lease.currentSequence))
+      return
+    }
+    await this.acknowledgeNativeTurn(delivered)
+    this.outbox.acknowledge(turn)
   }
 
   async acknowledgeNativeTurn(turn) {
@@ -250,38 +338,53 @@ export class WeworkSync {
     await this.state.save()
   }
 
-  appendPendingTurn(turn, lease) {
-    return this.request(
-      `/wework-transcripts/${encodeURIComponent(turn.transcriptId)}/turns`,
+  async uploadPendingSegment(turn, segment, lease) {
+    const descriptor = {
+      clientId: this.clientId,
+      baseSequence: turn.cloudSequence - 1,
+      fencingToken: lease.fencingToken,
+      title: turn.title || '',
+      sequence: turn.cloudSequence,
+      sha256: segment.sha256,
+      sizeBytes: segment.sizeBytes,
+      format: segment.format,
+    }
+    await this.request(
+      `/wework-transcripts/${encodeURIComponent(turn.transcriptId)}/segments`,
       'POST',
       {
-        clientId: this.clientId,
-        baseSequence: turn.cloudSequence - 1,
-        fencingToken: lease.fencingToken,
-        title: turn.title || '',
-        turns: [
-          {
-            turnId: turn.turnId,
-            sequence: turn.cloudSequence,
-            payload: pendingTurnPayload(turn),
-          },
-        ],
+        ...descriptor,
+        turnId: turn.turnId,
+        summary: segmentSummary(turn, segment),
+      },
+      {
+        file: {
+          path: segment.path,
+          name: 'segment.tgz.aes256gcm',
+          contentType: 'application/octet-stream',
+        },
       }
     )
   }
 
-  async reconcilePendingTurn(turn) {
-    const response = await this.request(
-      `/wework-transcripts/${encodeURIComponent(turn.transcriptId)}/turns?after=${turn.baseSequence}&limit=500`
-    )
-    const existing = response.turns?.find(candidate => candidate.turnId === turn.turnId)
-    if (existing) {
-      if (stableJson(existing.payload) !== stableJson(pendingTurnPayload(turn))) {
-        throw new Error('Cloud transcript turn identity has conflicting content')
-      }
-      return true
+  async reconcilePendingSegment(turn, lease) {
+    const encryption = await this.transcriptEncryption(turn.transcriptId)
+    const snapshot = turn.cloudSequence === 1 || turn.cloudSequence % SNAPSHOT_INTERVAL === 0
+    const segment = await this.source.read(turn, {
+      baseSequence: turn.cloudSequence - 1,
+      sequence: turn.cloudSequence,
+      snapshot,
+      encryptionKey: encryption.key,
+    })
+    try {
+      await this.uploadPendingSegment(turn, segment, lease)
+      return { ...turn, rolloutEnd: segment.rolloutEnd }
+    } catch (error) {
+      if (isSequenceConflict(error)) return null
+      throw error
+    } finally {
+      await removeSegmentFile(segment)
     }
-    return false
   }
 
   releaseLease(turn, lease) {
@@ -295,17 +398,39 @@ export class WeworkSync {
     )
   }
 
-  forkPendingTurn(turn) {
+  async transcriptEncryption(transcriptId) {
+    const encryption = await this.request(
+      `/wework-transcripts/${encodeURIComponent(transcriptId)}/encryption-key`
+    )
+    if (
+      encryption?.algorithm !== 'aes-256-gcm' ||
+      typeof encryption?.key !== 'string' ||
+      !encryption.key
+    ) {
+      throw new Error('Backend returned an unsupported transcript encryption key')
+    }
+    return encryption
+  }
+
+  forkPendingTurn(turn, forkedAtSequence = turn.baseSequence) {
     const transcriptId = `fork-${createHash('sha256')
       .update(`${this.clientId}\u0000${turn.transcriptId}\u0000${turn.turnId}`)
       .digest('hex')}`
-    this.outbox.fork(turn, transcriptId)
+    this.outbox.fork(turn, transcriptId, forkedAtSequence)
   }
 
   async pullTranscripts() {
     if (!this.enabled) return
-    const response = await this.request('/wework-transcripts?includeArchived=true')
-    for (const transcript of response.items ?? []) {
+    const response = await this.request('/wework-transcripts?includeArchived=false')
+    const transcripts = response.items ?? []
+    const forkedParents = new Set(
+      transcripts.flatMap(transcript =>
+        transcript.writerClientId === this.clientId && transcript.parentTranscriptId
+          ? [transcript.parentTranscriptId]
+          : []
+      )
+    )
+    for (const transcript of transcripts) {
       if (!this.enabled) return
       const current = this.state.value.transcripts[transcript.transcriptId]
       this.state.value.transcripts[transcript.transcriptId] = {
@@ -313,51 +438,79 @@ export class WeworkSync {
         downloadedThrough: current?.downloadedThrough ?? 0,
         downloadedArchiveIds: current?.downloadedArchiveIds ?? [],
       }
-      const targetStatus = await this.target.status(transcript)
-      if (!targetStatus?.available) continue
-      let after = targetStatus.importedThrough ?? 0
-      const downloadedArchiveIds = new Set(
-        (transcript.archives ?? [])
-          .filter(archive => archive.toSequence <= after)
-          .map(archive => archive.id)
-      )
-      for (const archive of transcript.archives ?? []) {
-        if (!this.enabled) return
-        if (downloadedArchiveIds.has(archive.id)) continue
-        if (archive.toSequence <= after) {
-          downloadedArchiveIds.add(archive.id)
-          continue
-        }
-        let archiveAfter = archive.fromSequence - 1
-        while (archiveAfter < archive.toSequence) {
-          if (!this.enabled) return
-          const page = await this.request(
-            `/wework-transcripts/${encodeURIComponent(transcript.transcriptId)}/archives/${archive.id}/turns?after=${archiveAfter}&limit=1000`
-          )
-          if (!page.turns?.length) break
-          const imported = await this.target.import(transcript, page.turns)
-          if (!imported?.available) break
-          archiveAfter = imported.importedThrough
-          after = Math.max(after, archiveAfter)
-          if (!page.hasMore) break
-        }
-        if (archiveAfter >= archive.toSequence) downloadedArchiveIds.add(archive.id)
+      if (this.outbox.hasPendingTranscript(transcript.transcriptId)) continue
+      if (
+        transcript.writerClientId === this.clientId &&
+        !forkedParents.has(transcript.transcriptId)
+      ) {
+        continue
       }
-      while (after < transcript.currentSequence) {
-        if (!this.enabled) return
-        const page = await this.request(
-          `/wework-transcripts/${encodeURIComponent(transcript.transcriptId)}/turns?after=${after}&limit=500`
-        )
-        if (!page.turns?.length) break
-        const imported = await this.target.import(transcript, page.turns)
-        if (!imported?.available) break
-        after = imported.importedThrough
-        if (!page.hasMore) break
+      const targetStatus = await this.target.status(transcript)
+      if (!targetStatus?.available || targetStatus.reason !== 'restore_required') continue
+      let after = targetStatus.importedThrough ?? 0
+      if (after < transcript.currentSequence) {
+        const archives = restorableSegments(transcript.archives ?? [], transcript.currentSequence)
+        if (archives.length) {
+          const encryption = await this.transcriptEncryption(transcript.transcriptId)
+          const directory = await mkdtemp(join(tmpdir(), 'wework-transcript-'))
+          try {
+            const segments = []
+            let missingArchive = null
+            for (const archive of archives) {
+              if (!this.enabled) return
+              if (
+                !Number.isInteger(archive.sizeBytes) ||
+                archive.sizeBytes < 1 ||
+                archive.sizeBytes > MAX_ENCRYPTED_SEGMENT_BYTES
+              ) {
+                throw new Error('Transcript archive has an invalid encrypted size')
+              }
+              const path = join(directory, `${archive.toSequence}.tgz.aes256gcm`)
+              try {
+                await this.request(
+                  `/wework-transcripts/${encodeURIComponent(transcript.transcriptId)}/archives/${archive.id}/download`,
+                  'GET',
+                  undefined,
+                  {
+                    downloadPath: path,
+                    downloadSizeBytes: archive.sizeBytes,
+                  }
+                )
+              } catch (error) {
+                if (!isArchiveNotFound(error)) throw error
+                missingArchive = archive
+                break
+              }
+              segments.push({
+                path,
+                sha256: archive.sha256,
+                sequence: archive.toSequence,
+                format: archive.format,
+              })
+            }
+            if (missingArchive) {
+              console.warn('[wework-transcript-sync] skipped missing cloud archive', {
+                transcriptId: transcript.transcriptId,
+                archiveId: missingArchive.id,
+                sequence: missingArchive.toSequence,
+              })
+              continue
+            }
+            const imported = await this.target.restore(transcript, segments, {
+              encryptionKey: encryption.key,
+            })
+            if (imported?.available) after = imported.importedThrough
+          } finally {
+            await rm(directory, { recursive: true, force: true })
+          }
+        }
       }
       this.state.value.transcripts[transcript.transcriptId] = {
         ...transcript,
         downloadedThrough: after,
-        downloadedArchiveIds: [...downloadedArchiveIds],
+        downloadedArchiveIds: (transcript.archives ?? [])
+          .filter(archive => archive.toSequence <= after)
+          .map(archive => archive.id),
       }
     }
     await this.state.save()
@@ -410,7 +563,7 @@ export class WeworkSync {
     }
   }
 
-  async request(path, method = 'GET', body) {
+  async request(path, method = 'GET', body, transfer = {}) {
     if (!this.enabled) throw new Error('Transcript synchronization is disabled')
     if (!this.apiBaseUrl) throw new Error('Cloud backend is not configured')
     const response = await this.desktop.weworkSync.request({
@@ -418,6 +571,7 @@ export class WeworkSync {
       path,
       method,
       ...(body === undefined ? {} : { body }),
+      ...transfer,
     })
     if (response.status < 200 || response.status >= 300) {
       const detail = response.body?.detail
@@ -432,9 +586,9 @@ export class WeworkSync {
   }
 
   async ensureApiBaseUrl() {
-    if (this.apiBaseUrl) return true
-    const preferences = await this.desktop.preferences.get()
-    this.apiBaseUrl = resolveCloudConnectionApiBaseUrl(preferences.cloudConnection)
+    const preferences = await this.desktop.preferences?.get?.()
+    this.apiBaseUrl =
+      resolveCloudConnectionApiBaseUrl(preferences?.cloudConnection) ?? this.environmentApiBaseUrl
     if (!this.apiBaseUrl) {
       this.lastError = null
       return false
@@ -465,19 +619,38 @@ class SyncRequestError extends Error {
   }
 }
 
-class SyncState {
+function synchronizationFailure(failures) {
+  if (failures.length === 1) return failures[0].error
+  const errors = failures.map(({ error }) => error)
+  const summary = failures
+    .map(
+      ({ phase, error }) => `${phase}: ${error instanceof Error ? error.message : String(error)}`
+    )
+    .join('; ')
+  return new AggregateError(errors, summary)
+}
+
+export class SyncState {
   constructor(path) {
     this.path = path
-    this.value = { version: 4, enabled: true, transcripts: {}, preferencesHash: null }
+    this.value = {
+      version: 4,
+      optInVersion: SYNC_OPT_IN_VERSION,
+      enabled: false,
+      transcripts: {},
+      preferencesHash: null,
+    }
   }
 
   async load() {
     try {
       const value = JSON.parse(await readFile(this.path, 'utf8'))
       if (value?.version === 2 || value?.version === 3 || value?.version === 4) {
+        const requiresOptInReset = value.optInVersion !== SYNC_OPT_IN_VERSION
         this.value = {
           version: 4,
-          enabled: value.enabled !== false,
+          optInVersion: SYNC_OPT_IN_VERSION,
+          enabled: requiresOptInReset ? false : value.enabled === true,
           transcripts: Object.fromEntries(
             Object.entries(value.transcripts ?? {}).map(([transcriptId, transcript]) => {
               const { turns: _obsoleteTurns, ...metadata } = transcript
@@ -494,6 +667,7 @@ class SyncState {
           ),
           preferencesHash: value.preferencesHash ?? null,
         }
+        if (requiresOptInReset) await this.save()
       }
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
@@ -559,13 +733,46 @@ function stableJson(value) {
   return JSON.stringify(value)
 }
 
-function pendingTurnPayload(turn) {
-  return { ...turn.payload, taskId: turn.taskId }
+function segmentSummary(turn, segment) {
+  return {
+    ...segment.summary,
+    taskId: turn.taskId,
+  }
 }
 
 function isSequenceConflict(error) {
   return (
     error instanceof SyncRequestError &&
-    (error.code === 'sequence_conflict' || error.code === 'turn_conflict')
+    ['sequence_conflict', 'segment_conflict', 'turn_conflict'].includes(error.code)
   )
+}
+
+function isSnapshotRequired(error) {
+  return error instanceof SyncRequestError && error.code === 'snapshot_required'
+}
+
+function isArchiveNotFound(error) {
+  return error instanceof SyncRequestError && error.code === 'archive_not_found'
+}
+
+async function removeSegmentFile(segment) {
+  if (!segment?.path) return
+  await unlink(segment.path).catch(error => {
+    if (error?.code !== 'ENOENT') throw error
+  })
+}
+
+function restorableSegments(archives, currentSequence) {
+  const ordered = archives
+    .filter(archive => archive.toSequence <= currentSequence)
+    .sort((left, right) => left.toSequence - right.toSequence)
+  const snapshotIndex = ordered.findLastIndex(archive => archive.format?.includes('snapshot'))
+  if (snapshotIndex < 0) return []
+  const selected = ordered.slice(snapshotIndex)
+  let expected = selected[0].toSequence
+  for (const archive of selected) {
+    if (archive.toSequence !== expected) return []
+    expected += 1
+  }
+  return selected.at(-1)?.toSequence === currentSequence ? selected : []
 }

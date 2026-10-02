@@ -1,5 +1,6 @@
 import { access } from 'node:fs/promises'
 import { verifyPluginUpgrade } from './plugin-upgrade-flow.mjs'
+import { verifyCreatorAuthenticationToolkit } from './plugin-flows.mjs'
 import { basename } from 'node:path'
 
 import { verifyShortConversationLayout } from './conversation-layout.mjs'
@@ -16,6 +17,7 @@ import {
 } from './desktop-build-flows.mjs'
 
 import { WORKTREE_CHECKPOINTS, verifyCloudWorktreeCheckpoint } from './cloud-worktree-flows.mjs'
+import { verifyCloudDeviceLifecycleFlow } from './cloud-device-lifecycle-flow.mjs'
 
 import {
   verifyActiveGoalIdleUnreadLifecycle,
@@ -38,6 +40,7 @@ import {
 import {
   verifyAnthropicEmptyResponseRecovery,
   verifyFollowUpSendRejectionNotice,
+  verifyModelServiceConnectionError,
   verifyRateLimitRecovery,
   verifyReconnectRecovery,
 } from './resilience-flows.mjs'
@@ -50,6 +53,7 @@ import {
   DEFAULT_MODEL_ID,
   DEFAULT_MODEL_LABEL,
   DEFAULT_STEP_TIMEOUT_MS,
+  REMOTE_DOCKER_DEVICE_ID,
   SELECTED_DESKTOP_SEGMENT,
   WORKBENCH_READY_TIMEOUT_MS,
   assert,
@@ -77,6 +81,7 @@ import {
 const CLOUD_CHECKPOINTS = [
   'workspace-tabs',
   'cloud-project-creation',
+  'cloud-device-lifecycle',
   'priority-filter',
   'telemetry-consent',
   'automation-lifecycle',
@@ -123,7 +128,9 @@ async function createCloudProjectFixture(control, workspacePath) {
   await control.command('fill', '[data-testid="standalone-remote-device-select"]', {
     value: CLOUD_DEVICE_ID,
   })
-  await control.command('click', '[data-testid="remote-project-source-existing"]')
+  await control.command('clickWhenEnabled', '[data-testid="remote-project-source-existing"]', {
+    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  })
   await waitForControlValue(
     control,
     '[data-testid="device-folder-path-input"]',
@@ -311,10 +318,9 @@ async function verifyCloudWorkspacePathMentions({ composerSelector, control, wor
   await control.command('click', '[data-testid="new-chat-button"]')
   await control.command('waitFor', composerSelector, { timeoutMs: WORKBENCH_READY_TIMEOUT_MS })
   await control.command('fill', composerSelector, { value: `@${folderName}` })
-  await control.command('waitFor', '[data-testid="workspace-mention-option-0"]', {
-    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  await control.command('clickElementWithText', '[data-testid^="workspace-mention-option-"]', {
+    text: folderName,
   })
-  await control.command('click', '[data-testid="workspace-mention-option-0"]')
   const folderChipSelector = `[data-testid="composer-path-chip-${folderName}"]`
   await control.command('waitFor', folderChipSelector, {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
@@ -328,10 +334,9 @@ async function verifyCloudWorkspacePathMentions({ composerSelector, control, wor
   )
 
   await control.command('fill', composerSelector, { value: '@auth' })
-  await control.command('waitFor', '[data-testid="workspace-mention-option-0"]', {
-    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  await control.command('clickElementWithText', '[data-testid^="workspace-mention-option-"]', {
+    text: 'auth.ts',
   })
-  await control.command('click', '[data-testid="workspace-mention-option-0"]')
   const fileChipSelector = '[data-testid="composer-path-chip-auth-ts"]'
   await control.command('waitFor', fileChipSelector, {
     timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
@@ -368,6 +373,7 @@ async function verifyPluginWorkspacePublication({ cloudEnvironment, control }) {
   const taskId = taskAddress.taskId
   const runtimeTask = await cloudEnvironment.waitForRuntimeTask(taskAddress)
   const taskWorkspace = runtimeTask.workspacePath
+  await verifyCreatorAuthenticationToolkit(cloudEnvironment.remoteCodexHome, taskWorkspace)
   const pluginRoot = join(taskWorkspace, 'plugins', 'cloud-workspace-e2e')
   await mkdir(join(pluginRoot, '.codex-plugin'), { recursive: true })
   await mkdir(join(pluginRoot, 'skills', 'cloud-draft'), { recursive: true })
@@ -604,6 +610,10 @@ async function verifyCloudCheckpoint({
     setPhase('cloud-plugin-auto-update-fixtures')
     await cloudEnvironment.seedPluginAutoUpdateFixtures(6)
     setPhase('cloud-plugin-auto-update-release-push')
+    console.log(
+      '[plugin-auto-update] scheduling',
+      JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body')).idleTasks
+    )
     const completionDeadline = Date.now() + WORKBENCH_READY_TIMEOUT_MS
     let completionError = null
     while (Date.now() < completionDeadline) {
@@ -617,6 +627,10 @@ async function verifyCloudCheckpoint({
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     if (completionError) {
+      console.log(
+        '[plugin-auto-update] scheduling at failure',
+        JSON.parse(await control.command('getWorkbenchDebugSnapshot', 'body')).idleTasks
+      )
       throw new Error(
         'Published release events did not auto-update plugins outside the plugin page',
         { cause: completionError }
@@ -643,6 +657,12 @@ async function verifyCloudCheckpoint({
     return
   }
 
+  if (checkpoint === 'cloud-device-lifecycle') {
+    setPhase('cloud-device-lifecycle')
+    await verifyCloudDeviceLifecycleFlow(control, cloudEnvironment)
+    return
+  }
+
   const { composerSelector, projectRowSelector } = await createCloudProjectFixture(
     control,
     workspacePath
@@ -656,7 +676,6 @@ async function verifyCloudCheckpoint({
     case 'cloud-worktree-queued-cancel':
     case 'cloud-worktree-tools':
     case 'cloud-worktree-archive-restore':
-    case 'cloud-worktree-device-restart':
       await verifyCloudWorktreeCheckpoint({
         checkpoint,
         cloudEnvironment,
@@ -675,6 +694,12 @@ async function verifyCloudCheckpoint({
       setPhase('cloud-automation-lifecycle')
       await ensureExperimentalFeaturesEnabled(control)
       await verifyCloudAutomationLifecycle(control, CLOUD_DEVICE_ID)
+      setPhase('remote-docker-automation-lifecycle')
+      await verifyCloudAutomationLifecycle(control, REMOTE_DOCKER_DEVICE_ID, {
+        automationSuffix: 'Remote Docker',
+        deviceName: 'Wework E2E Remote Docker Device',
+        expectedCompletionIndex: 2,
+      })
       return
     case 'model-routing':
       setPhase('cloud-model-routing')
@@ -735,6 +760,8 @@ async function verifyCloudCheckpoint({
       await verifyRetryFailureRestoration(control, composerSelector)
       setPhase('cloud-rate-limit')
       await verifyRateLimitRecovery({ composerSelector, control })
+      setPhase('cloud-model-service-connection-error')
+      await verifyModelServiceConnectionError({ composerSelector, control })
       setPhase('cloud-reconnect')
       await verifyReconnectRecovery({ composerSelector, control })
       setPhase('cloud-anthropic-empty')
@@ -764,6 +791,14 @@ async function verifyCloudCheckpoint({
         appIdentifier,
         composerSelector,
         control,
+        runtimeAttachmentRoot: join(
+          resultDir,
+          'cloud-executor-home',
+          'workspace',
+          'attachments',
+          'runtime'
+        ),
+        workspacePath,
       })
       setPhase('cloud-pasted-zip')
       await verifyPastedZipAttachment({ composerSelector, control })

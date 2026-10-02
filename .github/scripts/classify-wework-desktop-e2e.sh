@@ -5,6 +5,17 @@ set -euo pipefail
 core_segments=(
   remote-device-onboarding
   workspace-tabs
+  collaboration-shared-core
+  collaboration-first-use
+  collaboration-group-onboarding
+  collaboration-local-agent-dispatch
+  collaboration-remote-agent-dispatch
+  collaboration-local-group-coordinate
+  collaboration-remote-group-coordinate
+  collaboration-human-round-resume
+  collaboration-local-group-cancellation
+  collaboration-issue-comment-mention
+  collaboration-issue-comment-notification
   cloud-space-mention
   priority-filter
   external-content-import
@@ -13,15 +24,19 @@ core_segments=(
   project-assignment-notification
   offline-local-project-space
   cloud-context-resilience
+  cloud-login-proxy
   core-dsh-plugin-management
   plugin-development
   project-ai-settings
   model-routing
+  fork-provider-preservation
+  codex-account-login
   permission-modes
   workbench-mode
   computer-use
   task-status-sync
   task-board-association
+  task-board-bulk-actions
   core-task-flow
   task-attachments
   window-lifecycle
@@ -29,8 +44,9 @@ core_segments=(
   supervisor-lifecycle
   resilience
   runtime-task-queue
-  runtime-terminal-convergence
+  codex-invalid-launch-cwd
   running-conversation-history
+  running-plan-history
   codex-notification-isolation
   executor-stream-recovery
   transcript-sync
@@ -43,6 +59,9 @@ core_segments=(
   renderer-storage
   tray-lifecycle
   conversation-state
+  send-key-preference
+  system-proxy
+  system-pac
   environment-panel-scroll
   temporary-chat
   workspace-attachments
@@ -61,6 +80,7 @@ core_segments=(
 )
 plugin_segments=(
   core-dsh-ui-plugin-composition
+  plugin-marketplace-lifecycle
   plugin-lifecycle
   skill-mention-rendering
   sites-plugin-auto-install
@@ -75,10 +95,11 @@ cloud_worktree_segments=(
   cloud-worktree-queued-cancel
   cloud-worktree-tools
   cloud-worktree-archive-restore
-  cloud-worktree-device-restart
 )
 cloud_segments=(
+  cloud-model-recovery
   cloud-project-creation
+  cloud-device-lifecycle
   core-task-flow
   "${cloud_worktree_segments[@]}"
   model-routing
@@ -106,7 +127,7 @@ cloud_segments=(
 # shellcheck disable=SC2054 # Each element is one comma-joined shard.
 cloud_shards=(
   core-task-flow
-  embedded-browser,cloud-worktree-device-restart,cloud-project-creation
+  embedded-browser,cloud-project-creation
   goal-lifecycle,cloud-worktree-archive-restore
   rendering-extensions
   project-automation
@@ -116,10 +137,10 @@ cloud_shards=(
   cloud-worktree-create,automation-lifecycle,browser-multi-tabs
   workspace-tabs,cloud-worktree-capability
   supervisor-lifecycle,conversation-state
-  model-routing
-  plugin-auto-update,plugin-workspace-publication,plugin-account-auth
+  model-routing,cloud-model-recovery
+  plugin-account-auth,cloud-device-lifecycle
   cloud-worktree-queued-cancel
-  workspace-attachments
+  plugin-auto-update,plugin-workspace-publication,workspace-attachments
 )
 # Group checkpoints by observed Core CI duration so every serial shard stays
 # below the desktop suite's critical-path budget while reusing the same
@@ -127,22 +148,23 @@ cloud_shards=(
 # shellcheck disable=SC2054 # Each element is one comma-joined shard.
 core_shards=(
   harness-apps,browser-annotation-design
-  supervisor-lifecycle,remote-device-onboarding
-  temporary-chat,local-file-preview
+  supervisor-lifecycle,remote-device-onboarding,core-task-flow
+  temporary-chat,local-file-preview,conversation-state
   goal-lifecycle,embedded-browser,browser-annotation-core,permission-modes,tray-lifecycle,dsh-owner-capture
-  conversation-state,project-ai-settings,offline-local-project-space,cloud-context-resilience,cloud-space-mention
+  send-key-preference,system-proxy,system-pac,project-ai-settings,offline-local-project-space,cloud-context-resilience,cloud-space-mention
   claude-runtime,workspace-tabs,task-attachments
-  task-status-sync,task-board-association,core-task-flow,change-request-status,context-compaction
-  window-lifecycle,runtime-terminal-convergence,browser-toolbar-actions,browser-annotation-anchors
-  project-automation
-  resilience,environment-panel-scroll
+  task-status-sync,task-board-association,task-board-bulk-actions,change-request-status,context-compaction
+  window-lifecycle,browser-toolbar-actions,browser-annotation-anchors
+  project-automation,collaboration-first-use,collaboration-group-onboarding,collaboration-local-agent-dispatch,collaboration-local-group-coordinate,collaboration-human-round-resume
+  resilience,environment-panel-scroll,collaboration-shared-core,collaboration-local-group-cancellation
   workspace-attachments,automation-lifecycle
-  project-assignment-notification,split-workbench,priority-filter
-  rendering-extensions
-  runtime-task-queue,release-package-startup,component-update,native-window-startup,renderer-storage,external-content-import
-  local-harness,running-conversation-history,native-window-chrome
-  codex-notification-isolation,core-dsh-plugin-management,plugin-development,workbench-mode,executor-stream-recovery,transcript-sync
-  model-routing,computer-use
+  project-assignment-notification,split-workbench,priority-filter,collaboration-issue-comment-mention
+  rendering-extensions,transcript-sync
+  runtime-task-queue,codex-invalid-launch-cwd,release-package-startup,component-update,native-window-startup,renderer-storage,external-content-import
+  local-harness,running-conversation-history,running-plan-history,native-window-chrome,collaboration-issue-comment-notification
+  codex-notification-isolation,core-dsh-plugin-management,plugin-development,workbench-mode,executor-stream-recovery
+  model-routing,fork-provider-preservation,computer-use,codex-account-login,cloud-login-proxy
+  collaboration-remote-agent-dispatch,collaboration-remote-group-coordinate
 )
 
 validate_core_shards() {
@@ -277,6 +299,16 @@ select_cloud_worktree_checkpoints() {
   done
 }
 
+select_collaboration_dispatch_checkpoints() {
+  select_target "core:project-assignment-notification"
+  select_target "core:collaboration-local-agent-dispatch"
+  select_target "core:collaboration-remote-agent-dispatch"
+  select_target "core:collaboration-local-group-coordinate"
+  select_target "core:collaboration-remote-group-coordinate"
+  select_target "core:collaboration-human-round-resume"
+  select_target "core:collaboration-local-group-cancellation"
+}
+
 select_all_desktop_suites() {
   select_target "core:all"
   select_target "plugins:all"
@@ -288,6 +320,27 @@ classify_wework_path() {
   local path="$1"
 
   case "$path" in
+    # System proxy resolution spans Electron, local runtime request routing,
+    # and the proxy settings surface.
+    wework/electron/src/host/system-proxy* | \
+      wework/src/components/settings/ProxySettingsPage* | \
+      wework/src/desktop/systemProxy* | \
+      wework/src/api/local/runtimeModelProxy* | \
+      wework/src/api/local/codexProviderProxy* | \
+      wework/e2e/desktop/scenarios/system-pac.scenario.mjs | \
+      wework/e2e/desktop/scenarios/system-proxy.scenario.mjs)
+      select_target "core:system-proxy"
+      select_target "core:system-pac"
+      return
+      ;;
+    # Cloud device restart and upgrade actions require the managed Nevis fixture.
+    wework/src/components/settings/ConnectionsSettingsPage* | \
+      wework/src/components/settings/DeviceVersionBadge* | \
+      wework/src/features/cloud-devices/* | \
+      wework/e2e/desktop/modules/cloud-device-lifecycle-flow.mjs)
+      select_target "cloud:cloud-device-lifecycle"
+      return
+      ;;
     wework/src/components/plugins/PluginAccountConnections* | \
       wework/src/api/cloud/pluginAccountConnections* | \
       wework/e2e/desktop/modules/dws-account-auth.mjs | \
@@ -302,6 +355,21 @@ classify_wework_path() {
       select_target "cloud:core-task-flow"
       return
       ;;
+    wework/e2e/desktop/scenarios/codex-account-login.scenario.mjs)
+      select_target "core:codex-account-login"
+      return
+      ;;
+
+    # Desktop sign-in travels through the operating system proxy, so the main
+    # process and the renderer must share one network path.
+    wework/electron/src/host/cloud-http* | \
+      wework/electron/src/host/cloud-credential-service* | \
+      wework/e2e/desktop/modules/cloud-login-proxy-fixtures.mjs | \
+      wework/e2e/desktop/scenarios/cloud-login-proxy.scenario.mjs)
+      select_target "core:cloud-login-proxy"
+      return
+      ;;
+
     # Documentation does not change the packaged desktop application.
     wework/*.md)
       return
@@ -411,12 +479,35 @@ classify_wework_path() {
       return
       ;;
 
+    wework/src/api/hybrid/cloudModelCatalog* | \
+      wework/e2e/desktop/modules/cloud-model-recovery.mjs | \
+      wework/e2e/desktop/scenarios/cloud-model-recovery.scenario.mjs)
+      select_target "cloud:cloud-model-recovery"
+      return
+      ;;
+
+    # The cloud suite covers VNC-related desktop changes.
+    wework/src/components/vnc/* | \
+      wework/src/pages/DeviceDesktopPage* | \
+      wework/src/pages/deviceDesktopRoute.ts)
+      select_target "cloud:all"
+      return
+      ;;
+
     # Cloud execution has a separate backend/executor-backed desktop suite.
     wework/src/api/cloud/* | \
       wework/src/features/cloud-connection/* | \
       wework/src/lib/cloud-authorization-window* | \
       wework/src/extensions/cloud-desktop*)
       select_target "cloud:all"
+      return
+      ;;
+
+    # Native tray placement must survive process exit on macOS.
+    wework/electron/src/host/tray* | \
+      wework/e2e/desktop/scenarios/tray-*)
+      select_target "core:tray-lifecycle"
+      macos_inspector_e2e=true
       return
       ;;
 
@@ -450,8 +541,68 @@ classify_wework_path() {
       select_target "cloud:all"
       return
       ;;
+    wework/e2e/desktop/scenarios/project-assignment-notification.scenario.mjs)
+      select_target "core:project-assignment-notification"
+      return
+      ;;
     wework/e2e/desktop/scenarios/cloud-space-mention.scenario.mjs)
       select_target "core:cloud-space-mention"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-shared-core.scenario.mjs)
+      select_target "core:collaboration-shared-core"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-first-use.scenario.mjs)
+      select_target "core:collaboration-first-use"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-group-onboarding.scenario.mjs)
+      select_target "core:collaboration-group-onboarding"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-local-agent-dispatch.scenario.mjs)
+      select_target "core:collaboration-local-agent-dispatch"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-remote-agent-dispatch.scenario.mjs)
+      select_target "core:collaboration-remote-agent-dispatch"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-local-group-coordinate.scenario.mjs)
+      select_target "core:collaboration-local-group-coordinate"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-remote-group-coordinate.scenario.mjs)
+      select_target "core:collaboration-remote-group-coordinate"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-human-round-resume.scenario.mjs)
+      select_target "core:collaboration-human-round-resume"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-local-group-cancellation.scenario.mjs)
+      select_target "core:collaboration-local-group-cancellation"
+      return
+      ;;
+    wework/src/components/layout/DesktopWorkbenchLayout.tsx)
+      select_all_desktop_suites
+      return
+      ;;
+    # Issue comment/reply mention wiring lives in the shared composers and in
+    # the Wework collaboration render path.
+    wework/e2e/desktop/scenarios/collaboration-issue-comment-mention.scenario.mjs)
+      select_target "core:collaboration-issue-comment-mention"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/collaboration-issue-comment-notification.scenario.mjs)
+      select_target "core:collaboration-issue-comment-notification"
+      return
+      ;;
+    wework/src/features/todo/TaskBoardView* | \
+      wework/src/features/workbench/runtimeTaskArchive* | \
+      wework/e2e/desktop/scenarios/task-board-bulk-actions.scenario.mjs)
+      select_target "core:task-board-bulk-actions"
       return
       ;;
     wework/src/features/todo/ProjectAutomation* | \
@@ -475,6 +626,15 @@ classify_wework_path() {
       wework/src/features/todo/WorkItemComposerGuide*)
       select_target "core:task-status-sync"
       select_target "core:task-board-association"
+      if [[ "$path" == wework/src/api/local/localDelivery* ]]; then
+        select_target "core:collaboration-human-round-resume"
+        select_target "core:collaboration-local-group-coordinate"
+        select_target "core:task-board-bulk-actions"
+      fi
+      if [[ "$path" == wework/src/features/todo/CloudTodoWorkspace* || \
+        "$path" == wework/src/features/todo/WorkItemComposerGuide* ]]; then
+        select_target "core:collaboration-first-use"
+      fi
       if [[ "$path" == wework/src/components/layout/useWorkbenchCloudProjectContext* ]]; then
         select_target "core:cloud-context-resilience"
       fi
@@ -483,6 +643,9 @@ classify_wework_path() {
     wework/src/features/workbench/projectTaskTracking* | \
       wework/src/features/workbench/workbenchContextTypes*)
       select_target "core:task-status-sync"
+      if [[ "$path" == wework/src/features/workbench/workbenchContextTypes* ]]; then
+        select_target "core:send-key-preference"
+      fi
       return
       ;;
     # The main sidebar also owns project creation, chats, and attachments.
@@ -518,9 +681,13 @@ classify_wework_path() {
         "$path" == wework/src/features/workbench/WorkbenchProvider* ]]; then
         select_target "core:project-ai-settings"
       fi
+      if [[ "$path" == wework/src/features/workbench/WorkbenchProvider* ]]; then
+        select_target "core:send-key-preference"
+      fi
       if [[ "$path" == wework/src/features/workbench/useWorkbenchRuntimeTasks* ]]; then
         select_target "core:runtime-task-queue"
         select_target "core:task-status-sync"
+        select_target "core:task-board-bulk-actions"
       fi
       return
       ;;
@@ -682,12 +849,20 @@ classify_wework_path() {
       select_target "core:runtime-task-queue"
       return
       ;;
+    wework/e2e/desktop/scenarios/codex-invalid-launch-cwd.scenario.mjs)
+      select_target "core:codex-invalid-launch-cwd"
+      return
+      ;;
     wework/e2e/desktop/scenarios/codex-notification-isolation.scenario.mjs)
       select_target "core:codex-notification-isolation"
       return
       ;;
     wework/e2e/desktop/scenarios/executor-stream-recovery.scenario.mjs)
       select_target "core:executor-stream-recovery"
+      return
+      ;;
+    wework/e2e/desktop/scenarios/send-key-preference.scenario.mjs)
+      select_target "core:send-key-preference"
       return
       ;;
     wework/dsh/transcript-sync/* | \
@@ -699,7 +874,7 @@ classify_wework_path() {
       ;;
 
     # Git hosting preferences and explicit device synchronization share one
-    # independently bootstrapped real-Tauri checkpoint.
+    # independently bootstrapped desktop checkpoint.
     wework/src/api/devices* | \
       wework/src/components/settings/GitHostingSettingsPage* | \
       wework/src/types/gitCredentials.ts | \
@@ -741,6 +916,51 @@ classify_path() {
   local path="$1"
 
   case "$path" in
+    sdk/plugin-creator/* | sdk/plugin-auth/* | executor/src/local/plugin_creator.rs | \
+      wework/src/components/plugins/PluginCreateWorkspace* | \
+      wework/e2e/desktop/modules/plugin-flows.mjs)
+      select_target "plugins:plugin-marketplace-lifecycle"
+      select_target "cloud:plugin-workspace-publication"
+      ;;
+    backend/app/schemas/issue_workflow.py | \
+      backend/app/schemas/project_chat.py | \
+      backend/app/schemas/runtime_work.py | \
+      backend/app/services/cloud_projects/service.py | \
+      backend/app/services/issue_execution_configuration.py | \
+      backend/app/services/loop_item_executions/* | \
+      backend/app/api/endpoints/issue_dispatches.py | \
+      backend/app/schemas/issue_dispatch.py | \
+      backend/app/services/issue_dispatch*.py | \
+      backend/tests/api/test_issue_dispatches_api.py | \
+      backend/tests/services/test_issue_dispatch*.py | \
+      backend/app/services/project_automation_* | \
+      backend/app/services/project_automations.py | \
+      backend/app/services/project_chat/* | \
+      backend/app/services/project_workflow_projection.py | \
+      backend/app/services/runtime_work_service.py | \
+      backend/tests/api/test_cloud_projects_api.py | \
+      backend/tests/schemas/test_issue_workflow.py | \
+      backend/tests/services/test_coordinator_configuration.py | \
+      backend/tests/services/test_loop_item_executions.py | \
+      backend/tests/services/test_project_automations.py | \
+      backend/tests/services/test_project_chat_service.py | \
+      backend/tests/services/test_project_workflow_projection.py | \
+      backend/tests/services/test_runtime_work_service.py | \
+      executor/src/agents/claude_code.rs | \
+      executor/src/agents/mod.rs | \
+      executor/src/agents/runtime_capabilities.rs | \
+      executor/src/runtime_work/events.rs | \
+      executor/src/runtime_work/handler.rs | \
+      executor/src/runtime_work/handler/claude_turns.rs | \
+      executor/src/runtime_work/util.rs | \
+      executor/src/services/skill_deployer.rs | \
+      executor/src/task_runtime/model.rs | \
+      executor/src/task_runtime/store.rs)
+      select_collaboration_dispatch_checkpoints
+      ;;
+  esac
+
+  case "$path" in
     sdk/plugin-auth/* | sdk/plugin-auth-go/* | sdk/dws-auth/* | executor/src/plugin_account_auth/* | \
       executor/tests/plugin_account_auth_contract.rs | \
       backend/app/services/plugin_account* | backend/app/services/plugin_auth* | \
@@ -748,6 +968,22 @@ classify_path() {
       backend/app/schemas/plugin_account_auth.py | backend/app/api/ws/plugin_auth_broker.py | \
       backend/app/api/endpoints/plugin_connections.py)
       select_target "cloud:plugin-account-auth"
+      ;;
+    executor/src/runtime_work/codex_transcript_page.rs)
+      select_target "core:transcript-sync"
+      select_target "core:environment-panel-scroll"
+      ;;
+    backend/alembic/versions/*wework_transcript* | \
+      backend/app/api/endpoints/wework_transcripts.py | \
+      backend/app/core/wework_transcript_encryption.py | \
+      backend/app/models/wework_transcript.py | \
+      backend/app/schemas/wework_transcript.py | \
+      backend/app/services/wework_transcript_* | \
+      backend/tests/api/endpoints/test_wework_transcripts_api.py | \
+      backend/tests/models/test_wework_transcript_schema.py | \
+      executor/src/runtime_work/native_transcript.rs | \
+      executor/src/runtime_work/handler/transcript_sync.rs)
+      select_target "core:transcript-sync"
       ;;
     backend/app/api/ws/terminal_namespace.py | \
       backend/app/services/device/terminal_protocol.py | \
@@ -777,7 +1013,33 @@ classify_path() {
       docker/device/Dockerfile)
       select_cloud_worktree_checkpoints
       ;;
+    packages/collaboration/src/platform/WorkspaceResourceConfiguration* | \
+      packages/collaboration/src/project-agent-config/* | \
+      packages/collaboration/src/http-api/createSharedWorkspaceHttpApi* | \
+      packages/collaboration/src/ports/SharedWorkspaceApi* | \
+      packages/collaboration/src/dto-mappers/workspaceDtoMappers*)
+      select_target "core:remote-device-onboarding"
+      select_target "core:collaboration-shared-core"
+      select_target "core:collaboration-first-use"
+      select_target "core:collaboration-group-onboarding"
+      select_collaboration_dispatch_checkpoints
+      select_target "cloud:cloud-device-lifecycle"
+      ;;
+    packages/collaboration/*)
+      select_target "core:collaboration-shared-core"
+      select_target "core:collaboration-first-use"
+      select_target "core:collaboration-group-onboarding"
+      select_collaboration_dispatch_checkpoints
+      select_target "core:collaboration-issue-comment-mention"
+      select_target "core:collaboration-issue-comment-notification"
+      ;;
     executor/* | packages/chat-core/* | package.json | pnpm-lock.yaml | pnpm-workspace.yaml)
+      select_all_desktop_suites
+      ;;
+    backend-rs/* | backend-rs/** | \
+      wework/e2e/desktop/modules/cloud-environment.mjs | \
+      wework/e2e/desktop/modules/task-flow-main.mjs | \
+      wework/e2e/desktop/support/mysql-helper.py)
       select_all_desktop_suites
       ;;
     .github/workflows/wework-e2e.yml | \

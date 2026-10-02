@@ -3,6 +3,7 @@ import type { CaptureResult, PostHog } from 'posthog-js'
 import {
   ANALYTICS_EVENT_PROPERTY_KEYS,
   ANALYTICS_EVENT_VALUE_CONSTRAINTS,
+  type AnalyticsEvent,
   type AnalyticsEventMap,
   type AnalyticsEventName,
   type CommonTelemetryProperties,
@@ -122,7 +123,7 @@ async function initPostHog(): Promise<void> {
     disable_compression: import.meta.env.VITE_WEWORK_E2E === 'true',
     disableDeviceModel: true,
     disable_session_recording: true,
-    advanced_disable_feature_flags: true,
+    advanced_disable_flags: true,
     opt_out_persistence_by_default: true,
     persistence: 'localStorage',
     person_profiles: 'never',
@@ -318,7 +319,6 @@ async function initialize(): Promise<void> {
   initializing = Promise.allSettled([initPostHog(), initSentry()]).then(() => {
     initialized = true
     initializing = null
-    flushQueuedEvents()
   })
   return initializing
 }
@@ -328,7 +328,14 @@ function flushPendingCaptures(): void {
   if (!posthog || !enabled) return
   const pending = pendingCaptures
   pendingCaptures = []
-  for (const event of pending) posthog.capture(event.name, event.properties)
+  for (const event of pending) {
+    try {
+      posthog.capture(event.name, event.properties)
+    } catch {
+      // Telemetry SDK failures must not surface as unhandled application errors
+      // or prevent later events in the same batch from being attempted.
+    }
+  }
 }
 
 // Defers the synchronous capture pipeline (before_send sanitization, event
@@ -374,6 +381,8 @@ export async function installTelemetry(initiallyEnabled: boolean): Promise<void>
   setTelemetryEnabledFlag(initiallyEnabled)
   if (!enabled) return
   await initialize()
+  posthog?.opt_in_capturing()
+  flushQueuedEvents()
 }
 
 export function track<EventName extends AnalyticsEventName>(
@@ -414,6 +423,10 @@ export function track<EventName extends AnalyticsEventName>(
   void initialize()
 }
 
+export function trackEvent(event: AnalyticsEvent): void {
+  track(event.name, event.properties)
+}
+
 export function captureError(error: unknown): void {
   if (!enabled) return
   if (sentry) {
@@ -435,6 +448,7 @@ async function applyTelemetryEnabled(nextEnabled: boolean): Promise<void> {
   if (nextEnabled) {
     await initialize()
     posthog?.opt_in_capturing()
+    flushQueuedEvents()
     track('telemetry_preference_changed', { enabled: true })
     return
   }
