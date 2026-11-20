@@ -6,6 +6,7 @@
 
 import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, Loader2, Users } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -38,6 +39,10 @@ interface CodeWikiSourceFieldsProps {
 }
 
 const SOURCE_TYPES: CodeWikiSourceType[] = ['github', 'gitlab', 'gitea']
+
+function isSourceType(value: unknown): value is CodeWikiSourceType {
+  return SOURCE_TYPES.some(type => type === value)
+}
 
 /**
  * Infer which platform hosts a URL, or `null` when it cannot be told.
@@ -77,7 +82,11 @@ export function useCodeWikiRepository(draft: CodeWikiSourceDraft) {
   const type =
     draft.mode === 'url'
       ? (inferredType ?? draft.urlSourceType)
-      : ((draft.repo?.type as CodeWikiSourceType | undefined) ?? 'github')
+      : draft.repo?.type == null
+        ? (inferSourceType(url, user?.git_info) ?? 'github')
+        : isSourceType(draft.repo.type)
+          ? draft.repo.type
+          : null
   const probe = draft.probe
   const resolution = probe?.url === url && probe.type === type ? probe.result : null
   return { url, type, inferredType, resolution }
@@ -97,18 +106,24 @@ export function useCodeWikiRepository(draft: CodeWikiSourceDraft) {
 export function CodeWikiSourceFields({ value, repository, onChange }: CodeWikiSourceFieldsProps) {
   const { t } = useTranslation('knowledge')
   const [resolving, setResolving] = useState(false)
+  const [failedProbe, setFailedProbe] = useState<{ url: string; type: CodeWikiSourceType } | null>(
+    null
+  )
+  const [probeAttempt, setProbeAttempt] = useState(0)
   const { mode, repo, urlInput, urlSourceType } = value
   const { url, type, inferredType, resolution } = repository
+  const probeFailed = failedProbe?.url === url && failedProbe.type === type
 
   // Repository identity is derived from the same draft used to render the inputs.
   // A probe only supplies metadata for that identity.
   useEffect(() => {
-    if (!url || resolution) {
+    if (!url || !type || resolution) {
       setResolving(false)
       return
     }
     let current = true
     setResolving(true)
+    setFailedProbe(null)
 
     const resolve = async () => {
       try {
@@ -117,7 +132,7 @@ export function CodeWikiSourceFields({ value, repository, onChange }: CodeWikiSo
           onChange(draft => ({ ...draft, probe: { url, type, result } }))
         }
       } catch {
-        // Creation checks repository access independently.
+        if (current) setFailedProbe({ url, type })
       } finally {
         if (current) setResolving(false)
       }
@@ -130,7 +145,7 @@ export function CodeWikiSourceFields({ value, repository, onChange }: CodeWikiSo
       current = false
       if (timer !== null) clearTimeout(timer)
     }
-  }, [mode, onChange, resolution, type, url])
+  }, [mode, onChange, probeAttempt, resolution, type, url])
 
   return (
     <>
@@ -203,16 +218,52 @@ export function CodeWikiSourceFields({ value, repository, onChange }: CodeWikiSo
             </div>
           )}
 
-          <SourceStatus resolving={resolving} resolution={resolution} />
+          {url && !type ? (
+            <p role="alert" className="text-sm text-error">
+              {t('codeWiki.create.unsupportedRepositoryProvider')}
+            </p>
+          ) : (
+            <SourceStatus resolving={resolving} resolution={resolution} />
+          )}
+          {probeFailed && (
+            <p role="alert" className="text-sm text-error">
+              {t('codeWiki.create.repositoryProbeFailed')}
+            </p>
+          )}
+          {(probeFailed || resolution?.exists === false) && (
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              data-testid="code-wiki-source-retry"
+              onClick={() => {
+                onChange(draft => ({ ...draft, probe: null }))
+                setProbeAttempt(attempt => attempt + 1)
+              }}
+            >
+              {t('common:actions.retry')}
+            </Button>
+          )}
         </div>
       </SimpleConfigRow>
+    </>
+  )
+}
 
-      <SimpleConfigRow label={t('codeWiki.create.language')}>
-        <Select
-          value={value.language}
-          onValueChange={language => onChange(current => ({ ...current, language }))}
-        >
-          <SelectTrigger className="bg-base" data-testid="code-wiki-language">
+export function CodeWikiLanguageSetting({
+  language,
+  onLanguageChange,
+}: {
+  language?: string
+  onLanguageChange?: (language: string) => void
+}) {
+  const { t } = useTranslation('knowledge')
+
+  return (
+    <SimpleConfigRow label={t('codeWiki.create.language')}>
+      {onLanguageChange ? (
+        <Select value={language} onValueChange={onLanguageChange}>
+          <SelectTrigger className="min-h-11 bg-base" data-testid="code-wiki-language">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -220,8 +271,16 @@ export function CodeWikiSourceFields({ value, repository, onChange }: CodeWikiSo
             <SelectItem value="en">{t('codeWiki.create.languageEn')}</SelectItem>
           </SelectContent>
         </Select>
-      </SimpleConfigRow>
-    </>
+      ) : (
+        <p className="text-sm text-text-primary">
+          {language === 'zh'
+            ? t('codeWiki.create.languageZh')
+            : language === 'en'
+              ? t('codeWiki.create.languageEn')
+              : language || t('codeWiki.create.languageDefault')}
+        </p>
+      )}
+    </SimpleConfigRow>
   )
 }
 
